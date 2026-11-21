@@ -38,7 +38,7 @@ Examples:
 
 Pros:
 
-- already present locally on this machine
+- written locally by the Codex runtime
 - passive and read-only
 - directly relevant to subscription pressure
 - coexists well with the current runtime-status work because it stays inside the provider seam

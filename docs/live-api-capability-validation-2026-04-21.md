@@ -54,7 +54,7 @@ Release-signoff conclusion:
 
 Release-signoff conclusion:
 
-- The local OAuth-backed Kimi exact-quota path is still live and reachable in the current environment.
+- The validation confirmed that Kimi can return provider-exact quota through its OAuth-backed endpoint.
 - The shipped release wording should continue to keep Kimi conditional: provider-exact quota is available when usable OAuth exists, and JiStats should still avoid fabricating local fallback quota when that path is unavailable.
 
 ## Release Outcome

@@ -13,9 +13,8 @@ Fixture archive references:
 
 Release evidence refresh on `2026-04-21`:
 
-- MiniMax live readiness was rerun successfully against the repo-root `jistats.db`, and both Coding Plan and Token Plan returned `validation=valid` / `ready=yes`.
-- Fresh MiniMax live captures also succeeded again on `2026-04-21` for both remains endpoints.
-- A direct Kimi `GET /coding/v1/usages` probe succeeded on `2026-04-21` from the current local OAuth-backed environment.
+- MiniMax validation confirmed credential readiness and usable quota responses for both subscription plans.
+- The OAuth-backed Kimi quota endpoint returned usage and limit fields.
 - A higher-scope credential is still required for an OpenAI API-platform freshness measurement.
 
 ## OpenAI

@@ -5,7 +5,7 @@
 
 ## Decision
 
-**Do not integrate `state_5.sqlite` yet.**
+**Keep recursive discovery for Codex quota rollouts.**
 
 For the current OpenAI subscription augmentation checkpoint, JiStats should continue to treat local rollout files under `%USERPROFILE%\\.codex\\sessions\\**\\rollout-*.jsonl` as the only required source.
 
@@ -13,7 +13,7 @@ For the current OpenAI subscription augmentation checkpoint, JiStats should cont
 
 ## Evidence Reviewed
 
-The current machine-local `threads` table in `%USERPROFILE%\\.codex\\state_5.sqlite` exposes fields such as:
+The Codex `threads` table in `%USERPROFILE%\\.codex\\state_5.sqlite` exposes fields such as:
 
 - `id`
 - `rollout_path`
@@ -34,23 +34,16 @@ It does **not** expose the Codex rate-limit snapshot fields JiStats currently ne
 - `rate_limits.secondary.*`
 - `plan_type`
 
-That means SQLite can only help JiStats discover or deduplicate rollout files. It cannot replace rollout parsing as the provider-truth source.
+For quota snapshots, SQLite provides discovery and deduplication metadata. The quota signals come from the rollouts.
 
-On the current machine-level micro-spike reviewed on `2026-04-18`:
+A local comparison found the same rollouts through both approaches. The small difference in discovery time did not justify adding another dependency.
 
-- `%USERPROFILE%\\.codex\\state_5.sqlite` contained `86` `threads` rows
-- `%USERPROFILE%\\.codex\\sessions\\**\\rollout-*.jsonl` contained `86` rollout files
-- recursive rollout discovery took about `3ms`
-- a direct SQLite `rollout_path` lookup took about `1ms`
-
-That delta is too small to justify taking on a second artifact dependency yet.
-
-## Why It Is Not Worth Adding Yet
+## Why Keep Existing Discovery
 
 - The current parser already supports direct recursive discovery of `rollout-*.jsonl` files.
 - Lane 1 query pressure is still tiny: the repo only needs a first runtime-ingestion seam, not a high-scale index.
 - Adding SQLite lookup now would increase moving parts without adding new provider truth.
-- The current active runtime/UI work does not need a second discovery layer yet.
+- JiStats uses the SQLite database separately for local usage attribution and continues to discover rollouts by walking the session directories.
 
 ## When To Reopen This
 

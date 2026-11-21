@@ -22,7 +22,7 @@ The first parser must explicitly avoid raw conversation content, tool inputs and
 
 ## Local Input Inventory
 
-Observed top-level `~/.kimi` artifacts on this machine:
+The top level of `~/.kimi` can contain the following files and directories.
 
 - `config.toml`
 - `credentials/`
@@ -64,7 +64,7 @@ Approved use:
 - configured base URLs
 - feature and environment-shape checks
 
-Observed safe fields on this machine include:
+The following fields provide configuration or session metadata.
 
 - `default_model`
 - provider mapping under `[models.*]`
@@ -90,7 +90,7 @@ Approved use:
 - working-directory linkage
 - last-session linkage
 
-Observed safe fields on this machine include:
+The following fields provide configuration or session metadata.
 
 - top-level `work_dirs`
 - per-entry `last_session_id`
@@ -110,7 +110,7 @@ Approved use:
 - plan-mode state
 - approval-mode metadata
 
-Observed stable fields on this machine include:
+The following fields were observed consistently.
 
 - `version`
 - `plan_mode`
@@ -118,7 +118,7 @@ Observed stable fields on this machine include:
 - `dynamic_subagents`
 - `additional_dirs`
 
-Observed nested `approval` fields on this machine include:
+The nested `approval` object can contain these fields.
 
 - `yolo`
 - `auto_approve_actions`
@@ -143,7 +143,7 @@ Approved use:
 - task lifecycle timing
 - task outcome status
 
-Observed stable fields on this machine include:
+The following fields were observed consistently.
 
 - `status`
 - `started_at`
@@ -166,7 +166,7 @@ Approved use:
 - notification category and severity
 - terminal task-state summaries
 
-Observed stable fields on this machine include:
+The following fields were observed consistently.
 
 - `category`
 - `type`
@@ -195,7 +195,7 @@ Approved use:
 
 - delivery or acknowledgement timing/status only if later needed for UI polish or internal diagnostics
 
-Observed stable fields on this machine include per-sink status values such as:
+The observed per-sink delivery fields are listed below.
 
 - `status`
 
@@ -213,11 +213,11 @@ Note:
 
 These files are the clearest observed source of token-like counters, but they are also privacy-sensitive.
 
-Observed useful rows on this machine include:
+The usage counters appear in this row type.
 
 - `_usage` rows with `token_count`
 
-Observed risky content on this machine also includes:
+The same files can contain sensitive data.
 
 - `content`
 - `think`
@@ -259,7 +259,7 @@ These sources are either privacy-sensitive, too unstable, or both.
 
 ## Why `wire.jsonl` Is Out Of Scope For The First Parser
 
-`wire.jsonl` clearly contains potentially useful counters on this machine, including `StatusUpdate` records with:
+`wire.jsonl` can carry context and usage counters in `StatusUpdate` records.
 
 - `context_usage`
 - `context_tokens`
