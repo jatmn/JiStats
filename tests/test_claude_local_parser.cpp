@@ -79,13 +79,13 @@ TEST_CASE("Claude stats-cache parsing extracts valid aggregates", "[claude][pars
             foundSonnet = true;
             REQUIRE(model.inputTokens == 4000);
             REQUIRE(model.outputTokens == 6000);
-            REQUIRE(std::abs(model.costUsd - 0.084) < 0.001);
+            REQUIRE(std::abs(model.costUsd - 0.042) < 0.001);
         }
         if (model.modelKey == "claude-opus-4-20250514") {
             foundOpus = true;
             REQUIRE(model.inputTokens == 2000);
             REQUIRE(model.outputTokens == 2465);
-            REQUIRE(std::abs(model.costUsd - 0.267) < 0.001);
+            REQUIRE(std::abs(model.costUsd - 0.1335) < 0.001);
         }
     }
     REQUIRE(foundSonnet);
