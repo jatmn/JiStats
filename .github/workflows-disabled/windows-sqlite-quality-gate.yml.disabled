@@ -1,0 +1,21 @@
+name: windows-sqlite-quality-gate-disabled
+
+# Temporarily disabled. Keep this file outside .github/workflows/ so GitHub Actions
+# does not auto-discover or run it.
+on:
+  workflow_dispatch:
+
+jobs:
+  sqlite-quality-gate:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Run SQLite quality gate
+        shell: powershell
+        run: .\scripts\run_sqlite_quality_gate.ps1

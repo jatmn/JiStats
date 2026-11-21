@@ -1,0 +1,9 @@
+{
+  "status": "failed",
+  "started_at": "2026-04-20T10:03:00Z",
+  "updated_at": "2026-04-20T10:05:00Z",
+  "finished_at": "2026-04-20T10:05:30Z",
+  "exit_code": 124,
+  "interrupted": false,
+  "timed_out": true
+}

@@ -1,0 +1,17 @@
+{
+  "_source": "Public sample shape from the official openai/codex app-server README, accessed 2026-04-18",
+  "_notes": [
+    "Illustrative ChatGPT-linked Codex rate-limit response shape.",
+    "This is not a live captured user artifact.",
+    "Use as a future fixture/parsing target, not as proof of a specific user's current limits."
+  ],
+  "rateLimits": {
+    "primary": {
+      "usedPercent": 25,
+      "windowDurationMins": 15,
+      "resetsAt": 1730947200
+    },
+    "secondary": null,
+    "rateLimitReachedType": null
+  }
+}

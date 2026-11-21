@@ -1,0 +1,13 @@
+{
+  "category": "task",
+  "type": "task.completed",
+  "source_kind": "background_task",
+  "severity": "success",
+  "created_at": "2026-04-20T10:04:05Z",
+  "payload": {
+    "status": "completed",
+    "exit_code": 0,
+    "interrupted": false,
+    "timed_out": false
+  }
+}

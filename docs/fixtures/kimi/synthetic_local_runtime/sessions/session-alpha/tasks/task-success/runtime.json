@@ -1,0 +1,9 @@
+{
+  "status": "completed",
+  "started_at": "2026-04-20T10:01:00Z",
+  "updated_at": "2026-04-20T10:03:00Z",
+  "finished_at": "2026-04-20T10:04:00Z",
+  "exit_code": 0,
+  "interrupted": false,
+  "timed_out": false
+}

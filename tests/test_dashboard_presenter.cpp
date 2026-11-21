@@ -1,0 +1,1116 @@
+#define JISTATS_ENABLE_TEST_HOOKS 1
+
+#include <catch_amalgamated.hpp>
+
+#include <atomic>
+#include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <thread>
+
+#include "gui/AnalysisPresenter.hpp"
+#include "gui/DashboardPresenter.hpp"
+
+using namespace JiStats;
+
+namespace {
+
+const std::filesystem::path kOpenAIExportFixturePath =
+    std::filesystem::path("docs/fixtures/openai/chatgpt-export-redacted/conversations.json");
+
+bool waitForCondition(const std::function<bool()>& predicate,
+                      std::chrono::milliseconds timeout = std::chrono::milliseconds(1500)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+}
+
+std::optional<DashboardSummaryItem> findSummary(
+    const std::vector<DashboardSummaryItem>& items,
+    const std::string& label) {
+    const auto it = std::find_if(items.begin(), items.end(), [&label](const DashboardSummaryItem& item) {
+        return item.label == label;
+    });
+    if (it == items.end()) {
+        return std::nullopt;
+    }
+    return *it;
+}
+
+int rectCenterX(const std::array<int, 4>& rect) {
+    return rect[0] + ((rect[2] - rect[0]) / 2);
+}
+
+int rectCenterY(const std::array<int, 4>& rect) {
+    return rect[1] + ((rect[3] - rect[1]) / 2);
+}
+
+DashboardViewModel makeQuotaViewModel() {
+    DashboardViewModel model;
+    model.appVersion = "1.2.3";
+    model.lastUpdateTime = "2026-04-18 18:00:00 UTC";
+    model.runtimeState = RuntimeState::Stale;
+    model.preferences.startupEnabled = true;
+    model.preferences.scheduledExportEnabled = true;
+    model.preferences.scheduledExportIntervalMinutes = 60;
+    model.preferences.scheduledExportPath = "C:\\Reports\\JiStats";
+    model.recoveryStatusSummary = "Backfilled windows in 1 provider";
+    model.recoveryStatusDetail =
+        "Current shared sync state: Stale. Backfilled windows are currently visible for OpenAI. "
+        "Last recovery outcome: imported for OpenAI at 2026-04-18 18:00:00 UTC.";
+    model.scheduledExportStatusSummary = "Every 60 mins";
+    model.scheduledExportStatusDetail =
+        "Scheduled HTML export is enabled every 60 minutes. Output folder: C:\\Reports\\JiStats. "
+        "Last successful run: 2026-04-18 17:45:00 UTC.";
+    model.scheduledExportLastRunTime = "2026-04-18 17:45:00 UTC";
+
+    ProviderStatus openai;
+    openai.providerKey = "openai";
+    openai.displayName = "OpenAI";
+    openai.accountId = "openai.primary";
+    openai.isEnabled = true;
+    openai.state = ProviderState::Live;
+    openai.lastSyncTime = "2026-04-18T18:00:00Z";
+    QuotaInfo openaiQuota;
+    openaiQuota.planName = "Codex Local Pressure";
+    openaiQuota.windowType = "interval";
+    openaiQuota.used = 25;
+    openaiQuota.limit = 100;
+    openaiQuota.remaining = 75;
+    openaiQuota.remainingPercentage = 75.0;
+    openaiQuota.windowResetAt = 1776592800; // 2026-04-19 10:00 UTC
+    openaiQuota.secondaryWindowType = "weekly";
+    openaiQuota.secondaryRemainingPercentage = 62.0;
+    openaiQuota.secondaryWindowResetAt = 1776816000; // 2026-04-22 00:00 UTC
+    openaiQuota.providerSurface = "openai_subscription_codex_local";
+    openai.quotas.push_back(openaiQuota);
+
+    ProviderStatus minimax;
+    minimax.providerKey = "minimax";
+    minimax.displayName = "MiniMax";
+    minimax.accountId = "minimax.subscription";
+    minimax.isEnabled = true;
+    minimax.state = ProviderState::Live;
+    minimax.lastSyncTime = "2026-04-18T18:00:00Z";
+    QuotaInfo minimaxQuota;
+    minimaxQuota.planName = "Coding Plan Remaining";
+    minimaxQuota.windowType = "interval";
+    minimaxQuota.used = 800;
+    minimaxQuota.limit = 1000;
+    minimaxQuota.remaining = 200;
+    minimaxQuota.remainingPercentage = 20.0;
+    minimaxQuota.windowResetAt = 1776592800;
+    minimaxQuota.providerSurface = "minimax_subscription_coding_plan";
+    minimax.quotas.push_back(minimaxQuota);
+
+    model.providers = {openai, minimax};
+    return model;
+}
+
+DashboardViewModel makeMultiAccountQuotaViewModel() {
+    DashboardViewModel model;
+    model.appVersion = "1.2.3";
+    model.lastUpdateTime = "2026-04-18 18:00:00 UTC";
+    model.runtimeState = RuntimeState::Current;
+
+    ProviderStatus openaiPrimary;
+    openaiPrimary.providerKey = "openai";
+    openaiPrimary.displayName = "OpenAI";
+    openaiPrimary.accountId = "acct-openai-primary";
+    openaiPrimary.isEnabled = true;
+    openaiPrimary.state = ProviderState::Live;
+    openaiPrimary.lastSyncTime = "2026-04-18T18:00:00Z";
+    QuotaInfo primaryQuota;
+    primaryQuota.planName = "Codex Local Pressure";
+    primaryQuota.windowType = "interval";
+    primaryQuota.used = 25;
+    primaryQuota.limit = 100;
+    primaryQuota.remaining = 75;
+    primaryQuota.remainingPercentage = 75.0;
+    primaryQuota.providerSurface = "openai_subscription_codex_local";
+    openaiPrimary.quotas.push_back(primaryQuota);
+
+    ProviderStatus openaiSecondary = openaiPrimary;
+    openaiSecondary.accountId = "acct-openai-secondary";
+    openaiSecondary.lastSyncTime = "2026-04-18T18:10:00Z";
+    openaiSecondary.quotas.front().used = 80;
+    openaiSecondary.quotas.front().remaining = 20;
+    openaiSecondary.quotas.front().remainingPercentage = 20.0;
+
+    ProviderStatus minimax;
+    minimax.providerKey = "minimax";
+    minimax.displayName = "MiniMax";
+    minimax.accountId = "acct-minimax";
+    minimax.isEnabled = true;
+    minimax.state = ProviderState::Live;
+    minimax.lastSyncTime = "2026-04-18T18:00:00Z";
+    QuotaInfo minimaxQuota;
+    minimaxQuota.planName = "Coding Plan Remaining";
+    minimaxQuota.windowType = "interval";
+    minimaxQuota.used = 300;
+    minimaxQuota.limit = 1000;
+    minimaxQuota.remaining = 700;
+    minimaxQuota.remainingPercentage = 70.0;
+    minimaxQuota.providerSurface = "minimax_subscription_coding_plan";
+    minimax.quotas.push_back(minimaxQuota);
+
+    model.providers = {openaiPrimary, openaiSecondary, minimax};
+    return model;
+}
+
+DashboardViewModel makeKimiLocalRuntimeViewModel() {
+    DashboardViewModel model;
+    model.appVersion = "1.2.3";
+    model.lastUpdateTime = "2026-04-20 18:00:00 UTC";
+    model.runtimeState = RuntimeState::Current;
+    model.preferences.kimiCodeEnabled = true;
+
+    ProviderStatus kimi;
+    kimi.providerKey = "kimi";
+    kimi.displayName = "Kimi Code";
+    kimi.accountId = "kimi.runtime";
+    kimi.isEnabled = true;
+    kimi.state = ProviderState::Sample;
+    kimi.lastSyncTime = "2026-04-20T18:00:00Z";
+    model.providers = {kimi};
+
+    DashboardSummaryItem localSummary;
+    localSummary.label = "Last 30 Minutes";
+    localSummary.detail = "7 sessions, 18m active";
+    localSummary.percentage = 60;
+    localSummary.badge = "Local";
+    model.runtimeSummaries.push_back(localSummary);
+    return model;
+}
+
+DashboardViewModel makeKimiSubscriptionViewModel() {
+    DashboardViewModel model;
+    model.appVersion = "1.2.3";
+    model.lastUpdateTime = "2026-04-20 18:00:00 UTC";
+    model.runtimeState = RuntimeState::Current;
+    model.preferences.kimiCodeEnabled = true;
+
+    ProviderStatus kimi;
+    kimi.providerKey = "kimi";
+    kimi.displayName = "Kimi Code";
+    kimi.accountId = "kimi.subscription";
+    kimi.isEnabled = true;
+    kimi.state = ProviderState::Live;
+    kimi.lastSyncTime = "2026-04-20T18:00:00Z";
+
+    QuotaInfo fiveHourQuota;
+    fiveHourQuota.planName = "Subscription";
+    fiveHourQuota.windowType = "interval";
+    fiveHourQuota.used = 64;
+    fiveHourQuota.limit = 100;
+    fiveHourQuota.remaining = 36;
+    fiveHourQuota.usedPercentage = 64.0;
+    fiveHourQuota.remainingPercentage = 36.0;
+    fiveHourQuota.secondaryWindowType = "weekly";
+    fiveHourQuota.secondaryRemainingPercentage = 72.0;
+    fiveHourQuota.providerSurface = "kimi_subscription_api";
+    kimi.quotas.push_back(fiveHourQuota);
+
+    QuotaInfo weeklyQuota = fiveHourQuota;
+    weeklyQuota.windowType = "weekly";
+    weeklyQuota.used = 28;
+    weeklyQuota.remaining = 72;
+    weeklyQuota.usedPercentage = 28.0;
+    weeklyQuota.remainingPercentage = 72.0;
+    weeklyQuota.secondaryWindowType.clear();
+    weeklyQuota.secondaryRemainingPercentage = -1.0;
+    kimi.quotas.push_back(weeklyQuota);
+
+    model.providers = {kimi};
+    return model;
+}
+
+} // namespace
+
+TEST_CASE("DashboardPresenter normalizes dashboard shell labels and quota headers", "[dashboard_presenter]") {
+    DashboardPresenter presenter;
+    presenter.updateViewModel(makeQuotaViewModel());
+
+    const auto summaries = presenter.getUsageProgressSummariesForTesting();
+    const auto openaiSummary = findSummary(summaries, "OpenAI Subscription");
+    REQUIRE(openaiSummary.has_value());
+    CHECK(openaiSummary->percentage == 75);
+    CHECK(openaiSummary->secondaryPercentage == 62);
+    CHECK(openaiSummary->detail.find("75% remaining") != std::string::npos);
+    CHECK(openaiSummary->detail.find("75 of 100 left") == std::string::npos);
+    CHECK(openaiSummary->detail.find("25 used") == std::string::npos);
+    CHECK(openaiSummary->detail.find("Weekly 62% remaining") != std::string::npos);
+    CHECK(openaiSummary->detail.find("resets ") != std::string::npos);
+    CHECK(openaiSummary->detail.find("2026-04-19 10:00 UTC") == std::string::npos);
+
+    const auto minimaxSummary = findSummary(summaries, "MiniMax - Coding Plan");
+    REQUIRE(minimaxSummary.has_value());
+    CHECK(minimaxSummary->detail.find("20% remaining") != std::string::npos);
+    CHECK(minimaxSummary->detail.find("200 of 1,000 prompts left") != std::string::npos);
+    CHECK(minimaxSummary->detail.find("800 used") == std::string::npos);
+    CHECK(minimaxSummary->detail.find("resets ") != std::string::npos);
+    CHECK(minimaxSummary->detail.find("2026-04-19 10:00 UTC") == std::string::npos);
+
+    const auto fieldLabels = presenter.getApplicationFieldLabelsForTesting();
+    CHECK(std::find(fieldLabels.begin(), fieldLabels.end(), "Version") == fieldLabels.end());
+    CHECK(std::find(fieldLabels.begin(), fieldLabels.end(), "Connection") != fieldLabels.end());
+    CHECK(std::find(fieldLabels.begin(), fieldLabels.end(), "Recovery") != fieldLabels.end());
+    CHECK(std::find(fieldLabels.begin(), fieldLabels.end(), "Scheduled Export") != fieldLabels.end());
+    CHECK(std::find(fieldLabels.begin(), fieldLabels.end(), "Start With Windows") == fieldLabels.end());
+    CHECK(std::find(fieldLabels.begin(), fieldLabels.end(), "Taskbar Overlay") == fieldLabels.end());
+
+    const auto fieldValues = presenter.getApplicationFieldValuesForTesting();
+    REQUIRE(fieldValues.size() == 4);
+    CHECK(fieldValues[1] == "Backfilled windows in 1 provider");
+    CHECK(fieldValues[2] == "Every 60 mins");
+
+    const std::vector<std::string> expectedUsedValues = {
+        "25%",
+        "80%"
+    };
+    CHECK(presenter.getProviderQuotaUsedValuesForTesting() == expectedUsedValues);
+    CHECK(presenter.getProviderQuotaLimitValuesForTesting() == std::vector<std::string>{"100%", "1,000"});
+    CHECK(presenter.getProviderQuotaRemainingValuesForTesting() == std::vector<std::string>{"75%", "200"});
+    const auto lastSyncValues = presenter.getProviderQuotaLastSyncValuesForTesting();
+    REQUIRE(lastSyncValues.size() == 2);
+    CHECK(lastSyncValues[0].find("(Local)") != std::string::npos);
+    CHECK(lastSyncValues[1].find("(API)") != std::string::npos);
+
+    const std::vector<std::string> expectedHeaders = {
+        "Provider",
+        "Status",
+        "Quota Surface",
+        "Reset Window",
+        "Used",
+        "Quota Limit",
+        "Remaining",
+        "Confidence",
+        "Last Sync"
+    };
+    CHECK(presenter.getProviderQuotaColumnHeadersForTesting() == expectedHeaders);
+
+    const std::string helpText = presenter.getConnectionHelpTextForTesting();
+    CHECK(helpText.find("Current: provider data is fresh") != std::string::npos);
+    CHECK(helpText.find("Catching Up: JiStats is refreshing") != std::string::npos);
+    CHECK(helpText.find("Stale: the last successful provider snapshot") != std::string::npos);
+    CHECK(helpText.find("Current state: Stale") != std::string::npos);
+}
+
+TEST_CASE("DashboardPresenter syncs scheduled export controls from the view model", "[dashboard_presenter][settings]") {
+    DashboardPresenter presenter;
+    DashboardViewModel model = makeQuotaViewModel();
+
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(model);
+
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences);
+    }));
+
+    CHECK(presenter.isScheduledExportEnabledForTesting());
+    CHECK(presenter.getScheduledExportIntervalMinutesForTesting() == 60);
+    CHECK(presenter.getScheduledExportPathForTesting() == "C:\\Reports\\JiStats");
+    CHECK_FALSE(presenter.getScheduledExportLastRunForTesting().empty());
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter runs MiniMax credential actions asynchronously", "[dashboard_presenter][settings][minimax]") {
+    DashboardPresenter presenter;
+    DashboardViewModel model = makeQuotaViewModel();
+    std::atomic<bool> callbackInvoked{false};
+
+    presenter.setMiniMaxCredentialActionCallback([&](const DashboardMiniMaxCredentialRequest& request) {
+        callbackInvoked.store(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        return DashboardMiniMaxCredentialResult{
+            true,
+            request.planKey,
+            "Stored MiniMax credential in the background."
+        };
+    });
+
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(model);
+
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences);
+    }));
+
+    DashboardMiniMaxCredentialRequest request;
+    request.action = DashboardMiniMaxCredentialAction::Save;
+    request.planKey = "coding_plan";
+    request.accountDisplayName = "Async Coding Plan";
+    request.secret = "sk-cp-async";
+
+    const auto startedAt = std::chrono::steady_clock::now();
+    REQUIRE(presenter.submitMiniMaxCredentialActionForTesting(request));
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startedAt);
+
+    CHECK(elapsed < std::chrono::milliseconds(150));
+    CHECK(presenter.getMiniMaxSecretFieldTextForTesting() == "sk-cp-async");
+    REQUIRE(waitForCondition([&]() {
+        return callbackInvoked.load();
+    }));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getStatusTextForTesting().find("background") != std::string::npos;
+    }));
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter keeps quota bars compact and handles native close safely", "[dashboard_presenter]") {
+    DashboardPresenter presenter;
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(makeQuotaViewModel());
+
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getUsageProgressBarWidthForTesting() > 0;
+    }));
+    CHECK(presenter.getUsageProgressBarWidthForTesting() <= 360);
+
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences);
+    }));
+    const std::vector<std::string> expectedPreferenceTabs = {
+        "General",
+        "OpenAI",
+        "MiniMax",
+        "Claude Code",
+        "Kilo Code",
+        "Kimi Code"
+    };
+    CHECK(presenter.getPreferencesTabLabelsForTesting() == expectedPreferenceTabs);
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::HelpAbout));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.isShellDialogOpenForTesting(DashboardShellDialog::About);
+    }));
+
+    REQUIRE(presenter.postNativeCloseForTesting());
+    REQUIRE(waitForCondition([&presenter]() {
+        return !presenter.isVisible() &&
+            !presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences) &&
+            !presenter.isShellDialogOpenForTesting(DashboardShellDialog::About);
+    }));
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter centers Help and About dialogs on the main window", "[dashboard_presenter][shell]") {
+    DashboardPresenter presenter;
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(makeQuotaViewModel());
+
+    REQUIRE(waitForCondition([&presenter]() {
+        const auto rect = presenter.getMainWindowRectForTesting();
+        return rect[2] > rect[0] && rect[3] > rect[1];
+    }));
+
+    const auto mainRect = presenter.getMainWindowRectForTesting();
+
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::HelpViewHelp));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Help);
+    }));
+    REQUIRE(waitForCondition([&presenter]() {
+        const auto rect = presenter.getShellDialogRectForTesting(DashboardShellDialog::Help);
+        return rect[2] > rect[0] && rect[3] > rect[1];
+    }));
+    const auto helpRect = presenter.getShellDialogRectForTesting(DashboardShellDialog::Help);
+    CHECK(std::abs(rectCenterX(mainRect) - rectCenterX(helpRect)) <= 24);
+    CHECK(std::abs(rectCenterY(mainRect) - rectCenterY(helpRect)) <= 24);
+
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::HelpAbout));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.isShellDialogOpenForTesting(DashboardShellDialog::About);
+    }));
+    REQUIRE(waitForCondition([&presenter]() {
+        const auto rect = presenter.getShellDialogRectForTesting(DashboardShellDialog::About);
+        return rect[2] > rect[0] && rect[3] > rect[1];
+    }));
+    const auto aboutRect = presenter.getShellDialogRectForTesting(DashboardShellDialog::About);
+    CHECK(std::abs(rectCenterX(mainRect) - rectCenterX(aboutRect)) <= 24);
+    CHECK(std::abs(rectCenterY(mainRect) - rectCenterY(aboutRect)) <= 24);
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter routes File Import OpenAI shell commands through the configured callback", "[dashboard_presenter][shell]") {
+    DashboardPresenter presenter;
+    std::atomic<int> callbackCount{0};
+    std::string importedPath;
+
+    presenter.setOpenAIImportActionCallback([&](const std::string& inputPath) {
+        importedPath = inputPath;
+        callbackCount.fetch_add(1);
+
+        DashboardOpenAIImportResult result;
+        result.success = true;
+        result.insertedCount = 3;
+        result.inputPath = inputPath;
+        result.message = "Imported 3 historical messages";
+        return result;
+    });
+    presenter.setOpenAIImportPathForTesting(kOpenAIExportFixturePath.string());
+
+    REQUIRE(presenter.init());
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileImportOpenAI));
+    REQUIRE(waitForCondition([&]() {
+        return callbackCount.load() == 1;
+    }));
+    CHECK(importedPath == kOpenAIExportFixturePath.string());
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter runs OpenAI import asynchronously", "[dashboard_presenter][shell][async]") {
+    DashboardPresenter presenter;
+    std::atomic<bool> callbackInvoked{false};
+
+    presenter.setOpenAIImportActionCallback([&](const std::string& inputPath) {
+        callbackInvoked.store(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        DashboardOpenAIImportResult result;
+        result.success = true;
+        result.insertedCount = 4;
+        result.inputPath = inputPath;
+        result.message = "Imported 4 historical messages in the background.";
+        return result;
+    });
+    presenter.setOpenAIImportPathForTesting(kOpenAIExportFixturePath.string());
+
+    REQUIRE(presenter.init());
+
+    const auto startedAt = std::chrono::steady_clock::now();
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileImportOpenAI));
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startedAt);
+
+    CHECK(elapsed < std::chrono::milliseconds(150));
+    REQUIRE(waitForCondition([&]() {
+        return callbackInvoked.load();
+    }));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getStatusTextForTesting().find("background") != std::string::npos;
+    }));
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter persists provider snapshot selection through the preferences callback", "[dashboard_presenter][selection]") {
+    DashboardPresenter presenter;
+    DashboardPreferences lastPreferences;
+    std::mutex callbackMutex;
+    std::atomic<int> callbackCount{0};
+
+    presenter.setPreferencesChangedCallback([&](const DashboardPreferences& preferences) {
+        std::lock_guard<std::mutex> lock(callbackMutex);
+        lastPreferences = preferences;
+        callbackCount.fetch_add(1);
+    });
+
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(makeMultiAccountQuotaViewModel());
+
+    REQUIRE(waitForCondition([&]() {
+        if (callbackCount.load() == 0) {
+            presenter.selectProviderQuotaRowForTesting(1);
+        }
+        return callbackCount.load() == 1;
+    }));
+
+    {
+        std::lock_guard<std::mutex> lock(callbackMutex);
+        CHECK(lastPreferences.lastSelectedProviderId == "openai");
+        CHECK(lastPreferences.lastSelectedAccountId == "acct-openai-secondary");
+    }
+    CHECK(presenter.getSelectedProviderIdForTesting() == "openai");
+    CHECK(presenter.getSelectedAccountIdForTesting() == "acct-openai-secondary");
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter restores the selected provider scope from persisted preferences", "[dashboard_presenter][selection]") {
+    DashboardPresenter presenter;
+    DashboardViewModel model = makeMultiAccountQuotaViewModel();
+    model.preferences.lastSelectedProviderId = "openai";
+    model.preferences.lastSelectedAccountId = "acct-openai-secondary";
+
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(model);
+
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getSelectedAccountIdForTesting() == "acct-openai-secondary";
+    }));
+
+    const auto summaries = presenter.getUsageProgressSummariesForTesting();
+    REQUIRE(summaries.size() == 1);
+    CHECK(summaries.front().label == "OpenAI Subscription");
+    CHECK(summaries.front().detail.find("20% remaining") != std::string::npos);
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter prefers runtime activity summaries over fake 0 percent local-provider quota summaries", "[dashboard_presenter][local]") {
+    DashboardPresenter presenter;
+    presenter.updateViewModel(makeKimiLocalRuntimeViewModel());
+
+    const auto summaries = presenter.getUsageProgressSummariesForTesting();
+    REQUIRE(summaries.size() == 1);
+    CHECK(summaries.front().label == "Last 30 Minutes");
+    CHECK(summaries.front().detail.find("7 sessions") != std::string::npos);
+    CHECK(summaries.front().percentage == 60);
+    CHECK(presenter.getProviderQuotaUsedValuesForTesting() == std::vector<std::string>{""});
+    CHECK(presenter.getProviderQuotaLimitValuesForTesting() == std::vector<std::string>{""});
+    CHECK(presenter.getProviderQuotaRemainingValuesForTesting() == std::vector<std::string>{""});
+    CHECK(presenter.getProviderQuotaLastSyncValuesForTesting().size() == 1);
+}
+
+TEST_CASE("DashboardPresenter keeps Kimi subscription summaries remaining-first while showing used percentages in the quota table", "[dashboard_presenter][kimi]") {
+    DashboardPresenter presenter;
+    presenter.updateViewModel(makeKimiSubscriptionViewModel());
+
+    const auto summaries = presenter.getUsageProgressSummariesForTesting();
+    REQUIRE(summaries.size() == 1);
+    const auto kimiSummary = findSummary(summaries, "Kimi Subscription");
+    REQUIRE(kimiSummary.has_value());
+    CHECK(kimiSummary->percentage == 36);
+    CHECK(kimiSummary->secondaryPercentage == 72);
+    CHECK(kimiSummary->detail.find("36% remaining") != std::string::npos);
+    CHECK(kimiSummary->detail.find("Weekly 72% remaining") != std::string::npos);
+    CHECK(kimiSummary->detail.find("64% used") == std::string::npos);
+
+    CHECK(presenter.getProviderQuotaUsedValuesForTesting() == std::vector<std::string>{"64%", "28%"});
+    CHECK(presenter.getProviderQuotaLimitValuesForTesting() == std::vector<std::string>{"100%", "100%"});
+    CHECK(presenter.getProviderQuotaRemainingValuesForTesting() == std::vector<std::string>{"36%", "72%"});
+    const auto lastSyncValues = presenter.getProviderQuotaLastSyncValuesForTesting();
+    REQUIRE(lastSyncValues.size() == 2);
+    CHECK(lastSyncValues[0].find("(API)") != std::string::npos);
+    CHECK(lastSyncValues[1].find("(API)") != std::string::npos);
+}
+
+TEST_CASE("DashboardPresenter surfaces recovery and scheduled export status in the main shell", "[dashboard_presenter][status]") {
+    DashboardPresenter presenter;
+    DashboardViewModel model = makeQuotaViewModel();
+    model.recoveryStatusSummary = "Backfilled windows in 1 provider";
+    model.recoveryStatusDetail =
+        "Current shared sync state: Catching Up. Backfilled windows are currently visible for OpenAI.";
+    model.preferences.scheduledExportEnabled = true;
+    model.preferences.scheduledExportIntervalMinutes = 60;
+    model.preferences.scheduledExportPath = "C:/Reports/JiStats";
+    model.scheduledExportStatusSummary = "Every 60 mins";
+    model.scheduledExportStatusDetail =
+        "Scheduled HTML export is enabled every 60 minutes. Output folder: C:/Reports/JiStats.";
+    model.scheduledExportLastRunTime = "2026-04-19 18:15:00 UTC";
+
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(model);
+
+    const auto fieldValues = presenter.getApplicationFieldValuesForTesting();
+    REQUIRE(fieldValues.size() == 4);
+    CHECK(fieldValues[1] == "Backfilled windows in 1 provider");
+    CHECK(fieldValues[2] == "Every 60 mins");
+
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences);
+    }));
+
+    CHECK(presenter.isScheduledExportEnabledForTesting());
+    CHECK(presenter.getScheduledExportIntervalMinutesForTesting() == 60);
+    CHECK(presenter.getScheduledExportPathForTesting() == "C:/Reports/JiStats");
+    CHECK(presenter.getScheduledExportLastRunForTesting().find("2026") != std::string::npos);
+    CHECK(presenter.getScheduledExportLastRunForTesting().find("18:15:00 UTC") == std::string::npos);
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter shows offline notice content and routes retry and dismiss actions", "[dashboard_presenter][offline]") {
+    DashboardPresenter presenter;
+    DashboardViewModel model = makeQuotaViewModel();
+    model.runtimeState = RuntimeState::Offline;
+    model.isOnline = false;
+    model.offlineRetryAvailable = true;
+    model.offlineNoticeVisible = true;
+    model.offlineNoticeTitle = "Connection Lost";
+    model.offlineNoticeMessage =
+        "Provider connectivity is unavailable. JiStats will keep the last known state and retry when connectivity returns.";
+
+    std::atomic<int> retryCount{0};
+    std::atomic<int> dismissCount{0};
+
+    presenter.setOfflineRetryActionCallback([&]() {
+        retryCount.fetch_add(1);
+        return DashboardNoticeActionResult{true, "Retry attempted."};
+    });
+    presenter.setOfflineDismissActionCallback([&]() {
+        dismissCount.fetch_add(1);
+        return DashboardNoticeActionResult{true, "Offline notice dismissed."};
+    });
+
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(model);
+
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.isOfflineNoticeVisibleForTesting();
+    }));
+
+    const std::string noticeText = presenter.getOfflineNoticeTextForTesting();
+    CHECK(noticeText.find("Connection Lost") != std::string::npos);
+    CHECK(noticeText.find("Provider connectivity is unavailable") != std::string::npos);
+
+    REQUIRE(presenter.clickOfflineRetryForTesting());
+    REQUIRE(waitForCondition([&]() {
+        return retryCount.load() == 1;
+    }));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getStatusTextForTesting().find("Retry attempted") != std::string::npos;
+    }));
+
+    REQUIRE(presenter.clickOfflineDismissForTesting());
+    REQUIRE(waitForCondition([&]() {
+        return dismissCount.load() == 1;
+    }));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getStatusTextForTesting().find("dismissed") != std::string::npos;
+    }));
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter runs offline notice actions asynchronously", "[dashboard_presenter][offline][async]") {
+    DashboardPresenter presenter;
+    DashboardViewModel model = makeQuotaViewModel();
+    model.runtimeState = RuntimeState::Offline;
+    model.isOnline = false;
+    model.offlineRetryAvailable = true;
+    model.offlineNoticeVisible = true;
+    model.offlineNoticeTitle = "Connection Lost";
+    model.offlineNoticeMessage = "Async offline notice actions should not block the dashboard thread.";
+
+    std::atomic<int> retryCount{0};
+    std::atomic<int> dismissCount{0};
+
+    presenter.setOfflineRetryActionCallback([&]() {
+        retryCount.fetch_add(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        return DashboardNoticeActionResult{true, "Retry attempted in the background."};
+    });
+    presenter.setOfflineDismissActionCallback([&]() {
+        dismissCount.fetch_add(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        return DashboardNoticeActionResult{true, "Offline notice dismissed in the background."};
+    });
+
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(model);
+
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.isOfflineNoticeVisibleForTesting();
+    }));
+
+    const auto retryStartedAt = std::chrono::steady_clock::now();
+    REQUIRE(presenter.clickOfflineRetryForTesting());
+    const auto retryElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - retryStartedAt);
+    CHECK(retryElapsed < std::chrono::milliseconds(150));
+    REQUIRE(waitForCondition([&]() {
+        return retryCount.load() == 1;
+    }));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getStatusTextForTesting().find("background") != std::string::npos;
+    }));
+
+    const auto dismissStartedAt = std::chrono::steady_clock::now();
+    REQUIRE(presenter.clickOfflineDismissForTesting());
+    const auto dismissElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - dismissStartedAt);
+    CHECK(dismissElapsed < std::chrono::milliseconds(150));
+    REQUIRE(waitForCondition([&]() {
+        return dismissCount.load() == 1;
+    }));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getStatusTextForTesting().find("dismissed in the background") != std::string::npos;
+    }));
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter carries rebuilt analysis data through the shell view model", "[dashboard_presenter][analysis]") {
+    DashboardPresenter presenter;
+    DashboardViewModel model = makeQuotaViewModel();
+    model.analysis.scope.selectedProviderId = "openai";
+    model.analysis.scope.selectedAccountId = "openai.primary";
+    model.analysis.scope.dateRangePreset = AnalysisDateRangePreset::Last7Days;
+    model.analysis.scopeLabel = "OpenAI / openai.primary / Last 7 Days";
+    model.analysis.dailySummaries = {
+        {"2026-04-17", 2, "OpenAI Codex-local", {}},
+        {"2026-04-18", 1, "OpenAI Local", {}}
+    };
+    model.analysis.providerBreakdown = {
+        {"openai", "OpenAI", "", 3, "Mixed OpenAI provenance"}
+    };
+    model.analysis.accountBreakdown = {
+        {"openai.primary|OpenAI", "OpenAI / openai.primary", "OpenAI", 3, "Mixed OpenAI provenance"}
+    };
+    model.analysis.trendPoints = {
+        {"2026-04-17", 2},
+        {"2026-04-18", 1}
+    };
+    model.analysis.gapSummaryCounts.unknownDays = 1;
+    model.analysis.dataQualityNote =
+        "Rollup-backed daily history across the current analysis scope with 1 unknown gap day.";
+
+    presenter.updateViewModel(model);
+
+    CHECK(presenter.getViewModel().analysis.scopeLabel == "OpenAI / openai.primary / Last 7 Days");
+    REQUIRE(presenter.getViewModel().analysis.dailySummaries.size() == 2);
+    CHECK(presenter.getViewModel().analysis.dailySummaries.front().dateLabel == "2026-04-17");
+    CHECK(presenter.getViewModel().analysis.dailySummaries.front().sourceLabel == "OpenAI Codex-local");
+    REQUIRE(presenter.getViewModel().analysis.providerBreakdown.size() == 1);
+    CHECK(presenter.getViewModel().analysis.providerBreakdown.front().label == "OpenAI");
+    REQUIRE(presenter.getViewModel().analysis.accountBreakdown.size() == 1);
+    CHECK(presenter.getViewModel().analysis.accountBreakdown.front().secondaryLabel == "OpenAI");
+    REQUIRE(presenter.getViewModel().analysis.trendPoints.size() == 2);
+    CHECK(presenter.getViewModel().analysis.trendPoints.back().activityCount == 1);
+    CHECK(presenter.getViewModel().analysis.gapSummaryCounts.unknownDays == 1);
+    CHECK(presenter.getViewModel().analysis.dataQualityNote.find("unknown gap day") != std::string::npos);
+}
+
+TEST_CASE("DashboardPresenter shows Codex throughput on the main overview tab", "[dashboard_presenter][analysis][codex]") {
+    DashboardPresenter presenter;
+    REQUIRE(presenter.init());
+
+    DashboardViewModel model = makeQuotaViewModel();
+    model.analysis.codexThroughput.hasData = true;
+    model.analysis.codexThroughput.tokensPerMinute5m = 60.0;
+    model.analysis.codexThroughput.promptsPerMinute5m = 0.4;
+    model.analysis.codexThroughput.tokensPerMinute30m = 9.8;
+    model.analysis.codexThroughput.promptsPerMinute30m = 0.7;
+    model.analysis.codexThroughput.confidenceLabel = "LocalExact";
+    model.analysis.openAiCodexModelUsage.title = "OpenAI Codex Usage by Model";
+    model.analysis.openAiCodexModelUsage.subtitle = "Observed local Codex usage since JiStats baseline";
+    model.analysis.openAiCodexModelUsage.hasData = true;
+    AnalysisModelUsageSeries openAiSeries;
+    openAiSeries.modelKey = "gpt-5.4";
+    openAiSeries.totalTokens = 12345;
+    openAiSeries.points.push_back({1700000000, 12345});
+    model.analysis.openAiCodexModelUsage.series.push_back(openAiSeries);
+    model.analysis.hicapCodexModelUsage.title = "HICAP Codex Usage by Model";
+    model.analysis.hicapCodexModelUsage.subtitle = "Observed local Codex usage since JiStats baseline";
+
+    presenter.updateViewModel(model);
+
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getCodexThroughputTextForTesting().find("Last 5m: 60 t/min, 0.4 p/min") != std::string::npos;
+    }));
+    const std::string text = presenter.getCodexThroughputTextForTesting();
+    CHECK(text.find("Last 30m: 9.8 t/min, 0.7 p/min") != std::string::npos);
+    CHECK(text.find("Averages") != std::string::npos);
+    CHECK(text.find("Totals") != std::string::npos);
+    CHECK(text.find("Source: LocalExact") != std::string::npos);
+    CHECK(presenter.getOpenAiCodexModelUsageTextForTesting().find("gpt-5.4: 12,345 tokens") != std::string::npos);
+    CHECK(presenter.getHicapCodexModelUsageTextForTesting().find("No new Codex SQLite usage observed yet") != std::string::npos);
+
+    const auto rect = presenter.getMainWindowRectForTesting();
+    CHECK((rect[3] - rect[1]) >= 640);
+
+    const auto chartRect = presenter.getCodexThroughputChartRectForTesting();
+    CHECK(chartRect[0] == 18);
+    CHECK(chartRect[1] == 108);
+    CHECK((chartRect[2] - chartRect[0]) > 300);
+    CHECK((chartRect[3] - chartRect[1]) >= 120);
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter opens a dedicated Analysis window from the Analysis tab and populates it", "[dashboard_presenter][analysis]") {
+    DashboardPresenter presenter;
+    AnalysisPresenter analysisPresenter;
+
+    REQUIRE(presenter.init());
+    presenter.setAnalysisPresenter(&analysisPresenter);
+
+    DashboardViewModel model = makeQuotaViewModel();
+    model.analysis.scope.selectedProviderId = "openai";
+    model.analysis.scope.selectedAccountId = "openai.primary";
+    model.analysis.scope.dateRangePreset = AnalysisDateRangePreset::Last7Days;
+    model.analysis.scopeLabel = "OpenAI / openai.primary / Last 7 Days";
+    model.analysis.dailySummaries = {
+        {"2026-04-17", 2, "OpenAI Codex-local", {}},
+        {"2026-04-18", 1, "OpenAI Local", {}}
+    };
+    model.analysis.providerBreakdown = {
+        {"openai", "OpenAI", "", 3, "Mixed OpenAI provenance"}
+    };
+    model.analysis.accountBreakdown = {
+        {"openai.primary|OpenAI", "OpenAI / openai.primary", "OpenAI", 3, "Mixed OpenAI provenance"}
+    };
+    model.analysis.trendPoints = {
+        {"2026-04-17", 2},
+        {"2026-04-18", 1}
+    };
+    model.analysis.gapSummaryCounts.unknownDays = 1;
+    model.analysis.dataQualityNote =
+        "Rollup-backed daily history across the current analysis scope with 1 unknown gap day. "
+        "Recovery checkpoints: 1 imported, 0 mismatch, 0 failed. "
+        "Latest manual export: 2026-04-18T18:00:00Z (success).";
+
+    presenter.updateViewModel(model);
+
+    REQUIRE(presenter.selectMainTabForTesting(2));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.isAnalysisWindowOpenForTesting();
+    }, std::chrono::milliseconds(4000)));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getAnalysisScopeLabelForTesting() == "Active filters: OpenAI / openai.primary / Last 7 Days";
+    }, std::chrono::milliseconds(4000)));
+
+    const auto mainRect = presenter.getMainWindowRectForTesting();
+    const auto analysisRect = presenter.getAnalysisWindowRectForTesting();
+    const int mainWidth = mainRect[2] - mainRect[0];
+    const int mainHeight = mainRect[3] - mainRect[1];
+    const int analysisWidth = analysisRect[2] - analysisRect[0];
+    const int analysisHeight = analysisRect[3] - analysisRect[1];
+    CHECK(analysisWidth > mainWidth);
+    CHECK(mainHeight > 0);
+    CHECK(analysisHeight > 0);
+    // The dashboard is the taller fixed window. The analysis window is wider,
+    // and a short work area clamps both heights to the same value.
+    CHECK(analysisHeight <= mainHeight);
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter skips hidden main-window sync until the UI is shown again", "[dashboard_presenter][background]") {
+    DashboardPresenter presenter;
+    REQUIRE(presenter.init());
+
+    DashboardViewModel model = makeQuotaViewModel();
+    presenter.updateViewModel(model);
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getViewModelSyncCountForTesting() > 0;
+    }));
+
+    const std::uint64_t syncCountBeforeHide = presenter.getViewModelSyncCountForTesting();
+    presenter.setVisible(false);
+    REQUIRE(waitForCondition([&presenter]() {
+        return !presenter.isVisible();
+    }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    const std::uint64_t syncCountWhileHidden = presenter.getViewModelSyncCountForTesting();
+    CHECK(syncCountWhileHidden >= syncCountBeforeHide);
+
+    DashboardViewModel hiddenUpdate = model;
+    hiddenUpdate.lastUpdateTime = "2026-04-19 03:15:00 UTC";
+    hiddenUpdate.recoveryStatusSummary = "No recent recovery activity";
+    presenter.updateViewModel(hiddenUpdate);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(presenter.getViewModel().lastUpdateTime == hiddenUpdate.lastUpdateTime);
+    CHECK(presenter.getViewModelSyncCountForTesting() == syncCountWhileHidden);
+
+    presenter.setVisible(true);
+    REQUIRE(waitForCondition([&presenter, syncCountWhileHidden]() {
+        return presenter.getViewModelSyncCountForTesting() > syncCountWhileHidden;
+    }));
+
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter dispatches FileExportHtml shell command without callback", "[dashboard_presenter]") {
+    DashboardPresenter presenter;
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / "jistats_dispatch_test";
+    std::filesystem::create_directories(tempDir);
+    const std::string outputPath = (tempDir / "dispatch-test.html").string();
+
+    REQUIRE(presenter.init());
+    presenter.setHtmlExportPathForTesting(outputPath);
+
+    // Without a callback, the command dispatches but reports unavailable via status text
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileExportHtml));
+
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getStatusTextForTesting().find("unavailable") != std::string::npos;
+    }));
+
+    CHECK(presenter.getStatusTextForTesting().find("HTML export") != std::string::npos);
+
+    presenter.shutdown();
+    std::error_code ec;
+    std::filesystem::remove_all(tempDir, ec);
+}
+
+TEST_CASE("DashboardPresenter manual HTML export routes through callback and reports status", "[dashboard_presenter]") {
+    DashboardPresenter presenter;
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / "jistats_export_test";
+    std::filesystem::create_directories(tempDir);
+    const std::string outputPath = (tempDir / "test-export.html").string();
+
+    std::atomic<bool> callbackInvoked{false};
+    std::string receivedPath;
+
+    presenter.setHtmlExportActionCallback([&](const std::string& path) {
+        receivedPath = path;
+        callbackInvoked.store(true);
+        DashboardHtmlExportResult result;
+        result.success = true;
+        result.outputPath = path;
+        result.message = "HTML report exported to " + path;
+        return result;
+    });
+
+    REQUIRE(presenter.init());
+    presenter.setHtmlExportPathForTesting(outputPath);
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileExportHtml));
+
+    REQUIRE(waitForCondition([&]() {
+        return callbackInvoked.load();
+    }));
+
+    CHECK(receivedPath == outputPath);
+
+    // Wait for the completion message to be processed
+    REQUIRE(waitForCondition([&presenter]() {
+        return !presenter.getLastHtmlExportStatusForTesting().empty();
+    }));
+
+    const std::string status = presenter.getLastHtmlExportStatusForTesting();
+    CHECK(status.find("exported") != std::string::npos);
+
+    presenter.shutdown();
+    std::error_code ec;
+    std::filesystem::remove_all(tempDir, ec);
+}
+
+TEST_CASE("DashboardPresenter manual HTML export runs asynchronously", "[dashboard_presenter][async]") {
+    DashboardPresenter presenter;
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / "jistats_export_async_test";
+    std::filesystem::create_directories(tempDir);
+    const std::string outputPath = (tempDir / "async-export.html").string();
+
+    std::atomic<bool> callbackInvoked{false};
+
+    presenter.setHtmlExportActionCallback([&](const std::string& path) {
+        callbackInvoked.store(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        DashboardHtmlExportResult result;
+        result.success = true;
+        result.outputPath = path;
+        result.message = "HTML report exported in the background.";
+        return result;
+    });
+
+    REQUIRE(presenter.init());
+    presenter.setHtmlExportPathForTesting(outputPath);
+
+    const auto startedAt = std::chrono::steady_clock::now();
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileExportHtml));
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startedAt);
+
+    CHECK(elapsed < std::chrono::milliseconds(150));
+    REQUIRE(waitForCondition([&]() {
+        return callbackInvoked.load();
+    }));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getLastHtmlExportStatusForTesting().find("background") != std::string::npos;
+    }));
+
+    presenter.shutdown();
+    std::error_code ec;
+    std::filesystem::remove_all(tempDir, ec);
+}
+
+TEST_CASE("DashboardPresenter manual HTML export shows failure status on error", "[dashboard_presenter]") {
+    DashboardPresenter presenter;
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / "jistats_export_fail_test";
+    std::filesystem::create_directories(tempDir);
+    const std::string outputPath = (tempDir / "fail-export.html").string();
+
+    std::atomic<bool> callbackInvoked{false};
+
+    presenter.setHtmlExportActionCallback([&](const std::string&) {
+        callbackInvoked.store(true);
+        DashboardHtmlExportResult result;
+        result.success = false;
+        result.message = "Export failed: disk full";
+        return result;
+    });
+
+    REQUIRE(presenter.init());
+    presenter.setHtmlExportPathForTesting(outputPath);
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileExportHtml));
+
+    REQUIRE(waitForCondition([&]() {
+        return callbackInvoked.load();
+    }));
+
+    REQUIRE(waitForCondition([&presenter]() {
+        return !presenter.getLastHtmlExportStatusForTesting().empty();
+    }));
+
+    const std::string status = presenter.getLastHtmlExportStatusForTesting();
+    CHECK(status.find("disk full") != std::string::npos);
+
+    presenter.shutdown();
+    std::error_code ec;
+    std::filesystem::remove_all(tempDir, ec);
+}
+
+TEST_CASE("DashboardPresenter rejects a second manual HTML export request without blocking the UI", "[dashboard_presenter]") {
+    DashboardPresenter presenter;
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / "jistats_export_busy_test";
+    std::filesystem::create_directories(tempDir);
+    const std::string outputPath = (tempDir / "busy-export.html").string();
+
+    std::atomic<bool> callbackStarted{false};
+    std::atomic<bool> allowCompletion{false};
+
+    presenter.setHtmlExportActionCallback([&](const std::string& path) {
+        callbackStarted.store(true);
+        while (!allowCompletion.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        DashboardHtmlExportResult result;
+        result.success = true;
+        result.outputPath = path;
+        result.message = "HTML report exported to " + path;
+        return result;
+    });
+
+    REQUIRE(presenter.init());
+    presenter.setHtmlExportPathForTesting(outputPath);
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileExportHtml));
+
+    REQUIRE(waitForCondition([&]() {
+        return callbackStarted.load();
+    }));
+
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileExportHtml));
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getStatusTextForTesting().find("already running") != std::string::npos;
+    }));
+
+    allowCompletion.store(true);
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getLastHtmlExportStatusForTesting().find("exported") != std::string::npos;
+    }));
+
+    presenter.shutdown();
+    std::error_code ec;
+    std::filesystem::remove_all(tempDir, ec);
+}

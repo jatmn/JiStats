@@ -1,0 +1,5 @@
+default_model = "kimi-code/kimi-for-coding"
+
+[models."kimi-code/kimi-for-coding"]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"

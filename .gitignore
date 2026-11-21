@@ -1,0 +1,58 @@
+# Build output
+bin/
+build/
+build-*/
+build_*/
+dist/
+out/
+Debug/
+Release/
+x64/
+x86/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+
+# MSBuild and CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile
+
+# Intermediate objects
+*.obj
+*.o
+*.pch
+*.pdb
+*.ilk
+*.idb
+*.ipch
+*.log
+*.tlog
+
+# Test and coverage artifacts
+*.coverage
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+CTestCostData.txt
+jistats.db
+jistats.db-wal
+jistats.db-shm
+jistats.db-journal
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# Local AI CLI profiles / credentials
+.claude/settings.local.json
+.openclaude-profile.json

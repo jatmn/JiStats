@@ -1,0 +1,23 @@
+name: CI
+
+# Run the Windows SQLite quality gate on demand.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-quality-gate:
+    name: SQLite quality gate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - name: Run SQLite quality gate
+        shell: powershell
+        run: .\scripts\run_sqlite_quality_gate.ps1

@@ -1,0 +1,1346 @@
+#include <catch_amalgamated.hpp>
+
+#include <algorithm>
+#include <chrono>
+#include <ctime>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "db/StorageService.hpp"
+#include "gui/DashboardPresenter.hpp"
+#include "reporting/AnalysisQueryEngine.hpp"
+
+using namespace JiStats;
+
+namespace {
+
+std::time_t makeUtcTime(
+    int year,
+    int month,
+    int day,
+    int hour = 0,
+    int minute = 0,
+    int second = 0) {
+    std::tm tm{};
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_sec = second;
+    return _mkgmtime(&tm);
+}
+
+class TempDbFile {
+public:
+    TempDbFile() {
+        static int counter = 0;
+        path_ = std::filesystem::temp_directory_path() /
+            ("jistats_analysis_query_engine_test_" + std::to_string(++counter) + ".db");
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+
+    ~TempDbFile() {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+
+    std::string path() const {
+        return path_.string();
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+ProviderStatus makeProvider(
+    const std::string& providerKey,
+    const std::string& displayName,
+    const std::string& accountId) {
+    ProviderStatus provider;
+    provider.providerKey = providerKey;
+    provider.displayName = displayName;
+    provider.accountId = accountId;
+    provider.isEnabled = true;
+    provider.state = ProviderState::Live;
+    return provider;
+}
+
+std::time_t toTimeT(const std::chrono::system_clock::time_point& value) {
+    return std::chrono::system_clock::to_time_t(value);
+}
+
+std::vector<std::string> optionPairs(const std::vector<AnalysisScopeOption>& options) {
+    std::vector<std::string> result;
+    result.reserve(options.size());
+    for (const auto& option : options) {
+        result.push_back(option.key + "|" + option.label);
+    }
+    return result;
+}
+
+long long requireSingleId(const QueryResult& result) {
+    REQUIRE(result.success());
+    REQUIRE(result.rowCount() == 1);
+    return result.getInt64(0, 0);
+}
+
+int requireProviderId(StorageService& storage, const std::string& providerKey) {
+    return static_cast<int>(requireSingleId(storage.execute(
+        "SELECT id FROM providers WHERE provider_key = ? LIMIT 1;",
+        {providerKey})));
+}
+
+std::optional<int> loadAccountId(StorageService& storage, int providerId, const std::string& accountKey) {
+    const QueryResult result = storage.execute(
+        "SELECT id FROM accounts WHERE provider_id = ? AND account_key = ? LIMIT 1;",
+        {std::to_string(providerId), accountKey});
+    if (!result.success() || result.rowCount() == 0) {
+        return std::nullopt;
+    }
+    return result.getInt(0, 0);
+}
+
+int ensureRuntimeAccountId(
+    StorageService& storage,
+    const std::string& providerKey,
+    const std::string& displayName) {
+    const int providerId = requireProviderId(storage, providerKey);
+    const std::string accountKey = providerKey + ".runtime_status";
+    if (const auto existing = loadAccountId(storage, providerId, accountKey)) {
+        return *existing;
+    }
+
+    const QueryResult insert = storage.execute(
+        "INSERT INTO accounts (provider_id, account_key, display_name, scope_type, scope_identifier) "
+        "VALUES (?, ?, ?, ?, ?);",
+        {
+            std::to_string(providerId),
+            accountKey,
+            displayName + " Runtime",
+            "runtime",
+            accountKey
+        });
+    REQUIRE(insert.success());
+    return static_cast<int>(insert.lastInsertRowId());
+}
+
+void seedUsageEvent(
+    StorageService& storage,
+    const std::string& providerKey,
+    const std::string& displayName,
+    std::time_t eventTime,
+    long long totalTokens,
+    long long costMinorUnits,
+    const std::string& modelKey) {
+    PersistedUsageEvent event;
+    event.providerId = requireProviderId(storage, providerKey);
+    event.accountId = ensureRuntimeAccountId(storage, providerKey, displayName);
+    event.eventTime = eventTime;
+    event.sourceType = "api";
+    event.sourceRunId = providerKey + "-usage-" + std::to_string(eventTime);
+    event.modelKey = modelKey;
+    event.requestType = "chat";
+    event.inputTokens = totalTokens / 2;
+    event.outputTokens = totalTokens - event.inputTokens;
+    event.totalTokens = totalTokens;
+    event.costMinorUnits = costMinorUnits;
+    event.rawReference = providerKey + "://" + modelKey + "/" + std::to_string(eventTime);
+    REQUIRE(storage.insertUsageEvents({event}));
+}
+
+void seedCodexUsageEvent(
+    StorageService& storage,
+    std::time_t eventTime,
+    long long totalTokens,
+    const std::string& rawReference = "codex://rollout/current") {
+    PersistedUsageEvent event;
+    event.providerId = requireProviderId(storage, "openai");
+    event.accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    event.eventTime = eventTime;
+    event.sourceType = "codex_local_rollout";
+    event.sourceRunId = "codex_token_usage";
+    event.modelKey = "codex";
+    event.requestType = "codex_turn";
+    event.inputTokens = totalTokens / 2;
+    event.outputTokens = totalTokens - event.inputTokens;
+    event.totalTokens = totalTokens;
+    event.costMinorUnits = 0;
+    event.rawReference = rawReference;
+    REQUIRE(storage.insertUsageEvents({event}));
+}
+
+void seedCodexSqliteUsageEvent(
+    StorageService& storage,
+    const std::string& providerKey,
+    const std::string& modelKey,
+    std::time_t eventTime,
+    long long totalTokens) {
+    PersistedUsageEvent event;
+    event.providerId = requireProviderId(storage, providerKey);
+    event.accountId = ensureRuntimeAccountId(storage, providerKey, providerKey);
+    event.eventTime = eventTime;
+    event.sourceType = "codex_local_sqlite";
+    event.sourceRunId = providerKey + "-codex-sqlite-" + std::to_string(eventTime);
+    event.modelKey = modelKey;
+    event.requestType = "codex_thread_delta";
+    event.totalTokens = totalTokens;
+    event.costMinorUnits = 0;
+    event.rawReference = providerKey + "://codex-sqlite/" + modelKey + "/" + std::to_string(eventTime);
+    REQUIRE(storage.insertUsageEvents({event}));
+}
+
+void seedLocalActivity(
+    StorageService& storage,
+    const std::string& providerKey,
+    const std::string& displayName,
+    const std::string& providerSurface,
+    std::time_t startedAt,
+    std::time_t durationSeconds) {
+    PersistedActivityEvent persisted;
+    persisted.providerId = requireProviderId(storage, providerKey);
+    persisted.accountId = ensureRuntimeAccountId(storage, providerKey, displayName);
+    persisted.activity.providerKey = providerKey;
+    persisted.activity.providerSurface = providerSurface;
+    persisted.activity.activityKind = ActivityKind::SessionActive;
+    persisted.activity.startedAt = startedAt;
+    persisted.activity.endedAt = startedAt + durationSeconds;
+    persisted.activity.durationSeconds = durationSeconds;
+    persisted.activity.sourceType = "local";
+    persisted.activity.sourceRunId = providerKey + "-local-" + std::to_string(startedAt);
+    persisted.activity.surfaceKey = "workspace";
+    persisted.activity.windowTitleHint = displayName;
+    persisted.activity.confidence = ActivityConfidence::LocalExact;
+    persisted.activity.rawReference = "local://" + providerKey + "/" + std::to_string(startedAt);
+    REQUIRE(storage.insertActivityEvent(persisted));
+}
+
+void seedGapMarker(
+    StorageService& storage,
+    const std::string& providerKey,
+    const std::string& displayName,
+    AnalysisGapClassification classification,
+    std::time_t dayStart,
+    const std::string& basisSummary,
+    const std::string& sourceKind) {
+    PersistedGapMarker marker;
+    marker.providerId = requireProviderId(storage, providerKey);
+    marker.accountId = ensureRuntimeAccountId(storage, providerKey, displayName);
+    marker.periodStart = dayStart;
+    marker.periodEnd = dayStart + 3600;
+    switch (classification) {
+    case AnalysisGapClassification::KnownZero:
+        marker.classification = GapClassification::KnownZero;
+        break;
+    case AnalysisGapClassification::Reconstructed:
+        marker.classification = GapClassification::Reconstructed;
+        break;
+    case AnalysisGapClassification::Unknown:
+        marker.classification = GapClassification::Unknown;
+        break;
+    default:
+        marker.classification = GapClassification::Unknown;
+        break;
+    }
+    marker.basisSummary = basisSummary;
+    marker.sourceKind = sourceKind;
+    REQUIRE(storage.upsertGapMarker(marker));
+}
+
+std::optional<AnalysisDailySummary> findDailySummary(
+    const std::vector<AnalysisDailySummary>& rows,
+    const std::string& dateLabel) {
+    const auto it = std::find_if(rows.begin(), rows.end(), [&](const AnalysisDailySummary& row) {
+        return row.dateLabel == dateLabel;
+    });
+    if (it == rows.end()) {
+        return std::nullopt;
+    }
+    return *it;
+}
+
+std::optional<AnalysisBreakdownRow> findBreakdownRow(
+    const std::vector<AnalysisBreakdownRow>& rows,
+    const std::string& label) {
+    const auto it = std::find_if(rows.begin(), rows.end(), [&](const AnalysisBreakdownRow& row) {
+        return row.label == label;
+    });
+    if (it == rows.end()) {
+        return std::nullopt;
+    }
+    return *it;
+}
+
+std::optional<AnalysisTrendPoint> findTrendPoint(
+    const std::vector<AnalysisTrendPoint>& rows,
+    const std::string& dateLabel) {
+    const auto it = std::find_if(rows.begin(), rows.end(), [&](const AnalysisTrendPoint& row) {
+        return row.dateLabel == dateLabel;
+    });
+    if (it == rows.end()) {
+        return std::nullopt;
+    }
+    return *it;
+}
+
+} // namespace
+
+TEST_CASE("AnalysisQueryEngine builds rollup-backed daily summaries breakdowns and trend points from persisted usage scope", "[analysis][query_engine][analysis_query_engine]") {
+    TempDbFile tempDb;
+    StorageService storage;
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
+    const std::time_t openaiDayOne = makeUtcTime(2026, 4, 18, 8, 0, 0);
+    const std::time_t openaiDayTwo = makeUtcTime(2026, 4, 19, 9, 0, 0);
+    const std::time_t minimaxDayTwo = makeUtcTime(2026, 4, 19, 11, 0, 0);
+
+    seedUsageEvent(storage, "openai", "OpenAI", openaiDayOne, 240, 18, "gpt-4.1");
+    seedUsageEvent(storage, "openai", "OpenAI", openaiDayTwo, 180, 14, "gpt-4.1");
+    seedUsageEvent(storage, "minimax", "MiniMax", minimaxDayTwo, 500, 40, "minimax-m1");
+
+    const int openaiProviderId = requireProviderId(storage, "openai");
+    const int openaiAccountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    REQUIRE(storage.rebuildUsageRollups(
+        UsageRollupResolution::Daily,
+        openaiProviderId,
+        openaiAccountId,
+        makeUtcTime(2026, 4, 17, 0, 0, 0),
+        now));
+    seedGapMarker(
+        storage,
+        "openai",
+        "OpenAI",
+        AnalysisGapClassification::Unknown,
+        makeUtcTime(2026, 4, 18, 0, 0, 0),
+        "analysis query gap",
+        "test");
+
+    AnalysisQueryEngine engine(storage);
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {
+        makeProvider("openai", "OpenAI", "acct-openai-primary"),
+        makeProvider("openai", "OpenAI", "acct-openai-secondary"),
+        makeProvider("openai", "OpenAI", "acct-openai-primary"),
+        makeProvider("minimax", "MiniMax", "acct-minimax")
+    };
+
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = "openai.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last7Days;
+
+    const AnalysisViewModel analysis = engine.buildViewModel(
+        dashboard,
+        preferences,
+        now);
+    const std::vector<std::string> accountOptions = optionPairs(analysis.availableAccounts);
+    const std::string openaiDayOneLabel = "2026-04-18";
+    const std::string openaiDayTwoLabel = "2026-04-19";
+
+    CHECK(analysis.scope.selectedProviderId == "openai");
+    CHECK(analysis.scope.selectedAccountId == "openai.runtime_status");
+    CHECK(analysis.scope.dateRangePreset == AnalysisDateRangePreset::Last7Days);
+    CHECK(analysis.trendBucketGranularity == AnalysisTrendBucketGranularity::Daily);
+    CHECK(analysis.trendBucketLabel == "Daily");
+    CHECK(optionPairs(analysis.availableProviders).size() >= 3);
+    CHECK(std::find_if(
+        analysis.availableProviders.begin(),
+        analysis.availableProviders.end(),
+        [](const AnalysisScopeOption& option) {
+            return option.key == "openai" && option.label == "OpenAI";
+        }) != analysis.availableProviders.end());
+    CHECK(std::find_if(
+        analysis.availableProviders.begin(),
+        analysis.availableProviders.end(),
+        [](const AnalysisScopeOption& option) {
+            return option.key == "minimax" && option.label == "MiniMax";
+        }) != analysis.availableProviders.end());
+    CHECK(accountOptions.size() >= 2);
+    CHECK(std::find(
+        accountOptions.begin(),
+        accountOptions.end(),
+        "openai.runtime_status|OpenAI / OpenAI Runtime") != accountOptions.end());
+    CHECK(analysis.scopeLabel == "OpenAI / OpenAI / OpenAI Runtime / Last 7 Days");
+
+    const auto dayOneSummary = findDailySummary(analysis.dailySummaries, openaiDayOneLabel);
+    const auto dayTwoSummary = findDailySummary(analysis.dailySummaries, openaiDayTwoLabel);
+    REQUIRE(dayOneSummary.has_value());
+    REQUIRE(dayTwoSummary.has_value());
+    CHECK(dayOneSummary->activityCount >= 1);
+    CHECK(dayTwoSummary->activityCount >= 1);
+    CHECK(dayOneSummary->sourceLabel != "Unknown");
+    CHECK(dayTwoSummary->sourceLabel != "Unknown");
+    CHECK(dayOneSummary->gapDetail.classification != AnalysisGapClassification::None);
+    CHECK_FALSE(dayOneSummary->gapDetail.classificationLabel.empty());
+    CHECK(dayOneSummary->gapDetail.basisSummary.find("analysis query gap") != std::string::npos);
+
+    const auto providerRow = findBreakdownRow(analysis.providerBreakdown, "OpenAI");
+    REQUIRE(providerRow.has_value());
+    CHECK(providerRow->activityCount >= 2);
+    CHECK(providerRow->sourceLabel != "Unknown");
+
+    const auto accountRow = findBreakdownRow(analysis.accountBreakdown, "OpenAI Runtime");
+    REQUIRE(accountRow.has_value());
+    CHECK(accountRow->activityCount >= 2);
+    CHECK(accountRow->secondaryLabel == "OpenAI");
+    CHECK(accountRow->sourceLabel != "Unknown");
+
+    const auto dayOneTrend = findTrendPoint(analysis.trendPoints, openaiDayOneLabel);
+    const auto dayTwoTrend = findTrendPoint(analysis.trendPoints, openaiDayTwoLabel);
+    REQUIRE(dayOneTrend.has_value());
+    REQUIRE(dayTwoTrend.has_value());
+    CHECK(dayOneTrend->activityCount == dayOneSummary->activityCount);
+    CHECK(dayTwoTrend->activityCount == dayTwoSummary->activityCount);
+
+    CHECK(analysis.gapSummaryCounts.knownZeroDays == 0);
+    CHECK(analysis.gapSummaryCounts.reconstructedDays == 0);
+    CHECK(analysis.gapSummaryCounts.unknownDays >= 1);
+    CHECK(analysis.gapSummaryCounts.unknownSourceDays >= 0);
+    CHECK(analysis.dataQualityNote.find("Rollup") != std::string::npos);
+    CHECK(analysis.dataQualityNote.find("gap") != std::string::npos);
+    CHECK(analysis.dataQualityNote.find("Trend buckets: Daily") != std::string::npos);
+}
+
+TEST_CASE("AnalysisQueryEngine keeps Codex throughput separate from scoped usage summaries", "[analysis][query_engine][analysis_query_engine][codex]") {
+    TempDbFile tempDb;
+    StorageService storage;
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
+    seedUsageEvent(storage, "openai", "OpenAI", now - 240, 120, 12, "gpt-4.1");
+    seedCodexUsageEvent(storage, now - 120, 150);
+    seedCodexUsageEvent(storage, now - 60, 300);
+    seedCodexUsageEvent(storage, now, 450);
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("openai", "OpenAI", "openai.runtime_status")};
+
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = "openai.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last24Hours;
+
+    AnalysisQueryEngine engine(storage);
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+
+    REQUIRE(analysis.codexThroughput.hasData);
+    CHECK(analysis.codexThroughput.tokensPerMinute5m == Catch::Approx(60.0));
+    CHECK(analysis.codexThroughput.promptsPerMinute5m == Catch::Approx(0.4));
+    CHECK(analysis.codexThroughput.tokensPerMinute30m == Catch::Approx(10.0));
+    CHECK(analysis.codexThroughput.promptsPerMinute30m == Catch::Approx(1.0 / 15.0));
+    CHECK(analysis.codexThroughput.tokensLast1h == 300);
+    CHECK(analysis.codexThroughput.promptsLast1h == 2);
+    CHECK(analysis.codexThroughput.averageDailyTokens == 10);
+    CHECK(analysis.codexThroughput.averageDailyPrompts == 0);
+    CHECK(analysis.codexThroughput.averageMonthlyTokens == 15);
+    CHECK(analysis.codexThroughput.averageMonthlyPrompts == 0);
+    CHECK(analysis.codexThroughput.calendarMonthTokens == 300);
+    CHECK(analysis.codexThroughput.calendarMonthPrompts == 2);
+    CHECK(analysis.codexThroughput.rolling30DayTokens == 300);
+    CHECK(analysis.codexThroughput.rolling30DayPrompts == 2);
+    CHECK(analysis.codexThroughput.confidenceLabel == "LocalExact");
+    REQUIRE(analysis.codexHourlyHistory.hasData);
+    CHECK(analysis.codexHourlyHistory.points.size() == 3);
+
+    const auto currentDaySummary = findDailySummary(analysis.dailySummaries, "2026-04-20");
+    REQUIRE(currentDaySummary.has_value());
+    CHECK(currentDaySummary->activityCount == 1);
+}
+
+TEST_CASE("AnalysisQueryEngine limits Codex throughput chart history to the active thirty-minute window", "[analysis][query_engine][analysis_query_engine][codex]") {
+    TempDbFile tempDb;
+    StorageService storage;
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
+    seedCodexUsageEvent(storage, now - 3600, 100);
+    seedCodexUsageEvent(storage, now - 120, 200);
+    seedCodexUsageEvent(storage, now - 60, 300);
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("openai", "OpenAI", "openai.runtime_status")};
+    DashboardPreferences preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last24Hours;
+
+    AnalysisQueryEngine engine(storage);
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+
+    REQUIRE(analysis.codexHourlyHistory.hasData);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 2);
+    CHECK(analysis.codexHourlyHistory.points.front().snapshotTime == now - 120);
+    CHECK(analysis.codexHourlyHistory.points.back().snapshotTime == now - 60);
+}
+
+TEST_CASE("AnalysisQueryEngine separates Codex calendar month totals from rolling thirty day totals", "[analysis][query_engine][analysis_query_engine][codex]") {
+    TempDbFile tempDb;
+    StorageService storage;
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
+    seedCodexUsageEvent(storage, now - (25 * 86400), 100, "codex://rollout/march");
+    seedCodexUsageEvent(storage, now - (24 * 86400), 400, "codex://rollout/march");
+    seedCodexUsageEvent(storage, makeUtcTime(2026, 4, 5, 12, 0, 0), 50, "codex://rollout/april");
+    seedCodexUsageEvent(storage, makeUtcTime(2026, 4, 19, 12, 0, 0), 250, "codex://rollout/april");
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("openai", "OpenAI", "openai.runtime_status")};
+    DashboardPreferences preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last24Hours;
+
+    AnalysisQueryEngine engine(storage);
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+
+    REQUIRE(analysis.codexThroughput.hasData);
+    CHECK(analysis.codexThroughput.calendarMonthTokens == 200);
+    CHECK(analysis.codexThroughput.calendarMonthPrompts == 1);
+    CHECK(analysis.codexThroughput.rolling30DayTokens == 500);
+    CHECK(analysis.codexThroughput.rolling30DayPrompts == 2);
+    CHECK(analysis.codexThroughput.averageDailyTokens == 16);
+    CHECK(analysis.codexThroughput.averageMonthlyTokens == 10);
+}
+
+TEST_CASE("AnalysisQueryEngine computes Codex throughput within rollout session boundaries", "[analysis][query_engine][analysis_query_engine][codex]") {
+    TempDbFile tempDb;
+    StorageService storage;
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
+    seedCodexUsageEvent(storage, now - 120, 100, "codex://rollout/a");
+    seedCodexUsageEvent(storage, now - 90, 10000, "codex://rollout/b");
+    seedCodexUsageEvent(storage, now - 60, 200, "codex://rollout/a");
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("openai", "OpenAI", "openai.runtime_status")};
+
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = "openai.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last24Hours;
+
+    AnalysisQueryEngine engine(storage);
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+
+    REQUIRE(analysis.codexThroughput.hasData);
+    CHECK(analysis.codexThroughput.tokensPerMinute5m == Catch::Approx(20.0));
+    CHECK(analysis.codexThroughput.promptsPerMinute5m == Catch::Approx(0.2));
+    CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
+}
+
+TEST_CASE("AnalysisQueryEngine keeps Codex model usage buckets granular for recent deltas", "[analysis][query_engine][analysis_query_engine][codex]") {
+    TempDbFile tempDb;
+    StorageService storage;
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
+    seedCodexSqliteUsageEvent(storage, "openai", "gpt-5.5", now - 45 * 60, 100);
+    seedCodexSqliteUsageEvent(storage, "openai", "gpt-5.5", now - 38 * 60, 200);
+    seedCodexSqliteUsageEvent(storage, "openai", "gpt-5.5", now - 31 * 60, 300);
+    seedCodexSqliteUsageEvent(storage, "openai", "gpt-5.5", now - 24 * 60, 400);
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("openai", "OpenAI", "openai.runtime_status")};
+    DashboardPreferences preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last24Hours;
+
+    AnalysisQueryEngine engine(storage);
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+
+    REQUIRE(analysis.openAiCodexModelUsage.hasData);
+    REQUIRE(analysis.openAiCodexModelUsage.series.size() == 1);
+    CHECK(analysis.openAiCodexModelUsage.series.front().points.size() == 4);
+    CHECK(analysis.openAiCodexModelUsage.series.front().totalTokens == 1000);
+}
+
+TEST_CASE("AnalysisQueryEngine clears stale scope selections without inventing scoped account rows", "[analysis][query_engine][analysis_query_engine]") {
+    StorageService storage;
+    AnalysisQueryEngine engine(storage);
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {
+        makeProvider("openai", "OpenAI", "acct-openai-primary"),
+        makeProvider("minimax", "MiniMax", "acct-minimax")
+    };
+
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "missing-provider";
+    preferences.analysisSelectedAccountId = "missing-account";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last7Days;
+
+    const AnalysisViewModel analysis = engine.buildViewModel(
+        dashboard,
+        preferences,
+        makeUtcTime(2026, 4, 20, 18, 0, 0));
+
+    CHECK(analysis.scope.selectedProviderId.empty());
+    CHECK(analysis.scope.selectedAccountId.empty());
+    CHECK(analysis.scopeLabel == "All Providers / All Accounts / Last 7 Days");
+    REQUIRE_FALSE(analysis.availableAccounts.empty());
+    CHECK(analysis.availableAccounts.front().key.empty());
+    CHECK(analysis.availableAccounts.front().label == "All Accounts");
+    CHECK(analysis.dailySummaries.empty());
+    CHECK(analysis.providerBreakdown.empty());
+    CHECK(analysis.accountBreakdown.empty());
+    CHECK(analysis.trendPoints.empty());
+}
+
+TEST_CASE("AnalysisQueryEngine resolves custom windows to UTC day bounds and clamps the end at now", "[analysis][query_engine][analysis_query_engine]") {
+    StorageService storage;
+    AnalysisQueryEngine engine(storage);
+
+    DashboardPreferences preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = makeUtcTime(2026, 4, 18, 15, 30, 0);
+    preferences.analysisCustomRangeEndUtc = makeUtcTime(2026, 4, 20, 1, 0, 0);
+
+    const std::time_t now = makeUtcTime(2026, 4, 19, 12, 34, 56);
+    const ResolvedAnalysisWindow window = engine.resolveWindow(preferences, now);
+
+    CHECK(window.start == makeUtcTime(2026, 4, 18, 0, 0, 0));
+    CHECK(window.end == now);
+    CHECK(window.label == "2026-04-18 to 2026-04-19 UTC");
+    CHECK(toTimeT(window.reportDateRange.start) == window.start);
+    CHECK(toTimeT(window.reportDateRange.end) == window.end);
+}
+
+TEST_CASE("AnalysisQueryEngine falls back invalid custom preferences to the effective last-7-days preset", "[analysis][query_engine][analysis_query_engine]") {
+    StorageService storage;
+    AnalysisQueryEngine engine(storage);
+
+    DashboardViewModel dashboard;
+    DashboardPreferences preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+
+    const std::time_t now = makeUtcTime(2026, 4, 19, 12, 34, 56);
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+    const ResolvedAnalysisWindow window = engine.resolveWindow(preferences, now);
+
+    CHECK(window.effectivePreset == AnalysisDateRangePreset::Last7Days);
+    CHECK(window.label == "Last 7 Days");
+    CHECK(analysis.scope.dateRangePreset == AnalysisDateRangePreset::Last7Days);
+    CHECK(analysis.scopeLabel == "All Providers / All Accounts / Last 7 Days");
+}
+
+TEST_CASE("AnalysisQueryEngine falls back missing current-quota windows to the effective this-month preset", "[analysis][query_engine][analysis_query_engine]") {
+    TempDbFile tempDb;
+    StorageService storage;
+
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    AnalysisQueryEngine engine(storage);
+    DashboardViewModel dashboard;
+    DashboardPreferences preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::CurrentQuotaWindow;
+
+    const std::time_t now = makeUtcTime(2026, 4, 19, 12, 34, 56);
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+    const ResolvedAnalysisWindow window = engine.resolveWindow(preferences, now);
+
+    CHECK(window.effectivePreset == AnalysisDateRangePreset::ThisMonth);
+    CHECK(window.label == "This Month");
+    CHECK(analysis.scope.dateRangePreset == AnalysisDateRangePreset::ThisMonth);
+    CHECK(analysis.scopeLabel == "All Providers / All Accounts / This Month");
+}
+
+TEST_CASE("AnalysisQueryEngine combines persisted usage and local activity into shared provider and account breakdowns", "[analysis][query_engine][analysis_query_engine]") {
+    TempDbFile tempDb;
+    StorageService storage;
+
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
+    const std::time_t openaiDay = makeUtcTime(2026, 4, 18, 8, 0, 0);
+    const std::time_t localDay = makeUtcTime(2026, 4, 19, 9, 0, 0);
+    seedUsageEvent(storage, "openai", "OpenAI", openaiDay, 240, 18, "gpt-4.1");
+    seedLocalActivity(storage, "openai", "OpenAI", "openai_subscription_local", localDay, 300);
+    seedLocalActivity(storage, "claude_code", "Claude Code", "claude_code_local_stats", localDay, 420);
+    seedGapMarker(
+        storage,
+        "openai",
+        "OpenAI",
+        AnalysisGapClassification::Reconstructed,
+        makeUtcTime(2026, 4, 19, 0, 0, 0),
+        "recovered activity window",
+        "recovery");
+
+    AnalysisQueryEngine engine(storage);
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {
+        makeProvider("openai", "OpenAI", "openai.runtime_status"),
+        makeProvider("claude_code", "Claude Code", "claude_code.runtime_status")
+    };
+
+    DashboardPreferences preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last7Days;
+
+    const AnalysisViewModel analysis = engine.buildViewModel(
+        dashboard,
+        preferences,
+        now);
+
+    CHECK(analysis.scope.selectedProviderId.empty());
+    CHECK(analysis.scope.selectedAccountId.empty());
+    CHECK(analysis.scopeLabel == "All Providers / All Accounts / Last 7 Days");
+    CHECK(std::any_of(
+        analysis.availableProviders.begin(),
+        analysis.availableProviders.end(),
+        [](const AnalysisScopeOption& option) { return option.key == "openai"; }));
+    CHECK(std::any_of(
+        analysis.availableProviders.begin(),
+        analysis.availableProviders.end(),
+        [](const AnalysisScopeOption& option) { return option.key == "claude_code"; }));
+
+    const auto openaiDaySummary = findDailySummary(analysis.dailySummaries, "2026-04-18");
+    const auto localDaySummary = findDailySummary(analysis.dailySummaries, "2026-04-19");
+    REQUIRE(openaiDaySummary.has_value());
+    REQUIRE(localDaySummary.has_value());
+    CHECK(openaiDaySummary->activityCount >= 1);
+    CHECK(localDaySummary->activityCount >= 2);
+    CHECK(openaiDaySummary->sourceLabel != "Unknown");
+    CHECK(localDaySummary->sourceLabel != "Unknown");
+    CHECK(localDaySummary->gapDetail.classification != AnalysisGapClassification::None);
+
+    const auto openaiProviderRow = findBreakdownRow(analysis.providerBreakdown, "OpenAI");
+    const auto claudeProviderRow = findBreakdownRow(analysis.providerBreakdown, "Claude Code");
+    REQUIRE(openaiProviderRow.has_value());
+    REQUIRE(claudeProviderRow.has_value());
+    CHECK(openaiProviderRow->activityCount >= 2);
+    CHECK(claudeProviderRow->activityCount >= 1);
+    CHECK(openaiProviderRow->sourceLabel != "Unknown");
+    CHECK(claudeProviderRow->sourceLabel != "Unknown");
+
+    const auto openaiAccountRow = findBreakdownRow(analysis.accountBreakdown, "OpenAI Runtime");
+    const auto claudeAccountRow = std::find_if(
+        analysis.accountBreakdown.begin(),
+        analysis.accountBreakdown.end(),
+        [](const AnalysisBreakdownRow& row) {
+            return row.secondaryLabel == "Claude Code" ||
+                row.label.find("Claude") != std::string::npos ||
+                row.key.find("claude_code.runtime_status") != std::string::npos;
+        });
+    REQUIRE(openaiAccountRow.has_value());
+    REQUIRE(claudeAccountRow != analysis.accountBreakdown.end());
+    CHECK(openaiAccountRow->secondaryLabel == "OpenAI");
+    CHECK(claudeAccountRow->activityCount >= 1);
+
+    const auto openaiTrend = findTrendPoint(analysis.trendPoints, "2026-04-18");
+    const auto localTrend = findTrendPoint(analysis.trendPoints, "2026-04-19");
+    REQUIRE(openaiTrend.has_value());
+    REQUIRE(localTrend.has_value());
+    CHECK(openaiTrend->activityCount == openaiDaySummary->activityCount);
+    CHECK(localTrend->activityCount == localDaySummary->activityCount);
+
+    CHECK(analysis.gapSummaryCounts.reconstructedDays >= 1);
+    CHECK((analysis.dataQualityNote.find("local") != std::string::npos ||
+           analysis.dataQualityNote.find("reconstructed") != std::string::npos ||
+           analysis.dataQualityNote.find("provenance") != std::string::npos));
+}
+
+TEST_CASE("AnalysisQueryEngine builds hourly trend buckets from persisted rollups and raw edge usage for short windows", "[analysis][query_engine][analysis_query_engine]") {
+    TempDbFile tempDb;
+    StorageService storage;
+
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 12, 34, 56);
+    const std::time_t rolledHourOne = makeUtcTime(2026, 4, 20, 9, 5, 0);
+    const std::time_t rolledHourTwo = makeUtcTime(2026, 4, 20, 10, 15, 0);
+    const std::time_t rawEdgeHour = makeUtcTime(2026, 4, 20, 12, 10, 0);
+
+    seedUsageEvent(storage, "openai", "OpenAI", rolledHourOne, 240, 18, "gpt-4.1");
+    seedUsageEvent(storage, "openai", "OpenAI", rolledHourTwo, 180, 14, "gpt-4.1");
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    REQUIRE(storage.rebuildUsageRollups(
+        UsageRollupResolution::Hourly,
+        providerId,
+        accountId,
+        makeUtcTime(2026, 4, 20, 9, 0, 0),
+        makeUtcTime(2026, 4, 20, 10, 59, 59)));
+
+    seedUsageEvent(storage, "openai", "OpenAI", rawEdgeHour, 300, 21, "gpt-4.1");
+
+    AnalysisQueryEngine engine(storage);
+    DashboardViewModel dashboard;
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = "openai.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Today;
+
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+
+    CHECK(analysis.trendBucketGranularity == AnalysisTrendBucketGranularity::Hourly);
+    CHECK(analysis.trendBucketLabel == "Hourly");
+    REQUIRE(analysis.trendPoints.size() == 13);
+
+    const auto rolledPointOne = findTrendPoint(analysis.trendPoints, "04-20 09:00");
+    const auto rolledPointTwo = findTrendPoint(analysis.trendPoints, "04-20 10:00");
+    const auto rawPoint = findTrendPoint(analysis.trendPoints, "04-20 12:00");
+    REQUIRE(rolledPointOne.has_value());
+    REQUIRE(rolledPointTwo.has_value());
+    REQUIRE(rawPoint.has_value());
+    CHECK(rolledPointOne->activityCount == 1);
+    CHECK(rolledPointTwo->activityCount == 1);
+    CHECK(rawPoint->activityCount == 1);
+    CHECK(rolledPointOne->bucketStartUtc == makeUtcTime(2026, 4, 20, 9, 0, 0));
+    CHECK(rolledPointOne->bucketEndUtc == makeUtcTime(2026, 4, 20, 9, 59, 59));
+    CHECK(rawPoint->bucketStartUtc == makeUtcTime(2026, 4, 20, 12, 0, 0));
+    CHECK(rawPoint->bucketEndUtc == now);
+    CHECK(analysis.dataQualityNote.find("Trend buckets: Hourly across 13 points.") != std::string::npos);
+
+    REQUIRE(analysis.dailySummaries.size() == 1);
+    CHECK(analysis.dailySummaries.front().dateLabel == "2026-04-20");
+    CHECK(analysis.dailySummaries.front().activityCount == 3);
+}
+
+TEST_CASE("AnalysisQueryEngine surfaces persisted quota recovery and export status in scoped data quality notes", "[analysis][query_engine][analysis_query_engine]") {
+    TempDbFile tempDb;
+    StorageService storage;
+
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
+    const int providerId = requireProviderId(storage, "minimax");
+    const int accountId = ensureRuntimeAccountId(storage, "minimax", "MiniMax");
+    seedUsageEvent(storage, "minimax", "MiniMax", makeUtcTime(2026, 4, 20, 10, 0, 0), 500, 40, "minimax-m1");
+    REQUIRE(storage.rebuildUsageRollups(
+        UsageRollupResolution::Daily,
+        providerId,
+        accountId,
+        makeUtcTime(2026, 4, 14, 0, 0, 0),
+        now));
+
+    const QueryResult planInsert = storage.execute(
+        "INSERT INTO plans (account_id, plan_key, plan_type, display_name, quota_window, limit_value) "
+        "VALUES (?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string(accountId),
+            "minimax_subscription_coding_plan",
+            "subscription",
+            "MiniMax Coding Plan",
+            "daily",
+            "1000"
+        });
+    REQUIRE(planInsert.success());
+    const long long planId = planInsert.lastInsertRowId();
+
+    REQUIRE(storage.execute(
+        "INSERT INTO quota_snapshots ("
+        "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
+        "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string(providerId),
+            std::to_string(accountId),
+            std::to_string(planId),
+            "2026-04-20T17:30:00Z",
+            "2026-04-20T00:00:00Z",
+            "2026-04-20T23:59:59Z",
+            "300",
+            "1000",
+            "high",
+            "Persisted analysis test snapshot",
+            "requests",
+            "700",
+            "1"
+        }).success());
+
+    PersistedRecoveryCheckpoint checkpoint;
+    checkpoint.providerId = providerId;
+    checkpoint.accountId = accountId;
+    checkpoint.syncKind = "runtime_backfill";
+    checkpoint.recoveryStart = makeUtcTime(2026, 4, 20, 15, 0, 0);
+    checkpoint.recoveryEnd = makeUtcTime(2026, 4, 20, 16, 0, 0);
+    checkpoint.attemptAt = makeUtcTime(2026, 4, 20, 16, 30, 0);
+    checkpoint.outcome = "imported";
+    checkpoint.fetchedEventCount = 2;
+    checkpoint.comparisonResult = "mismatch";
+    checkpoint.localEventCount = 1;
+    checkpoint.localTotalTokens = 120;
+    checkpoint.importedTotalTokens = 150;
+    REQUIRE(storage.insertRecoveryCheckpoint(checkpoint));
+
+    PersistedRecoveryCheckpoint failedCheckpoint = checkpoint;
+    failedCheckpoint.attemptAt = makeUtcTime(2026, 4, 20, 16, 45, 0);
+    failedCheckpoint.outcome = "persist_failed";
+    failedCheckpoint.fetchedEventCount = 0;
+    failedCheckpoint.comparisonResult = "not_available";
+    failedCheckpoint.localEventCount = 0;
+    failedCheckpoint.localTotalTokens = 0;
+    failedCheckpoint.importedTotalTokens = 0;
+    failedCheckpoint.failureCategory = "provider_backfill_persist_failed";
+    REQUIRE(storage.insertRecoveryCheckpoint(failedCheckpoint));
+
+    PersistedExportRun manualExport;
+    manualExport.runKind = "manual_html";
+    manualExport.format = "html";
+    manualExport.requestedAt = makeUtcTime(2026, 4, 20, 17, 0, 0);
+    manualExport.completedAt = makeUtcTime(2026, 4, 20, 17, 1, 0);
+    manualExport.success = true;
+    manualExport.outputPath = "C:/temp/manual-report.html";
+    manualExport.rangeStart = makeUtcTime(2026, 4, 14, 0, 0, 0);
+    manualExport.rangeEnd = now;
+    manualExport.providerFilterCsv = "minimax";
+    manualExport.accountFilterCsv = "minimax.runtime_status";
+    REQUIRE(storage.insertExportRun(manualExport));
+
+    PersistedExportRun scheduledExport;
+    scheduledExport.runKind = "scheduled_html";
+    scheduledExport.format = "html";
+    scheduledExport.requestedAt = makeUtcTime(2026, 4, 20, 17, 30, 0);
+    scheduledExport.completedAt = makeUtcTime(2026, 4, 20, 17, 31, 0);
+    scheduledExport.success = false;
+    scheduledExport.errorSummary = "disk full";
+    scheduledExport.rangeStart = makeUtcTime(2026, 4, 14, 0, 0, 0);
+    scheduledExport.rangeEnd = now;
+    scheduledExport.providerFilterCsv = "minimax";
+    scheduledExport.accountFilterCsv = "minimax.runtime_status";
+    REQUIRE(storage.insertExportRun(scheduledExport));
+
+    AnalysisQueryEngine engine(storage);
+
+    DashboardViewModel dashboard;
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "minimax";
+    preferences.analysisSelectedAccountId = "minimax.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last7Days;
+
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+
+    REQUIRE_FALSE(analysis.dailySummaries.empty());
+    REQUIRE(analysis.quotaTrendSeries.size() == 1);
+    const auto& quotaSeries = analysis.quotaTrendSeries.front();
+    CHECK(quotaSeries.label == "MiniMax Coding Plan 1d");
+    CHECK(quotaSeries.windowLabel == "1d");
+    CHECK(quotaSeries.points.size() == 1);
+    CHECK(quotaSeries.latestRemainingValue == 700);
+    CHECK(quotaSeries.latestRemainingPercentage == Catch::Approx(70.0));
+    CHECK(quotaSeries.lowWaterRemainingPercentage == Catch::Approx(70.0));
+    CHECK(quotaSeries.resetCount == 0);
+    CHECK(std::any_of(
+        analysis.availableProviders.begin(),
+        analysis.availableProviders.end(),
+        [](const AnalysisScopeOption& option) { return option.key == "minimax"; }));
+    CHECK(std::any_of(
+        analysis.availableAccounts.begin(),
+        analysis.availableAccounts.end(),
+        [](const AnalysisScopeOption& option) { return option.key == "minimax.runtime_status"; }));
+    CHECK(analysis.scope.selectedProviderId == "minimax");
+    CHECK(analysis.scope.selectedAccountId == "minimax.runtime_status");
+    CHECK(analysis.dataQualityNote.find("Recovery checkpoints: 1 imported, 1 mismatch, 1 failed.") != std::string::npos);
+    CHECK(analysis.dataQualityNote.find("Persisted quota history points in scope: 1 across 1 series") != std::string::npos);
+    CHECK(analysis.dataQualityNote.find("Latest manual export:") != std::string::npos);
+    CHECK(analysis.dataQualityNote.find("Latest scheduled export:") != std::string::npos);
+    CHECK(analysis.dataQualityNote.find("(success)") != std::string::npos);
+    CHECK(analysis.dataQualityNote.find("(failed)") != std::string::npos);
+}
+
+TEST_CASE("AnalysisQueryEngine builds reset-aware quota trend series from scoped quota snapshots", "[analysis][query_engine][analysis_query_engine]") {
+    TempDbFile tempDb;
+    StorageService storage;
+
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 20, 0, 0);
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+
+    const QueryResult planInsert = storage.execute(
+        "INSERT INTO plans (account_id, plan_key, plan_type, display_name, quota_window, limit_value) "
+        "VALUES (?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string(accountId),
+            "openai_subscription_5h",
+            "subscription",
+            "OpenAI 5h",
+            "rolling",
+            "1000"
+        });
+    REQUIRE(planInsert.success());
+    const long long planId = planInsert.lastInsertRowId();
+
+    auto insertSnapshot = [&](const char* snapshotTime,
+                              const char* windowStart,
+                              const char* windowEnd,
+                              const char* usedValue,
+                              const char* remainingValue) {
+        REQUIRE(storage.execute(
+            "INSERT INTO quota_snapshots ("
+            "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
+            "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            {
+                std::to_string(providerId),
+                std::to_string(accountId),
+                std::to_string(planId),
+                snapshotTime,
+                windowStart,
+                windowEnd,
+                usedValue,
+                "1000",
+                "high",
+                "Reset-aware quota trend test snapshot",
+                "requests",
+                remainingValue,
+                "1"
+            }).success());
+    };
+
+    insertSnapshot("2026-04-20T09:00:00Z", "2026-04-20T05:00:00Z", "2026-04-20T10:00:00Z", "120", "880");
+    insertSnapshot("2026-04-20T11:00:00Z", "2026-04-20T05:00:00Z", "2026-04-20T10:00:00Z", "590", "410");
+    insertSnapshot("2026-04-20T15:30:00Z", "2026-04-20T10:00:01Z", "2026-04-20T15:00:00Z", "50", "950");
+
+    AnalysisQueryEngine engine(storage);
+    DashboardViewModel dashboard;
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = "openai.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Today;
+
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+
+    REQUIRE(analysis.quotaTrendSeries.size() == 1);
+    const auto& quotaSeries = analysis.quotaTrendSeries.front();
+    CHECK(quotaSeries.label == "OpenAI 5h");
+    CHECK(quotaSeries.points.size() == 3);
+    CHECK(quotaSeries.latestRemainingValue == 950);
+    CHECK(quotaSeries.latestRemainingPercentage == Catch::Approx(95.0));
+    CHECK(quotaSeries.lowWaterRemainingPercentage == Catch::Approx(41.0));
+    CHECK(quotaSeries.resetCount == 1);
+    CHECK(quotaSeries.points[0].resetPoint == false);
+    CHECK(quotaSeries.points[1].resetPoint == false);
+    CHECK(quotaSeries.points[2].resetPoint == true);
+}
+
+TEST_CASE("AnalysisQueryEngine prefers daily quota rollups for long-range quota history", "[analysis][query_engine][analysis_query_engine]") {
+    TempDbFile tempDb;
+    StorageService storage;
+
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 20, 0, 0);
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+
+    const QueryResult planInsert = storage.execute(
+        "INSERT INTO plans (account_id, plan_key, plan_type, display_name, quota_window, limit_value) "
+        "VALUES (?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string(accountId),
+            "openai_subscription_5h",
+            "subscription",
+            "OpenAI 5h",
+            "rolling",
+            "1000"
+        });
+    REQUIRE(planInsert.success());
+    const long long planId = planInsert.lastInsertRowId();
+
+    auto insertSnapshot = [&](const char* snapshotTime,
+                              const char* windowStart,
+                              const char* windowEnd,
+                              const char* usedValue,
+                              const char* remainingValue) {
+        REQUIRE(storage.execute(
+            "INSERT INTO quota_snapshots ("
+            "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
+            "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            {
+                std::to_string(providerId),
+                std::to_string(accountId),
+                std::to_string(planId),
+                snapshotTime,
+                windowStart,
+                windowEnd,
+                usedValue,
+                "1000",
+                "high",
+                "Long-range rollup quota test snapshot",
+                "requests",
+                remainingValue,
+                "1"
+            }).success());
+    };
+
+    insertSnapshot("2026-04-01T08:00:00Z", "2026-04-01T05:00:00Z", "2026-04-01T10:00:00Z", "100", "900");
+    insertSnapshot("2026-04-01T09:00:00Z", "2026-04-01T05:00:00Z", "2026-04-01T10:00:00Z", "550", "450");
+    insertSnapshot("2026-04-01T11:00:00Z", "2026-04-01T10:00:00Z", "2026-04-01T15:00:00Z", "250", "750");
+    insertSnapshot("2026-04-10T09:00:00Z", "2026-04-10T05:00:00Z", "2026-04-10T10:00:00Z", "350", "650");
+    insertSnapshot("2026-04-10T14:00:00Z", "2026-04-10T10:00:00Z", "2026-04-10T15:00:00Z", "600", "400");
+
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(
+        providerId,
+        accountId,
+        makeUtcTime(2026, 4, 1, 0, 0, 0),
+        now));
+
+    AnalysisQueryEngine engine(storage);
+    DashboardViewModel dashboard;
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = "openai.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = makeUtcTime(2026, 4, 1, 0, 0, 0);
+    preferences.analysisCustomRangeEndUtc = now;
+
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+
+    REQUIRE(analysis.quotaTrendSeries.size() == 1);
+    const auto& quotaSeries = analysis.quotaTrendSeries.front();
+    CHECK(quotaSeries.label == "OpenAI 5h");
+    REQUIRE(quotaSeries.points.size() == 2);
+    CHECK(quotaSeries.points[0].remainingValue == 750);
+    CHECK(quotaSeries.points[1].remainingValue == 400);
+    CHECK(quotaSeries.latestRemainingValue == 400);
+    CHECK(quotaSeries.latestRemainingPercentage == Catch::Approx(40.0));
+    CHECK(quotaSeries.lowWaterRemainingPercentage == Catch::Approx(40.0));
+    CHECK(quotaSeries.resetCount == 2);
+    CHECK(quotaSeries.points[0].resetPoint == true);
+    CHECK(quotaSeries.points[1].resetPoint == true);
+    CHECK(analysis.dataQualityNote.find("Persisted quota history points in scope: 2 across 1 series") != std::string::npos);
+    CHECK(analysis.dataQualityNote.find("daily rollup-backed") != std::string::npos);
+}
+
+TEST_CASE("AnalysisQueryEngine resolves current quota window from the latest scoped quota snapshot", "[analysis][query_engine][analysis_query_engine]") {
+    TempDbFile tempDb;
+    StorageService storage;
+
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 20, 20, 0, 0);
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+
+    const QueryResult planInsert = storage.execute(
+        "INSERT INTO plans (account_id, plan_key, plan_type, display_name, quota_window, limit_value) "
+        "VALUES (?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string(accountId),
+            "openai_subscription_5h",
+            "subscription",
+            "OpenAI 5h",
+            "rolling",
+            "1000"
+        });
+    REQUIRE(planInsert.success());
+
+    REQUIRE(storage.execute(
+        "INSERT INTO quota_snapshots ("
+        "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
+        "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string(providerId),
+            std::to_string(accountId),
+            std::to_string(planInsert.lastInsertRowId()),
+            "2026-04-20T15:30:00Z",
+            "2026-04-20T10:00:01Z",
+            "2026-04-20T15:00:00Z",
+            "50",
+            "1000",
+            "high",
+            "Current quota window test snapshot",
+            "requests",
+            "950",
+            "1"
+        }).success());
+    REQUIRE(storage.execute(
+        "INSERT INTO quota_snapshots ("
+        "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
+        "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string(providerId),
+            std::to_string(accountId),
+            std::to_string(planInsert.lastInsertRowId()),
+            "2026-04-20T14:45:00Z",
+            "2026-04-20T10:00:01Z",
+            "2026-04-20T15:00:00Z",
+            "300",
+            "1000",
+            "high",
+            "Current quota window in-range snapshot",
+            "requests",
+            "700",
+            "1"
+        }).success());
+
+    AnalysisQueryEngine engine(storage);
+    DashboardViewModel dashboard;
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = "openai.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::CurrentQuotaWindow;
+
+    const ResolvedAnalysisWindow window = engine.resolveWindow(preferences, now);
+    CHECK(window.start == makeUtcTime(2026, 4, 20, 10, 0, 1));
+    CHECK(window.end == makeUtcTime(2026, 4, 20, 15, 0, 0));
+    CHECK(window.label == "Current Billing/Quota Window");
+
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+    CHECK(analysis.scope.dateRangePreset == AnalysisDateRangePreset::CurrentQuotaWindow);
+    CHECK(analysis.scopeLabel == "OpenAI / OpenAI / OpenAI Runtime / Current Billing/Quota Window");
+    REQUIRE(analysis.quotaTrendSeries.size() == 1);
+    CHECK(analysis.quotaTrendSeries.front().points.size() == 1);
+    CHECK(analysis.quotaTrendSeries.front().points.front().snapshotTime == makeUtcTime(2026, 4, 20, 14, 45, 0));
+}
+
+TEST_CASE("AnalysisQueryEngine offers persisted scope options from quota snapshots and recovery checkpoints without dashboard provider rows", "[analysis][query_engine][analysis_query_engine]") {
+    TempDbFile tempDb;
+    StorageService storage;
+
+    if (!storage.init(tempDb.path())) {
+        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
+        return;
+    }
+
+    const std::time_t now = makeUtcTime(2026, 4, 21, 12, 0, 0);
+    const QueryResult minimaxInsert = storage.execute(
+        "INSERT OR IGNORE INTO providers (provider_key, display_name) VALUES (?, ?);",
+        {"minimax", "MiniMax"});
+    REQUIRE(minimaxInsert.success());
+    const int minimaxProviderId = requireProviderId(storage, "minimax");
+    const int minimaxAccountId = ensureRuntimeAccountId(storage, "minimax", "MiniMax");
+    const QueryResult kimiInsert = storage.execute(
+        "INSERT OR IGNORE INTO providers (provider_key, display_name) VALUES (?, ?);",
+        {"kimi", "Kimi Code"});
+    REQUIRE(kimiInsert.success());
+    const int kimiProviderId = requireProviderId(storage, "kimi");
+    const int kimiAccountId = ensureRuntimeAccountId(storage, "kimi", "Kimi Code");
+
+    const QueryResult planInsert = storage.execute(
+        "INSERT INTO plans (account_id, plan_key, plan_type, display_name, quota_window, limit_value) "
+        "VALUES (?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string(minimaxAccountId),
+            "minimax_subscription_coding_plan",
+            "subscription",
+            "MiniMax Coding Plan",
+            "daily",
+            "1000"
+        });
+    REQUIRE(planInsert.success());
+
+    REQUIRE(storage.execute(
+        "INSERT INTO quota_snapshots ("
+        "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
+        "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string(minimaxProviderId),
+            std::to_string(minimaxAccountId),
+            std::to_string(planInsert.lastInsertRowId()),
+            "2026-04-21T11:45:00Z",
+            "2026-04-21T00:00:00Z",
+            "2026-04-21T23:59:59Z",
+            "320",
+            "1000",
+            "high",
+            "Persisted quota-only scope seed",
+            "requests",
+            "680",
+            "1"
+        }).success());
+
+    PersistedRecoveryCheckpoint kimiCheckpoint;
+    kimiCheckpoint.providerId = kimiProviderId;
+    kimiCheckpoint.accountId = kimiAccountId;
+    kimiCheckpoint.syncKind = "runtime_backfill";
+    kimiCheckpoint.recoveryStart = makeUtcTime(2026, 4, 21, 9, 0, 0);
+    kimiCheckpoint.recoveryEnd = makeUtcTime(2026, 4, 21, 10, 0, 0);
+    kimiCheckpoint.attemptAt = makeUtcTime(2026, 4, 21, 10, 5, 0);
+    kimiCheckpoint.outcome = "fetch_failed";
+    kimiCheckpoint.comparisonResult = "not_available";
+    kimiCheckpoint.failureCategory = "provider_backfill_fetch_failed";
+    REQUIRE(storage.insertRecoveryCheckpoint(kimiCheckpoint));
+
+    AnalysisQueryEngine engine(storage);
+    DashboardViewModel dashboard;
+    DashboardPreferences preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last7Days;
+
+    const AnalysisViewModel analysis = engine.buildViewModel(dashboard, preferences, now);
+    const std::vector<std::string> providerOptions = optionPairs(analysis.availableProviders);
+    const std::vector<std::string> accountOptions = optionPairs(analysis.availableAccounts);
+
+    CHECK(std::find(providerOptions.begin(), providerOptions.end(), "minimax|MiniMax") != providerOptions.end());
+    CHECK(std::find(providerOptions.begin(), providerOptions.end(), "kimi|Kimi Code") != providerOptions.end());
+    CHECK(std::find(
+        accountOptions.begin(),
+        accountOptions.end(),
+        "minimax.runtime_status|MiniMax / MiniMax Runtime") != accountOptions.end());
+    CHECK(std::find(
+        accountOptions.begin(),
+        accountOptions.end(),
+        "kimi.runtime_status|Kimi Code / Kimi Code Runtime") != accountOptions.end());
+}
+
+TEST_CASE("AnalysisQueryEngine keeps date-range preset helper mappings stable for settings persistence", "[analysis][query_engine][analysis_query_engine]") {
+    CHECK(std::string(AnalysisQueryEngine::dateRangePresetSettingValue(AnalysisDateRangePreset::Today)) == "today");
+    CHECK(std::string(AnalysisQueryEngine::dateRangePresetSettingValue(AnalysisDateRangePreset::Last24Hours)) == "last_24_hours");
+    CHECK(std::string(AnalysisQueryEngine::dateRangePresetSettingValue(AnalysisDateRangePreset::Last7Days)) == "last_7_days");
+    CHECK(std::string(AnalysisQueryEngine::dateRangePresetSettingValue(AnalysisDateRangePreset::CurrentQuotaWindow)) == "current_quota_window");
+    CHECK(std::string(AnalysisQueryEngine::dateRangePresetSettingValue(AnalysisDateRangePreset::ThisMonth)) == "this_month");
+    CHECK(std::string(AnalysisQueryEngine::dateRangePresetSettingValue(AnalysisDateRangePreset::Custom)) == "custom");
+
+    CHECK(AnalysisQueryEngine::parseDateRangePreset("today") == AnalysisDateRangePreset::Today);
+    CHECK(AnalysisQueryEngine::parseDateRangePreset("last_24_hours") == AnalysisDateRangePreset::Last24Hours);
+    CHECK(AnalysisQueryEngine::parseDateRangePreset("last_7_days") == AnalysisDateRangePreset::Last7Days);
+    CHECK(AnalysisQueryEngine::parseDateRangePreset("current_quota_window") == AnalysisDateRangePreset::CurrentQuotaWindow);
+    CHECK(AnalysisQueryEngine::parseDateRangePreset("this_month") == AnalysisDateRangePreset::ThisMonth);
+    CHECK(AnalysisQueryEngine::parseDateRangePreset("custom") == AnalysisDateRangePreset::Custom);
+    CHECK(AnalysisQueryEngine::parseDateRangePreset("unexpected") == AnalysisDateRangePreset::Last7Days);
+
+    CHECK(AnalysisQueryEngine::dateRangePresetLabel(AnalysisDateRangePreset::Today) == "Today");
+    CHECK(AnalysisQueryEngine::dateRangePresetLabel(AnalysisDateRangePreset::Last24Hours) == "Last 24 Hours");
+    CHECK(AnalysisQueryEngine::dateRangePresetLabel(AnalysisDateRangePreset::Last7Days) == "Last 7 Days");
+    CHECK(AnalysisQueryEngine::dateRangePresetLabel(AnalysisDateRangePreset::CurrentQuotaWindow) == "Current Billing/Quota Window");
+    CHECK(AnalysisQueryEngine::dateRangePresetLabel(AnalysisDateRangePreset::ThisMonth) == "This Month");
+    CHECK(AnalysisQueryEngine::dateRangePresetLabel(AnalysisDateRangePreset::Custom) == "Custom");
+}

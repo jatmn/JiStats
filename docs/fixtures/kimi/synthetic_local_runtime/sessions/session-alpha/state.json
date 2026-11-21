@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "plan_mode": true,
+  "approval": {
+    "yolo": true,
+    "auto_approve_actions": false
+  },
+  "dynamic_subagents": [
+    "subagent-a",
+    "subagent-b"
+  ],
+  "additional_dirs": [
+    "C:/Users/example/source/shared-a",
+    "C:/Users/example/source/shared-b"
+  ]
+}

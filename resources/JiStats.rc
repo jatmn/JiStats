@@ -1,0 +1,15 @@
+// JiStats Resource File
+#include <windows.h>
+#include "jistats_resource_paths.h"
+
+// Application manifest for visual styles
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "JiStats.manifest"
+
+#define JISTATS_APP_ICON 101
+
+#ifndef JISTATS_APP_ICON_PATH
+#define JISTATS_APP_ICON_PATH "jistats.ico"
+#endif
+
+// Application icon used by Explorer/taskbar surfaces that read PE resources.
+JISTATS_APP_ICON ICON JISTATS_APP_ICON_PATH

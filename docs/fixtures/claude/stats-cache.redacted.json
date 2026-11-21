@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "lastComputedDate": "2025-01-03",
+  "dailyActivity": [
+    {
+      "date": "2025-01-01",
+      "messageCount": 11,
+      "sessionCount": 2,
+      "toolCallCount": 4
+    },
+    {
+      "date": "2025-01-02",
+      "messageCount": 18,
+      "sessionCount": 4,
+      "toolCallCount": 5
+    },
+    {
+      "date": "2025-01-03",
+      "messageCount": 10,
+      "sessionCount": 3,
+      "toolCallCount": 2
+    }
+  ],
+  "dailyModelTokens": [
+    {
+      "date": "2025-01-02",
+      "tokensByModel": {
+        "claude-sonnet-4-20250514": 7710,
+        "claude-opus-4-20250514": 4465
+      }
+    },
+    {
+      "date": "2025-01-03",
+      "tokensByModel": {
+        "claude-sonnet-4-20250514": 4100
+      }
+    }
+  ],
+  "modelUsage": {
+    "claude-sonnet-4-20250514": {
+      "inputTokens": 4000,
+      "outputTokens": 6000,
+      "cache_read_input_tokens": 1810,
+      "cache_creation_input_tokens": 0,
+      "cost_usd": 0.042
+    },
+    "claude-opus-4-20250514": {
+      "inputTokens": 2000,
+      "outputTokens": 2465,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cost_usd": 0.1335
+    }
+  },
+  "totalSessions": 9,
+  "totalMessages": 39,
+  "firstSessionDate": "2025-01-01",
+  "hourCounts": {},
+  "totalSpeculationTimeSavedMs": 0
+}

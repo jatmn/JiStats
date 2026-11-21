@@ -1,0 +1,116 @@
+[
+  {
+    "id": "conv_redacted_001",
+    "title": "Redacted export sample one",
+    "create_time": 1712365200.0,
+    "update_time": 1712365480.0,
+    "mapping": {
+      "node_system_001": {
+        "id": "node_system_001",
+        "message": {
+          "id": "msg_system_001",
+          "author": {
+            "role": "system"
+          },
+          "create_time": 1712365200.0
+        },
+        "parent": null,
+        "children": [
+          "node_user_001"
+        ]
+      },
+      "node_user_001": {
+        "id": "node_user_001",
+        "message": {
+          "id": "msg_user_001",
+          "author": {
+            "role": "user"
+          },
+          "create_time": 1712365215.123,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "[redacted user prompt]"
+            ]
+          }
+        },
+        "parent": "node_system_001",
+        "children": [
+          "node_assistant_001"
+        ]
+      },
+      "node_assistant_001": {
+        "id": "node_assistant_001",
+        "message": {
+          "id": "msg_assistant_001",
+          "author": {
+            "role": "assistant"
+          },
+          "create_time": 1712365231.0
+        },
+        "parent": "node_user_001",
+        "children": [
+          "node_user_002"
+        ]
+      },
+      "node_user_002": {
+        "id": "node_user_002",
+        "message": {
+          "id": "msg_user_002",
+          "author": {
+            "role": "user"
+          },
+          "create_time": 1712365475.0,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "[redacted follow-up]"
+            ]
+          }
+        },
+        "parent": "node_assistant_001",
+        "children": []
+      }
+    }
+  },
+  {
+    "id": "conv_redacted_002",
+    "title": "Redacted export sample two",
+    "create_time": 1712566800.0,
+    "update_time": 1712567120.0,
+    "mapping": {
+      "node_user_101": {
+        "id": "node_user_101",
+        "message": {
+          "id": "msg_user_101",
+          "author": {
+            "role": "user"
+          },
+          "create_time": 1712566810.0,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "[redacted new conversation prompt]"
+            ]
+          }
+        },
+        "parent": null,
+        "children": [
+          "node_assistant_101"
+        ]
+      },
+      "node_assistant_101": {
+        "id": "node_assistant_101",
+        "message": {
+          "id": "msg_assistant_101",
+          "author": {
+            "role": "assistant"
+          },
+          "create_time": 1712566840.0
+        },
+        "parent": "node_user_101",
+        "children": []
+      }
+    }
+  }
+]

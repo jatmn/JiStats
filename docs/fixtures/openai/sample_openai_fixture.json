@@ -1,0 +1,31 @@
+{
+    "events": [
+        {
+            "timestamp": 1713464400,
+            "model": "gpt-3.5-turbo",
+            "request_type": "chat",
+            "input_tokens": 1200,
+            "output_tokens": 450,
+            "total_tokens": 1650,
+            "cost_minor_units": 243
+        },
+        {
+            "timestamp": 1713468000,
+            "model": "gpt-4",
+            "request_type": "chat",
+            "input_tokens": 800,
+            "output_tokens": 1200,
+            "total_tokens": 2000,
+            "cost_minor_units": 1260
+        },
+        {
+            "timestamp": 1713471600,
+            "model": "gpt-4-turbo",
+            "request_type": "completion",
+            "input_tokens": 2500,
+            "output_tokens": 1800,
+            "total_tokens": 4300,
+            "cost_minor_units": 3870
+        }
+    ]
+}

@@ -1,0 +1,7 @@
+# OpenAI API Response Fixtures
+
+Store sample API responses here during Phase 0 spike:
+- `usage-daily.json` - GET /v1/usage response
+- `usage-by-model.json` - GET /v1/usage with group_by=model
+- `organization.json` - GET /v1/organization response
+- `rate-limit-headers.txt` - Captured X-RateLimit-* headers
