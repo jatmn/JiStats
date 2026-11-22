@@ -2,7 +2,7 @@
 
 This file tracks JiStats work and handoffs. The [roadmap](plan.md) records scope and architecture, and the [release checklist](release-checklist.md) records signoff criteria and evidence.
 
-The repository includes a manual Windows SQLite workflow on GitHub Actions. Public-facing fixtures use synthetic or redacted examples. Raw provider captures stay local. The [security policy](../SECURITY.md) covers private vulnerability reports.
+The repository includes an automatic [Windows SQLite workflow](../.github/workflows/ci.yml) on GitHub Actions. Public-facing fixtures use synthetic or redacted examples. Raw provider captures stay local. The [security policy](../SECURITY.md) covers private vulnerability reports.
 
 ## 📍 How To Use This File
 
@@ -47,7 +47,7 @@ Reviewed the four superseded plans and related Analysis and fixture plans agains
 
 ## 🚧 Active Work
 
-The [release checklist](release-checklist.md#evidence-backed-release-queue) is the active v1.0 queue. Start with the Windows CI startup timing failure.
+The [release checklist](release-checklist.md#evidence-backed-release-queue) is the active v1.0 queue. Use the Windows SQLite quality gate for automated build and test results.
 
 ## ✅ Recently Completed
 
