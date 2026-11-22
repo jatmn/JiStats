@@ -38,7 +38,7 @@ cmake --build build-mingw
 
 Cross-builds use bundled SQLite by default. With bundled or statically linked SQLite, you can copy the executables to Windows without extra DLLs. To use `-DJISTATS_USE_SYSTEM_SQLITE=ON`, install SQLite built for Windows x64 into the MinGW target prefix or set `CMAKE_FIND_ROOT_PATH` to the Windows dependency prefix. If the build links a shared SQLite package, copy that package's SQLite DLL (typically `sqlite3.dll`) alongside the executables. Configure in a fresh build directory if CMake previously cached Linux SQLite paths.
 
-For a portable release, take `JiStats.exe` from `build-mingw/bin/` (it embeds the SQLite baseline) and include the [redistribution notices](#license), including the [toolchain notices for MinGW builds](THIRD_PARTY_NOTICES.md#mingw-w64-and-winpthreads). The CLI and test executable are developer tools. Follow the [release checklist](docs/release-checklist.md) to smoke-test the assembled bundle on Windows.
+For a portable release, take `JiStats.exe` from `build-mingw/bin/` (it embeds the SQLite baseline) and include the [redistribution notices](#license), including the [toolchain notices for MinGW builds](THIRD_PARTY_NOTICES.md#mingw-w64-and-winpthreads). The test executable is a developer tool. Follow the [release checklist](docs/release-checklist.md) to smoke-test the assembled bundle on Windows.
 
 For changes that require a build, GitHub Actions runs the portable tests and MinGW-w64 cross-build on Linux, then runs the full suite on Windows. See the [verification guide](docs/validation/testing.md#continuous-integration) for build triggers and manual dispatch.
 
@@ -57,15 +57,13 @@ Release outputs are in `build-ucrt/bin/`.
 
 For an existing Visual Studio build tree, run `pwsh -File .\scripts\build_release.ps1 -BuildDir build`. Replace `build` with your configured directory. The helper stops running JiStats binaries to release file locks and builds the Release configuration. The Visual Studio generator puts executables under that directory's `bin/Release/`.
 
-### Building the MiniMax CLI
-
-For standalone MiniMax readiness, capture, and diagnostics commands, add `-DJISTATS_BUILD_MINIMAX_CLI=ON` to either Windows-target CMake configure command above. The option defaults to `OFF`. When enabled, the build produces `JiStatsMiniMaxCli.exe` alongside the app, and `cmake --install` installs it to the install prefix's `bin/` directory. The desktop MiniMax integration is available in either configuration, and `JISTATS_BUILD_TESTS` controls the tests independently.
-
 ### Optional UPX compression
 
 [UPX](https://upx.github.io/) compresses the Windows executable so the standalone download is smaller and the file takes up less disk space. The packed app decompresses itself at launch, which adds startup work. Both variants run on Windows without a separate UPX installation.
 
 CMake looks for UPX by default when targeting Windows. To produce `JiStats-upx.exe` alongside `JiStats.exe` in a Release build, put an [official UPX release](https://github.com/upx/upx/releases) for your build host on `PATH` or configure with `-DJISTATS_UPX_EXECUTABLE=/path/to/upx`. Use a Linux UPX executable when cross-building from Linux. If CMake cannot find UPX, the Release build produces the unpacked executable. Set `-DJISTATS_ENABLE_UPX=OFF` to skip detection and packing.
+
+When you reuse a build directory, an older `JiStats-upx.exe` can remain after you disable packing. Package `JiStats.exe` for the current unpacked release.
 
 For packed releases, follow the [redistribution instructions](#license).
 
