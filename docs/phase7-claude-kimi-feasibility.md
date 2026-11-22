@@ -35,7 +35,7 @@ The official docs clearly document:
 - use in official Kimi surfaces and in approved third-party coding agents
 - quota refresh behavior
 
-On this machine, Kimi also leaves a substantial local footprint under `~/.kimi`, including:
+Kimi Code can store the following local runtime data under `~/.kimi`.
 
 - sessions
 - logs
@@ -61,16 +61,9 @@ That local footprint is much closer to a Codex-local-style observation path than
 - Kimi Code sessions/context: `https://www.kimi.com/code/docs/en/kimi-cli/guides/sessions.html`
 - Kimi Code third-party agents guide: `https://www.kimi.com/code/docs/en/third-party-agents.html`
 
-### Local Machine Reconnaissance
+### Local Artifact Sources
 
-This pass also inspected local installation footprints on this machine for:
-
-- Claude Code for VS Code
-- Kimi Code for VS Code
-- `~/.claude`
-- `~/.kimi`
-
-Sensitive secrets and conversation contents were intentionally not copied into this repo.
+The investigation covered the Claude Code and Kimi Code VS Code extensions and their local runtime directories. The findings describe file layouts and field shapes.
 
 ## Claude Code Findings
 
@@ -136,11 +129,11 @@ It also says `~/.claude.json` contains preferences, OAuth session, MCP configura
 
 That matters because it confirms local Claude Code persistence is part of the supported product model rather than an accidental byproduct.
 
-## Local Machine Findings
+## Local Artifact Findings
 
-On this machine, Claude Code also has a visible local footprint:
+Claude Code can use the following Windows paths.
 
-- VS Code extension installed at `%USERPROFILE%\.vscode\extensions\anthropic.claude-code-<version>-win32-x64`
+- VS Code extension at `%USERPROFILE%\.vscode\extensions\anthropic.claude-code-<version>-win32-x64`
 - user directory at `%USERPROFILE%\.claude`
 
 Observed top-level `~/.claude` artifacts:
@@ -259,11 +252,9 @@ Source: `https://www.kimi.com/code/docs/en/kimi-cli/guides/sessions.html`
 
 This is exactly the kind of documentation that makes a local-first JiStats integration more practical.
 
-## Local Machine Findings
+## Local Artifact Findings
 
-Kimi Code is installed on this machine as a VS Code extension:
-
-- `%USERPROFILE%/.vscode/extensions/moonshot-ai.kimi-code-<version>/package.json`
+The Kimi Code VS Code extension manifest can be found at `%USERPROFILE%/.vscode/extensions/moonshot-ai.kimi-code-<version>/package.json`.
 
 Notable extension findings:
 
@@ -275,9 +266,7 @@ The VS Code extension also deploys a bundled CLI/runtime into VS Code global sto
 
 - `%USERPROFILE%\AppData\Roaming\Code\User\globalStorage\moonshot-ai.kimi-code\bin\kimi`
 
-Much more importantly, this machine has a standalone Kimi runtime directory at:
-
-- `%USERPROFILE%\.kimi`
+The standalone Kimi runtime can store its data under `%USERPROFILE%\.kimi`.
 
 Observed top-level `~/.kimi` artifacts:
 
@@ -385,7 +374,7 @@ The broader shared parser and fixture-redaction rules for both providers are now
 | Subscription product documented | Yes | Yes |
 | Official API / provider integration docs | Yes, but split across subscription/API/provider modes | Yes, including approved third-party agent guidance |
 | Official local settings/state docs | Yes | Partly; official session persistence is documented, local file layout mostly observed from runtime |
-| Rich local footprint on this machine | Yes | Yes |
+| Local runtime artifacts available | Yes | Yes |
 | Clear published quota refresh semantics | Weaker / less explicit for subscriptions | Stronger / explicitly documented |
 | Best likely JiStats path | Local + telemetry + Console/API hybrid | Local-first with optional provider/API corroboration |
 

@@ -40,7 +40,7 @@ Planning implication:
 
 ## Local Input Inventory
 
-Observed local Claude artifacts on this machine include:
+Local Claude Code files and directories include the following.
 
 - `~/.claude/stats-cache.json`
 - `~/.claude/settings.json`
@@ -76,7 +76,7 @@ Approved use:
 - total session/message counts
 - high-level session timing summaries
 
-Observed stable fields on this machine include:
+The parser can use the following observed fields.
 
 - `version`
 - `lastComputedDate`
@@ -116,7 +116,7 @@ Approved use:
 - default model context
 - update-channel context
 
-Observed fields on this machine include:
+The settings parser can use the following fields.
 
 - `model`
 - `autoUpdatesChannel`
