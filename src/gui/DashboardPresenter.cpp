@@ -146,7 +146,7 @@ std::string modelUsageOverviewText(const AnalysisProviderModelUsageChart& chart)
 
     std::ostringstream stream;
     stream << chart.subtitle;
-    const size_t count = std::min<size_t>(chart.series.size(), 4);
+    const size_t count = std::min<size_t>(chart.series.size(), 6);
     for (size_t i = 0; i < count; ++i) {
         stream << "\r\n" << chart.series[i].modelKey << ": " << formatNumber(chart.series[i].totalTokens) << " tokens";
     }
@@ -1150,10 +1150,9 @@ public:
     HWND preferencesWindow = nullptr;
     HWND analysisWindow = nullptr;
     HWND titleLabel = nullptr;
-    HWND subtitleLabel = nullptr;
+    HWND dashboardViewport = nullptr;
     HWND appGroup = nullptr;
     HWND mainTab = nullptr;
-    HWND versionLabel = nullptr;
     HWND versionValue = nullptr;
     HWND connectionLabel = nullptr;
     HWND connectionValue = nullptr;
@@ -1169,9 +1168,8 @@ public:
     HWND scheduledExportValue = nullptr;
     HWND updatedLabel = nullptr;
     HWND updatedValue = nullptr;
-    HWND startupLabel = nullptr;
-    HWND startupValue = nullptr;
     HWND usageGroup = nullptr;
+    HWND quotaEmptyText = nullptr;
     HWND codexThroughputGroup = nullptr;
     HWND codexThroughputText = nullptr;
     HWND codexThroughputAveragesText = nullptr;
@@ -1193,7 +1191,6 @@ public:
     HWND chartCountdownHoverWindow = nullptr;
     HWND providersGroup = nullptr;
     HWND providerList = nullptr;
-    HWND analysisLaunchGroup = nullptr;
     HWND analysisLaunchTitle = nullptr;
     HWND analysisLaunchInfo = nullptr;
     HWND analysisLaunchButton = nullptr;
@@ -1249,21 +1246,25 @@ public:
     HWND preferencesCloseButton = nullptr;
     std::string miniMaxFeedbackMessage;
     bool threadReady = false;
+    bool dashboardHighContrast = false;
     HFONT titleFont = nullptr;
     HFONT bodyFont = nullptr;
-    HFONT bodyBoldFont = nullptr;
-    HFONT bodyItalicFont = nullptr;
-    HBRUSH windowBackgroundBrush = nullptr;
-    HBRUSH codexRecentBrush = nullptr;
-    HBRUSH codexAveragesBrush = nullptr;
-    HBRUSH codexTotalsBrush = nullptr;
+    HFONT dashboardBodyFont = nullptr;
+    HFONT dashboardLabelFont = nullptr;
+    HFONT dashboardSectionFont = nullptr;
+    HFONT dashboardTitleFont = nullptr;
+    std::array<RECT, 5> overviewCards{};
+    RECT noticeRect{};
+    RECT otherPageCard{};
+    int overviewScroll = 0;
+    int wheelDelta = 0;
+    size_t quotaRowCount = 0;
     HICON appIconLarge = nullptr;
     HICON appIconSmall = nullptr;
     HMENU mainMenu = nullptr;
     HMENU fileMenu = nullptr;
     HMENU helpMenu = nullptr;
-    std::wstring persistentStatusText =
-        L"Connection summarizes the freshest shared runtime state across enabled providers.";
+    std::wstring persistentStatusText = L"Ready";
 #ifdef JISTATS_ENABLE_TEST_HOOKS
     std::string openAIImportPathForTesting;
     std::string htmlExportPathForTesting;
@@ -1273,7 +1274,6 @@ public:
     struct UsageProgressRow {
         HWND label = nullptr;
         HWND bar = nullptr;
-        HWND value = nullptr;
         int percentage = 0;
         int secondaryPercentage = -1;
         COLORREF barColor = RGB(46, 139, 87);
@@ -1297,6 +1297,7 @@ public:
     std::wstring connectionTooltipBody;
     std::wstring recoveryTooltipBody;
     std::wstring scheduledExportTooltipBody;
+    std::wstring updatedTooltipBody;
     StorageService placementStorage;
 
     static constexpr UINT WM_JISTATS_SYNC_VIEWMODEL = WM_APP + 32;
@@ -1342,10 +1343,10 @@ public:
     static constexpr UINT_PTR kDashboardChartRefreshTimerId = 1300;
     static constexpr UINT kDashboardChartCountdownTimerMs = 1000;
     static constexpr UINT kDashboardChartRefreshIntervalMs = 60 * 1000;
-    static constexpr int kDefaultWidth = 920;
-    static constexpr int kDefaultHeight = 1080;
-    static constexpr int kMinWidth = 920;
-    static constexpr int kMinHeight = 1080;
+    static constexpr int kDefaultWidth = 1040;
+    static constexpr int kDefaultHeight = 820;
+    static constexpr int kMinWidth = 620;
+    static constexpr int kMinHeight = 460;
     static constexpr int kAnalysisDefaultWidth = 1360;
     static constexpr int kAnalysisDefaultHeight = 960;
     static constexpr int kAnalysisMinWidth = 1100;
@@ -1365,6 +1366,10 @@ public:
 
     static const wchar_t* windowClassName() {
         return L"JiStatsDashboardWindow";
+    }
+
+    static const wchar_t* viewportClassName() {
+        return L"JiStatsDashboardViewport";
     }
 
     static const wchar_t* preferencesWindowClassName() {
@@ -1463,9 +1468,14 @@ public:
         WINDOWPLACEMENT placement{};
         placement.length = sizeof(placement);
         RECT rect{};
-        if (GetWindowPlacement(hwnd, &placement) != 0 &&
-            !IsRectEmpty(&placement.rcNormalPosition)) {
+        if (IsZoomed(hwnd) && GetWindowPlacement(hwnd, &placement) != 0 && !IsRectEmpty(&placement.rcNormalPosition)) {
             rect = placement.rcNormalPosition;
+            MONITORINFO monitor{};
+            monitor.cbSize = sizeof(monitor);
+            if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+                OffsetRect(&rect, monitor.rcWork.left - monitor.rcMonitor.left,
+                           monitor.rcWork.top - monitor.rcMonitor.top);
+            }
         } else if (GetWindowRect(hwnd, &rect) == 0 || IsRectEmpty(&rect)) {
             return;
         }
@@ -1536,7 +1546,7 @@ public:
     }
 
     void ensureFonts() {
-        if (titleFont != nullptr && bodyFont != nullptr && bodyBoldFont != nullptr && bodyItalicFont != nullptr) {
+        if (titleFont != nullptr && bodyFont != nullptr) {
             return;
         }
 
@@ -1547,14 +1557,6 @@ public:
         bodyLogFont.lfQuality = CLEARTYPE_QUALITY;
         wcscpy_s(bodyLogFont.lfFaceName, L"Segoe UI");
         bodyFont = CreateFontIndirectW(&bodyLogFont);
-
-        LOGFONTW bodyBoldLogFont = bodyLogFont;
-        bodyBoldLogFont.lfWeight = FW_SEMIBOLD;
-        bodyBoldFont = CreateFontIndirectW(&bodyBoldLogFont);
-
-        LOGFONTW bodyItalicLogFont = bodyLogFont;
-        bodyItalicLogFont.lfItalic = TRUE;
-        bodyItalicFont = CreateFontIndirectW(&bodyItalicLogFont);
 
         // Title font - larger and semibold
         LOGFONTW titleLogFont{};
@@ -1574,14 +1576,71 @@ public:
             DeleteObject(bodyFont);
         }
         bodyFont = nullptr;
-        if (bodyBoldFont != nullptr && bodyBoldFont != GetStockObject(DEFAULT_GUI_FONT)) {
-            DeleteObject(bodyBoldFont);
+        releaseDashboardFonts();
+    }
+
+    void releaseDashboardFonts() {
+        const HFONT fonts[] = {dashboardBodyFont, dashboardLabelFont, dashboardSectionFont, dashboardTitleFont};
+        for (HFONT font : fonts) {
+            if (font != nullptr) {
+                DeleteObject(font);
+            }
         }
-        bodyBoldFont = nullptr;
-        if (bodyItalicFont != nullptr && bodyItalicFont != GetStockObject(DEFAULT_GUI_FONT)) {
-            DeleteObject(bodyItalicFont);
+        dashboardBodyFont = dashboardLabelFont = dashboardSectionFont = dashboardTitleFont = nullptr;
+    }
+
+    void applyDashboardFonts() {
+        const auto makeFont = [this](int pixels, int weight) {
+            LOGFONTW font{};
+            font.lfHeight = -scaledPixels(pixels);
+            font.lfWeight = weight;
+            font.lfQuality = CLEARTYPE_QUALITY;
+            wcscpy_s(font.lfFaceName, L"Segoe UI");
+            return CreateFontIndirectW(&font);
+        };
+        const HFONT oldFonts[] = {dashboardBodyFont, dashboardLabelFont, dashboardSectionFont, dashboardTitleFont};
+        dashboardBodyFont = makeFont(13, FW_NORMAL);
+        dashboardLabelFont = makeFont(13, FW_SEMIBOLD);
+        dashboardSectionFont = makeFont(17, FW_SEMIBOLD);
+        dashboardTitleFont = makeFont(29, FW_SEMIBOLD);
+
+        const auto setFont = [](HWND control, HFONT font) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+        };
+        const HWND bodyControls[] = {versionValue,       mainTab,
+                                     recoveryValue,      scheduledExportValue,
+                                     updatedValue,       offlineNoticeMessage,
+                                     offlineRetryButton, offlineDismissButton,
+                                     quotaEmptyText,     openAiUsageText,
+                                     hicapUsageText,     providerList,
+                                     analysisLaunchInfo, analysisLaunchButton,
+                                     statusBar};
+        for (HWND control : bodyControls) {
+            setFont(control, dashboardBodyFont);
         }
-        bodyItalicFont = nullptr;
+        const HWND labels[] = {connectionLabel, recoveryLabel,   scheduledExportLabel,
+                               updatedLabel,    connectionValue, offlineNoticeTitle};
+        for (HWND control : labels) {
+            setFont(control, dashboardLabelFont);
+        }
+        const HWND sections[] = {appGroup,        usageGroup,     codexThroughputGroup, openAiUsageGroup,
+                                 hicapUsageGroup, providersGroup, analysisLaunchTitle};
+        for (HWND control : sections) {
+            setFont(control, dashboardSectionFont);
+        }
+        for (const auto& row : usageRows) {
+            setFont(row.label, dashboardLabelFont);
+        }
+        setFont(titleLabel, dashboardTitleFont);
+        SendMessageW(mainTab, TCM_SETITEMSIZE, 0, MAKELPARAM(scaledPixels(144), scaledPixels(31)));
+        if (HWND header = ListView_GetHeader(providerList)) {
+            setFont(header, dashboardLabelFont);
+        }
+        for (HFONT font : oldFonts) {
+            if (font != nullptr) {
+                DeleteObject(font);
+            }
+        }
     }
 
     void ensureAppIcons() {
@@ -1638,7 +1697,7 @@ public:
         } else if (window != nullptr) {
             dpi = GetDpiForWindow(window);
         }
-        return MulDiv(value, static_cast<int>(dpi), 96);
+        return MulDiv(value, dpi == 0 ? 96 : static_cast<int>(dpi), 96);
 #else
         (void)hwnd;
         return value;
@@ -1704,6 +1763,7 @@ public:
         configureTooltipTool(recoveryValue);
         configureTooltipTool(scheduledExportLabel);
         configureTooltipTool(scheduledExportValue);
+        configureTooltipTool(updatedValue);
     }
 
     void configureUsageTooltipTool(HWND target) {
@@ -1770,8 +1830,8 @@ public:
         }
 
         HWND header = ListView_GetHeader(providerList);
-        if (header != nullptr && bodyFont != nullptr) {
-            SendMessageW(header, WM_SETFONT, reinterpret_cast<WPARAM>(bodyFont), TRUE);
+        if (header != nullptr && dashboardLabelFont != nullptr) {
+            SendMessageW(header, WM_SETFONT, reinterpret_cast<WPARAM>(dashboardLabelFont), TRUE);
         }
 
         const int widthPadding = scaledPixels(28, providerList);
@@ -1780,11 +1840,8 @@ public:
              ++index) {
             const std::wstring title = kProviderQuotaColumns[index].title;
             const int minimumWidth = scaledPixels(kProviderQuotaColumns[index].width, providerList);
-            const int measuredWidth = measureTextWidth(
-                header != nullptr ? header : providerList,
-                title,
-                bodyFont,
-                widthPadding);
+            const int measuredWidth =
+                measureTextWidth(header != nullptr ? header : providerList, title, dashboardLabelFont, widthPadding);
             const int resolvedWidth = std::max(minimumWidth, measuredWidth);
             ListView_SetColumnWidth(providerList, index, resolvedWidth);
         }
@@ -1820,6 +1877,9 @@ public:
         if (target == scheduledExportLabel || target == scheduledExportValue) {
             return &scheduledExportTooltipBody;
         }
+        if (target == updatedValue) {
+            return &updatedTooltipBody;
+        }
 
         for (size_t index = 0; index < kMaxUsageRows; ++index) {
             if (target == usageRows[index].label || target == usageRows[index].bar) {
@@ -1852,14 +1912,12 @@ public:
     }
 
     std::wstring analysisLauncherTitleText() const {
-        return analysisWindow != nullptr
-            ? L"Analysis workspace is open in a separate window."
-            : L"Open Analysis in a dedicated workspace window.";
+        return analysisWindow != nullptr ? L"Analysis workspace is open" : L"Usage analysis";
     }
 
     std::wstring analysisLauncherInfoText(const DashboardViewModel& model) const {
         std::ostringstream stream;
-        stream << "Analysis now opens in a larger dedicated window so the history, breakdown, trend, and provenance sections can fit cleanly.";
+        stream << "Explore usage history, trends, breakdowns, and data sources in the Analysis window.";
         if (!model.analysis.scopeLabel.empty()) {
             stream << "\r\n\r\nCurrent scope: " << model.analysis.scopeLabel << ".";
         }
@@ -1976,77 +2034,47 @@ public:
         syncAnalysisLauncherState(copyViewModel());
     }
 
-    void syncMainTabVisibility() {
-        if (titleLabel != nullptr) {
-            ShowWindow(titleLabel, SW_HIDE);
-        }
-        if (subtitleLabel != nullptr) {
-            ShowWindow(subtitleLabel, SW_HIDE);
-        }
-        if (versionLabel != nullptr) {
-            ShowWindow(versionLabel, SW_HIDE);
-        }
-        if (versionValue != nullptr) {
-            ShowWindow(versionValue, SW_HIDE);
-        }
-
-        const int overviewFlag = selectedMainTab == 0 ? SW_SHOW : SW_HIDE;
-        const int providerFlag = selectedMainTab == 1 ? SW_SHOW : SW_HIDE;
-        const int analysisFlag = selectedMainTab == 2 ? SW_SHOW : SW_HIDE;
-
-        const HWND overviewControls[] = {
-            appGroup,
-            connectionLabel,
-            connectionValue,
-            updatedLabel,
-            updatedValue,
-            usageGroup,
-            codexThroughputGroup,
-            codexThroughputText,
-            codexThroughputAveragesText,
-            codexThroughputTotalsText,
-            codexThroughputChart,
-            openAiUsageGroup,
-            openAiUsageText,
-            openAiUsageChart,
-            hicapUsageGroup,
-            hicapUsageText,
-            hicapUsageChart
-        };
+    void syncMainTabVisibility(const DashboardViewModel& model) {
+        const bool overview = selectedMainTab == 0;
+        const HWND overviewControls[] = {appGroup,
+                                         connectionLabel,
+                                         connectionValue,
+                                         recoveryLabel,
+                                         recoveryValue,
+                                         scheduledExportLabel,
+                                         scheduledExportValue,
+                                         updatedLabel,
+                                         updatedValue,
+                                         usageGroup,
+                                         codexThroughputGroup,
+                                         codexThroughputText,
+                                         codexThroughputAveragesText,
+                                         codexThroughputTotalsText,
+                                         codexThroughputChart,
+                                         openAiUsageGroup,
+                                         openAiUsageText,
+                                         openAiUsageChart,
+                                         hicapUsageGroup,
+                                         hicapUsageText,
+                                         hicapUsageChart};
         for (HWND control : overviewControls) {
-            if (control != nullptr) {
-                ShowWindow(control, overviewFlag);
-            }
+            ShowWindow(control, overview ? SW_SHOWNA : SW_HIDE);
+        }
+        ShowWindow(offlineRetryButton, overview && model.offlineRetryAvailable ? SW_SHOWNA : SW_HIDE);
+        for (HWND control : {offlineNoticeTitle, offlineNoticeMessage, offlineDismissButton}) {
+            ShowWindow(control, overview && model.offlineNoticeVisible ? SW_SHOWNA : SW_HIDE);
         }
         for (size_t index = 0; index < kMaxUsageRows; ++index) {
-            if (usageRows[index].label != nullptr) {
-                ShowWindow(usageRows[index].label, overviewFlag);
-            }
-            if (usageRows[index].bar != nullptr) {
-                ShowWindow(usageRows[index].bar, overviewFlag);
-            }
-            if (usageRows[index].value != nullptr) {
-                ShowWindow(usageRows[index].value, SW_HIDE);
-            }
+            const int flag = overview && index < quotaRowCount ? SW_SHOWNA : SW_HIDE;
+            ShowWindow(usageRows[index].label, flag);
+            ShowWindow(usageRows[index].bar, flag);
         }
-
-        const HWND providerControls[] = {providersGroup, providerList};
-        for (HWND control : providerControls) {
-            if (control != nullptr) {
-                ShowWindow(control, providerFlag);
-            }
+        ShowWindow(quotaEmptyText, overview && quotaRowCount == 0 ? SW_SHOWNA : SW_HIDE);
+        for (HWND control : {providersGroup, providerList}) {
+            ShowWindow(control, selectedMainTab == 1 ? SW_SHOWNA : SW_HIDE);
         }
-
-        const HWND analysisControls[] = {
-            analysisLaunchGroup,
-            analysisLaunchTitle,
-            analysisLaunchInfo,
-            analysisLaunchButton
-        };
-        for (HWND control : analysisControls) {
-            if (control != nullptr) {
-                ShowWindow(control, analysisFlag);
-            }
+        for (HWND control : {analysisLaunchTitle, analysisLaunchInfo, analysisLaunchButton}) {
+            ShowWindow(control, selectedMainTab == 2 ? SW_SHOWNA : SW_HIDE);
         }
 
         if (analysisPresenter != nullptr) {
@@ -2866,374 +2894,79 @@ public:
     }
 
     void createMainControls(HWND hwnd) {
-        titleLabel = CreateWindowExW(0, L"STATIC", L"JiStats",
-            WS_CHILD, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        subtitleLabel = CreateWindowExW(0, L"STATIC",
-            L"AI provider quota tracking for OpenAI and MiniMax.",
-            WS_CHILD, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        const HINSTANCE instance = GetModuleHandleW(nullptr);
+        auto add = [instance](HWND parent, LPCWSTR type, LPCWSTR text, DWORD style = 0, int id = 0) {
+            return CreateWindowExW(0, type, text, WS_CHILD | style, 0, 0, 0, 0, parent,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
+        };
 
-        appGroup = CreateWindowExW(0, L"BUTTON", L"App Status",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-
-        mainTab = CreateWindowExW(
-            0,
-            WC_TABCONTROLW,
-            L"",
-            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kMainTabId)),
-            GetModuleHandleW(nullptr),
-            nullptr);
-        TCITEMW overviewTab{};
-        overviewTab.mask = TCIF_TEXT;
-        overviewTab.pszText = const_cast<LPWSTR>(L"Overview");
-        SendMessageW(mainTab, TCM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&overviewTab));
-        TCITEMW providerTab{};
-        providerTab.mask = TCIF_TEXT;
-        providerTab.pszText = const_cast<LPWSTR>(L"Provider Snapshot");
-        SendMessageW(mainTab, TCM_INSERTITEMW, 1, reinterpret_cast<LPARAM>(&providerTab));
-        TCITEMW analysisTab{};
-        analysisTab.mask = TCIF_TEXT;
-        analysisTab.pszText = const_cast<LPWSTR>(L"Analysis");
-        SendMessageW(mainTab, TCM_INSERTITEMW, 2, reinterpret_cast<LPARAM>(&analysisTab));
+        titleLabel = add(hwnd, L"STATIC", L"JiStats", WS_VISIBLE);
+        versionValue = add(hwnd, L"STATIC", L"", WS_VISIBLE | SS_RIGHT);
+        mainTab = add(hwnd, WC_TABCONTROLW, L"",
+                      WS_VISIBLE | WS_TABSTOP | TCS_BUTTONS | TCS_FLATBUTTONS | TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED,
+                      kMainTabId);
+        const wchar_t* pageLabels[] = {L"Overview", L"Provider Snapshot", L"Analysis"};
+        for (int index = 0; index < static_cast<int>(std::size(pageLabels)); ++index) {
+            TCITEMW item{};
+            item.mask = TCIF_TEXT;
+            item.pszText = const_cast<LPWSTR>(pageLabels[index]);
+            SendMessageW(mainTab, TCM_INSERTITEMW, index, reinterpret_cast<LPARAM>(&item));
+        }
         TabCtrl_SetCurSel(mainTab, selectedMainTab);
 
-        versionLabel = CreateWindowExW(0, L"STATIC", L"Version:",
-            WS_CHILD, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        versionValue = CreateWindowExW(0, L"STATIC", L"",
-            WS_CHILD, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        connectionLabel = CreateWindowExW(0, L"STATIC", L"Connection:",
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        connectionValue = CreateWindowExW(0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_NOTIFY, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        offlineRetryButton = CreateWindowExW(
-            0,
-            L"BUTTON",
-            L"Retry Now",
-            WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOfflineRetryButtonId)),
-            GetModuleHandleW(nullptr),
-            nullptr);
-        offlineNoticeTitle = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"",
-            WS_CHILD | SS_NOTIFY,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
-        offlineNoticeMessage = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"",
-            WS_CHILD,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
-        offlineDismissButton = CreateWindowExW(
-            0,
-            L"BUTTON",
-            L"Dismiss",
-            WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOfflineDismissButtonId)),
-            GetModuleHandleW(nullptr),
-            nullptr);
-        recoveryLabel = CreateWindowExW(0, L"STATIC", L"Recovery:",
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        recoveryValue = CreateWindowExW(0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_NOTIFY, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        scheduledExportLabel = CreateWindowExW(0, L"STATIC", L"Scheduled Export:",
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        scheduledExportValue = CreateWindowExW(0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_NOTIFY, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        updatedLabel = CreateWindowExW(0, L"STATIC", L"Last Updated:",
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        updatedValue = CreateWindowExW(0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        usageGroup = CreateWindowExW(0, L"BUTTON", L"Quota Overview",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-
+        dashboardViewport = CreateWindowExW(WS_EX_CONTROLPARENT, viewportClassName(), L"",
+                                            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_VSCROLL, 0, 0, 0, 0, hwnd,
+                                            nullptr, instance, this);
+        const HWND page = dashboardViewport;
+        appGroup = add(page, L"STATIC", L"System status");
+        connectionLabel = add(page, L"STATIC", L"Connection", SS_NOTIFY);
+        connectionValue = add(page, L"STATIC", L"", SS_NOTIFY | SS_ENDELLIPSIS);
+        recoveryLabel = add(page, L"STATIC", L"Recovery", SS_NOTIFY);
+        recoveryValue = add(page, L"STATIC", L"", SS_NOTIFY | SS_ENDELLIPSIS | SS_NOPREFIX);
+        scheduledExportLabel = add(page, L"STATIC", L"Scheduled export", SS_NOTIFY);
+        scheduledExportValue = add(page, L"STATIC", L"", SS_NOTIFY | SS_ENDELLIPSIS | SS_NOPREFIX);
+        updatedLabel = add(page, L"STATIC", L"Last updated", SS_NOTIFY);
+        updatedValue = add(page, L"STATIC", L"", SS_NOTIFY | SS_ENDELLIPSIS);
+        offlineNoticeTitle = add(page, L"STATIC", L"", SS_NOPREFIX);
+        offlineNoticeMessage = add(page, L"STATIC", L"", SS_NOPREFIX);
+        offlineRetryButton =
+            add(page, L"BUTTON", L"Retry Now", WS_TABSTOP | BS_PUSHBUTTON | BS_NOTIFY, kOfflineRetryButtonId);
+        offlineDismissButton =
+            add(page, L"BUTTON", L"Dismiss", WS_TABSTOP | BS_PUSHBUTTON | BS_NOTIFY, kOfflineDismissButtonId);
+        usageGroup = add(page, L"STATIC", L"Provider quota");
+        quotaEmptyText = add(page, L"STATIC", L"No provider quota available.");
         for (size_t index = 0; index < kMaxUsageRows; ++index) {
-            usageRows[index].label = CreateWindowExW(
-                0,
-                L"STATIC",
-                L"",
-                WS_CHILD | WS_VISIBLE | SS_NOTIFY,
-                0,
-                0,
-                0,
-                0,
-                hwnd,
-                nullptr,
-                GetModuleHandleW(nullptr),
-                nullptr);
-            usageRows[index].bar = CreateWindowExW(
-                0,
-                L"STATIC",
-                L"",
-                WS_CHILD | WS_VISIBLE | SS_OWNERDRAW | SS_NOTIFY,
-                0,
-                0,
-                0,
-                0,
-                hwnd,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUsageBarBaseId + index)),
-                GetModuleHandleW(nullptr),
-                nullptr);
-            usageRows[index].value = CreateWindowExW(
-                0,
-                L"STATIC",
-                L"",
-                WS_CHILD | SS_RIGHT,
-                0,
-                0,
-                0,
-                0,
-                hwnd,
-                nullptr,
-                GetModuleHandleW(nullptr),
-                nullptr);
+            usageRows[index].label = add(page, L"STATIC", L"", SS_NOTIFY | SS_NOPREFIX | SS_ENDELLIPSIS);
+            usageRows[index].bar =
+                add(page, L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, kUsageBarBaseId + static_cast<int>(index));
         }
 
-        codexThroughputGroup = CreateWindowExW(
-            0,
-            L"BUTTON",
-            L"Codex Usage Throughput",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
-        codexThroughputText = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"No Codex throughput captured in the current 30-minute window yet.",
-            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
-        codexThroughputAveragesText = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"",
-            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
-        codexThroughputTotalsText = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"",
-            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
+        codexThroughputGroup = add(page, L"STATIC", L"Codex throughput");
+        codexThroughputText = add(page, L"STATIC", L"", SS_OWNERDRAW);
+        codexThroughputAveragesText = add(page, L"STATIC", L"", SS_OWNERDRAW);
+        codexThroughputTotalsText = add(page, L"STATIC", L"", SS_OWNERDRAW);
+        openAiUsageGroup = add(page, L"STATIC", L"OpenAI Codex usage by model");
+        openAiUsageText = add(page, L"STATIC", L"", SS_OWNERDRAW | SS_NOPREFIX);
+        hicapUsageGroup = add(page, L"STATIC", L"HICAP Codex usage by model");
+        hicapUsageText = add(page, L"STATIC", L"", SS_OWNERDRAW | SS_NOPREFIX);
+
         ensureCodexChartClass();
-        codexThroughputChart = CreateWindowExW(
-            0,
-            L"JistatsCodexChart",
-            L"",
-            WS_CHILD | WS_VISIBLE,
-            0,
-            0,
-            0,
-            0,
-            codexThroughputGroup,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            this);
+        auto addChart = [&]() {
+            return CreateWindowExW(0, L"JistatsCodexChart", L"", WS_CHILD, 0, 0, 0, 0, page, nullptr, instance, this);
+        };
+        codexThroughputChart = addChart();
+        openAiUsageChart = addChart();
+        hicapUsageChart = addChart();
 
-        openAiUsageGroup = CreateWindowExW(0, L"BUTTON", L"OpenAI Codex Usage by Model",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        openAiUsageText = CreateWindowExW(0, L"STATIC", L"No new Codex SQLite usage observed yet. First scan establishes baseline.",
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        openAiUsageChart = CreateWindowExW(
-            0, L"JistatsCodexChart", L"", WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, openAiUsageGroup, nullptr, GetModuleHandleW(nullptr), this);
-
-        hicapUsageGroup = CreateWindowExW(0, L"BUTTON", L"HICAP Codex Usage by Model",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        hicapUsageText = CreateWindowExW(0, L"STATIC", L"No new Codex SQLite usage observed yet. First scan establishes baseline.",
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        hicapUsageChart = CreateWindowExW(
-            0, L"JistatsCodexChart", L"", WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, hicapUsageGroup, nullptr, GetModuleHandleW(nullptr), this);
-
-        providersGroup = CreateWindowExW(0, L"BUTTON", L"Provider Quota Snapshot",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-
-        providerList = CreateWindowExW(
-            WS_EX_CLIENTEDGE,
-            WC_LISTVIEWW,
-            L"",
-            WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
-
-        analysisLaunchGroup = CreateWindowExW(
-            0,
-            L"BUTTON",
-            L"Analysis Workspace",
-            WS_CHILD | BS_GROUPBOX,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
-        analysisLaunchTitle = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"",
-            WS_CHILD,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
-        analysisLaunchInfo = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"",
-            WS_CHILD,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
-        analysisLaunchButton = CreateWindowExW(
-            0,
-            L"BUTTON",
-            L"Open Analysis Window",
-            WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOpenAnalysisWindowButtonId)),
-            GetModuleHandleW(nullptr),
-            nullptr);
-
-        statusBar = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        if (statusBar != nullptr) {
-            const LONG_PTR style = GetWindowLongPtrW(statusBar, GWL_STYLE);
-            SetWindowLongPtrW(statusBar, GWL_STYLE, style & ~SBARS_SIZEGRIP);
-        }
-
-        applyTitleFont(titleLabel);
-        applyBodyFont(subtitleLabel);
-        applyBodyFont(appGroup);
-        applyBodyFont(mainTab);
-        applyBodyFont(versionLabel);
-        applyBodyFont(versionValue);
-        applyBodyFont(connectionLabel);
-        applyBodyFont(connectionValue);
-        applyBodyFont(offlineRetryButton);
-        applyBodyFont(offlineNoticeTitle);
-        applyBodyFont(offlineNoticeMessage);
-        applyBodyFont(offlineDismissButton);
-        applyBodyFont(recoveryLabel);
-        applyBodyFont(recoveryValue);
-        applyBodyFont(scheduledExportLabel);
-        applyBodyFont(scheduledExportValue);
-        applyBodyFont(updatedLabel);
-        applyBodyFont(updatedValue);
-        applyBodyFont(usageGroup);
-        applyBodyFont(codexThroughputGroup);
-        applyBodyFont(codexThroughputText);
-        applyBodyFont(codexThroughputAveragesText);
-        applyBodyFont(codexThroughputTotalsText);
-        applyBodyFont(codexThroughputChart);
-        applyBodyFont(openAiUsageGroup);
-        applyBodyFont(openAiUsageText);
-        applyBodyFont(openAiUsageChart);
-        applyBodyFont(hicapUsageGroup);
-        applyBodyFont(hicapUsageText);
-        applyBodyFont(hicapUsageChart);
-        for (size_t index = 0; index < kMaxUsageRows; ++index) {
-            applyBodyFont(usageRows[index].label);
-            applyBodyFont(usageRows[index].value);
-        }
-        applyBodyFont(providersGroup);
-        applyBodyFont(providerList);
-        applyBodyFont(analysisLaunchGroup);
-        applyTitleFont(analysisLaunchTitle);
-        applyBodyFont(analysisLaunchInfo);
-        applyBodyFont(analysisLaunchButton);
-        applyBodyFont(statusBar);
-        applyBodyFont(scheduledExportGroup);
-        applyBodyFont(scheduledExportInfo);
-        applyBodyFont(scheduledExportCheckbox);
-        applyBodyFont(scheduledExportIntervalLabel);
-        applyBodyFont(scheduledExportIntervalEdit);
-        applyBodyFont(scheduledExportIntervalSuffix);
-        applyBodyFont(scheduledExportPathLabel);
-        applyBodyFont(scheduledExportPathEdit);
-        applyBodyFont(scheduledExportLastRunLabel);
-        applyBodyFont(scheduledExportLastRunValue);
-
-        ListView_SetExtendedListViewStyle(
-            providerList,
-            LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
+        providersGroup = add(page, L"STATIC", L"Provider quota snapshot");
+        providerList = add(page, WC_LISTVIEWW, L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS);
+        ListView_SetExtendedListViewStyle(providerList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
+        analysisLaunchTitle = add(page, L"STATIC", L"");
+        analysisLaunchInfo = add(page, L"STATIC", L"", SS_NOPREFIX);
+        analysisLaunchButton =
+            add(page, L"BUTTON", L"Open Analysis Window", WS_TABSTOP | BS_PUSHBUTTON, kOpenAnalysisWindowButtonId);
+        statusBar = add(hwnd, STATUSCLASSNAMEW, L"", WS_VISIBLE);
+        applyDashboardFonts();
 
         for (int index = 0;
              index < static_cast<int>(sizeof(kProviderQuotaColumns) / sizeof(kProviderQuotaColumns[0]));
@@ -3252,166 +2985,291 @@ public:
         }
 
         configureProviderListColumns();
-
         ensureConnectionTooltip();
         ensureUsageTooltip();
-        syncMainTabVisibility();
-        syncAnalysisLauncherState(copyViewModel());
-
-        SendMessageW(statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(L"Ready."));
     }
 
-    void layoutMainControls() {
-        if (window == nullptr) {
+    void layoutMainControls(const DashboardViewModel& model) {
+        if (dashboardViewport == nullptr) {
             return;
         }
 
-        RECT clientRect{};
-        GetClientRect(window, &clientRect);
-        const int margin = 16;
-        const int contentWidth = clientRect.right - (margin * 2);
+        const auto px = [this](int value) { return scaledPixels(value); };
+        RECT client{};
+        GetClientRect(window, &client);
+        const int width = client.right;
+        const int margin = px(24);
+        const int navTop = px(54);
+        const int viewportTop = px(94);
 
         SendMessageW(statusBar, WM_SIZE, 0, 0);
-        RECT statusRect{};
-        GetWindowRect(statusBar, &statusRect);
-        const int statusHeight = statusRect.bottom - statusRect.top;
+        RECT status{};
+        GetClientRect(statusBar, &status);
+        const int viewportHeight = std::max(0, static_cast<int>(client.bottom - status.bottom) - viewportTop);
+        MoveWindow(titleLabel, margin, px(12), width - margin * 2 - px(100), px(39), FALSE);
+        MoveWindow(versionValue, width - margin - px(100), px(25), px(100), px(19), FALSE);
+        MoveWindow(mainTab, margin, navTop, px(500), px(36), FALSE);
+        MoveWindow(dashboardViewport, 0, viewportTop, width, viewportHeight, FALSE);
 
-        const int tabTop = margin;
-        const int tabHeight = clientRect.bottom - tabTop - statusHeight - margin;
-        MoveWindow(mainTab, margin, tabTop, contentWidth, tabHeight, TRUE);
+        if (selectedMainTab == 0) {
+            layoutOverview(model, width, viewportHeight);
+        } else {
+            ShowScrollBar(dashboardViewport, SB_VERT, FALSE);
+            const int cardWidth = width - margin * 2;
+            const int inset = px(16);
+            const int innerWidth = cardWidth - inset * 2;
+            const int left = margin + inset;
+            const int cardHeight = selectedMainTab == 1 ? viewportHeight - px(18) : px(286);
+            otherPageCard = {margin, px(4), margin + cardWidth, px(4) + cardHeight};
+            MoveWindow(providersGroup, left, px(18), innerWidth, px(24), FALSE);
+            MoveWindow(providerList, left, px(52), innerWidth, std::max(0, cardHeight - px(62)), FALSE);
+            configureProviderListColumns();
+            MoveWindow(analysisLaunchTitle, left, px(19), innerWidth, px(28), FALSE);
+            MoveWindow(analysisLaunchInfo, left, px(57), innerWidth, px(170), FALSE);
+            MoveWindow(analysisLaunchButton, left, px(238), px(200), px(32), FALSE);
+        }
+        syncMainTabVisibility(model);
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
 
-        RECT tabRect{};
-        GetClientRect(mainTab, &tabRect);
-        TabCtrl_AdjustRect(mainTab, FALSE, &tabRect);
-        const int tabLeft = margin + tabRect.left;
-        const int tabContentTop = tabTop + tabRect.top;
-        const int tabContentWidth = tabRect.right - tabRect.left;
-        const int tabContentHeight = tabRect.bottom - tabRect.top;
-        const DashboardViewModel model = copyViewModel();
-        const bool showOfflineNotice = model.offlineNoticeVisible;
-        const bool showOfflineRetry = model.offlineRetryAvailable;
+    void layoutOverview(const DashboardViewModel& model, int width, int height) {
+        const auto px = [this](int value) { return scaledPixels(value); };
+        const int left = px(24);
+        const int gap = px(14);
+        const int inset = px(16);
+        const int cardWidth = width - left * 2 - GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(window));
+        const int innerWidth = cardWidth - inset * 2;
+        const int innerLeft = left + inset;
+        const int statusColumns = innerWidth >= px(720) ? 4 : 2;
+        const int statusHeight = (4 / statusColumns) * px(48);
+        const bool notice = model.offlineNoticeVisible;
+        const bool retry = model.offlineRetryAvailable;
+        const int actionWidth = notice && retry ? px(204) : px(102);
+        const int noticeTextWidth = innerWidth - actionWidth - px(24);
+        int noticeHeight = px(40);
+        if (notice) {
+            HDC dc = GetDC(dashboardViewport);
+            HGDIOBJ oldFont = SelectObject(dc, dashboardBodyFont);
+            RECT measured{0, 0, noticeTextWidth, 0};
+            const auto text = utf8ToWide(model.offlineNoticeMessage);
+            DrawTextW(dc, text.c_str(), -1, &measured, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+            SelectObject(dc, oldFont);
+            ReleaseDC(dashboardViewport, dc);
+            noticeHeight = std::max(px(62), px(34) + static_cast<int>(measured.bottom));
+        }
+        const int statusCardHeight = px(44) + statusHeight + ((notice || retry) ? noticeHeight + px(8) : 0);
+        const int quotaHeight = px(47) + std::max(1, static_cast<int>(quotaRowCount)) * px(43);
+        const int summaryColumns = innerWidth >= px(680) ? 3 : 2;
+        const int summaryHeight = px(96);
+        const int summaryBlockHeight = summaryColumns == 3 ? summaryHeight : 2 * summaryHeight + gap;
+        const int throughputHeight = px(194) + summaryBlockHeight;
+        const bool twoColumns = cardWidth >= px(830);
+        const auto summaryTextHeight = [&](const AnalysisProviderModelUsageChart& chart) {
+            const int count = chart.hasData ? static_cast<int>(std::min<size_t>(chart.series.size(), 6)) : 0;
+            return px(std::max(34, (count + 1) * 16 + 4));
+        };
+        int openAiSummaryHeight = summaryTextHeight(model.analysis.openAiCodexModelUsage);
+        int hicapSummaryHeight = summaryTextHeight(model.analysis.hicapCodexModelUsage);
+        if (twoColumns) {
+            openAiSummaryHeight = hicapSummaryHeight = std::max(openAiSummaryHeight, hicapSummaryHeight);
+        }
+        const int openAiModelHeight = px(198) + openAiSummaryHeight;
+        const int hicapModelHeight = px(198) + hicapSummaryHeight;
+        const int modelWidth = twoColumns ? (cardWidth - gap) / 2 : cardWidth;
+        const int statusTop = px(4);
+        const int quotaTop = statusTop + statusCardHeight + gap;
+        const int throughputTop = quotaTop + quotaHeight + gap;
+        const int modelTop = throughputTop + throughputHeight + gap;
+        const int secondModelTop = twoColumns ? modelTop : modelTop + openAiModelHeight + gap;
+        const int contentHeight = secondModelTop + hicapModelHeight + px(20);
 
-        const int appGroupTop = tabContentTop;
-        const int appGroupHeight = showOfflineNotice ? 148 : 82;
-        MoveWindow(appGroup, tabLeft, appGroupTop, tabContentWidth, appGroupHeight, TRUE);
+        overviewScroll = std::clamp(overviewScroll, 0, std::max(0, contentHeight - height));
+        SCROLLINFO scroll{};
+        scroll.cbSize = sizeof(scroll);
+        scroll.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+        scroll.nMax = contentHeight - 1;
+        scroll.nPage = static_cast<UINT>(height);
+        scroll.nPos = overviewScroll;
+        SetScrollInfo(dashboardViewport, SB_VERT, &scroll, TRUE);
+        ShowScrollBar(dashboardViewport, SB_VERT, contentHeight > height);
 
-        const int statusLeft = tabLeft + 18;
-        const int statusTop = appGroupTop + 24;
-        const int statusColumnGap = 12;
-        const int statusColumnWidth = (tabContentWidth - 36 - (statusColumnGap * 3)) / 4;
-        const int labelHeight = 16;
-        const int valueHeight = 24;
-        const int valueTop = statusTop + labelHeight + 2;
-        const int retryButtonWidth = 96;
-        const int connectionX = statusLeft;
-        const int recoveryX = connectionX + statusColumnWidth + statusColumnGap;
-        const int scheduledExportX = recoveryX + statusColumnWidth + statusColumnGap;
-        const int updatedX = scheduledExportX + statusColumnWidth + statusColumnGap;
-        const int connectionValueWidth = showOfflineRetry
-            ? std::max(72, statusColumnWidth - retryButtonWidth - 8)
-            : statusColumnWidth;
+        const auto move = [&](HWND control, int x, int y, int w, int h) {
+            MoveWindow(control, x, y - overviewScroll, w, h, FALSE);
+        };
+        const auto card = [&](size_t index, HWND title, int x, int y, int w, int h) {
+            overviewCards[index] = {x, y - overviewScroll, x + w, y + h - overviewScroll};
+            move(title, x + inset, y + px(12), w - inset * 2, px(25));
+        };
 
-        MoveWindow(connectionLabel, connectionX, statusTop, statusColumnWidth, labelHeight, TRUE);
-        MoveWindow(connectionValue, connectionX, valueTop, connectionValueWidth, valueHeight, TRUE);
-        MoveWindow(recoveryLabel, recoveryX, statusTop, statusColumnWidth, labelHeight, TRUE);
-        MoveWindow(recoveryValue, recoveryX, valueTop, statusColumnWidth, valueHeight, TRUE);
-        MoveWindow(scheduledExportLabel, scheduledExportX, statusTop, statusColumnWidth, labelHeight, TRUE);
-        MoveWindow(scheduledExportValue, scheduledExportX, valueTop, statusColumnWidth, valueHeight, TRUE);
-        MoveWindow(updatedLabel, updatedX, statusTop, statusColumnWidth, labelHeight, TRUE);
-        MoveWindow(updatedValue, updatedX, valueTop, statusColumnWidth, valueHeight, TRUE);
-        MoveWindow(
-            offlineRetryButton,
-            connectionX + statusColumnWidth - retryButtonWidth,
-            valueTop - 2,
-            retryButtonWidth,
-            26,
-            TRUE);
-        MoveWindow(offlineNoticeTitle, statusLeft, valueTop + valueHeight + 8, tabContentWidth - 180, 20, TRUE);
-        MoveWindow(offlineNoticeMessage, statusLeft, valueTop + valueHeight + 30, tabContentWidth - 180, 42, TRUE);
-        MoveWindow(offlineDismissButton, tabLeft + tabContentWidth - 114, valueTop + valueHeight + 42, 92, 26, TRUE);
-
-        const int usageTop = appGroupTop + appGroupHeight + 10;
-        const int usageHeight = 130;
-        MoveWindow(usageGroup, tabLeft, usageTop, tabContentWidth, usageHeight, TRUE);
-
-        const int usageInnerLeft = tabLeft + 18;
-        const int usageLabelWidth = 220;
-        const int usageBarLeft = usageInnerLeft + usageLabelWidth + 8;
-        const int usageBarAvailableWidth =
-            tabContentWidth - (usageBarLeft - tabLeft) - 34;
-        const int usageBarWidth = std::max(220, std::min(usageBarAvailableWidth, 320));
-        const int usageRowTop = usageTop + 26;
-        const int usageRowHeight = 24;
-        const int usageRowGap = 7;
-
-        for (size_t index = 0; index < kMaxUsageRows; ++index) {
-            const int rowTop = usageRowTop + static_cast<int>(index) * (usageRowHeight + usageRowGap);
-            MoveWindow(usageRows[index].label, usageInnerLeft, rowTop, usageLabelWidth, usageRowHeight, TRUE);
-            MoveWindow(usageRows[index].bar, usageBarLeft, rowTop + 3, usageBarWidth, 18, TRUE);
-            MoveWindow(usageRows[index].value, usageBarLeft, rowTop + 3, usageBarWidth, 18, TRUE);
+        card(0, appGroup, left, statusTop, cardWidth, statusCardHeight);
+        const HWND labels[] = {connectionLabel, recoveryLabel, scheduledExportLabel, updatedLabel};
+        const HWND values[] = {connectionValue, recoveryValue, scheduledExportValue, updatedValue};
+        const int columnWidth = innerWidth / statusColumns;
+        for (int index = 0; index < 4; ++index) {
+            const int x = innerLeft + (index % statusColumns) * columnWidth;
+            const int y = statusTop + px(45) + (index / statusColumns) * px(48);
+            move(labels[index], x, y, columnWidth - px(8), px(18));
+            move(values[index], x, y + px(19), columnWidth - px(8), px(19));
+        }
+        noticeRect = {};
+        const int noticeTop = statusTop + px(40) + statusHeight;
+        const int buttonX = innerLeft + innerWidth - px(12) - px(90);
+        const int buttonY = noticeTop + (noticeHeight - px(30)) / 2;
+        if (notice) {
+            noticeRect = {innerLeft, noticeTop - overviewScroll, innerLeft + innerWidth,
+                          noticeTop + noticeHeight - overviewScroll};
+            move(offlineNoticeTitle, innerLeft + px(12), noticeTop + px(9), noticeTextWidth, px(19));
+            move(offlineNoticeMessage, innerLeft + px(12), noticeTop + px(29), noticeTextWidth, noticeHeight - px(32));
+            move(offlineDismissButton, buttonX, buttonY, px(90), px(30));
+        }
+        if (retry) {
+            move(offlineRetryButton, notice ? buttonX - px(102) : buttonX, buttonY, px(90), px(30));
         }
 
-        const int codexTop = usageTop + usageHeight + 10;
-        const int codexHeight = 238;
-        const int codexSummaryHeight = 74;
-        const int codexChartTop = 26 + codexSummaryHeight + 8;
-        const int codexSummaryLeft = tabLeft + 18;
-        const int codexSummaryGap = 12;
-        const int codexSummaryWidth = tabContentWidth - 36;
-        const int codexSummaryColumnWidth = (codexSummaryWidth - (codexSummaryGap * 2)) / 3;
-        const int codexSummarySecondX = codexSummaryLeft + codexSummaryColumnWidth + codexSummaryGap;
-        const int codexSummaryThirdX = codexSummarySecondX + codexSummaryColumnWidth + codexSummaryGap;
-        MoveWindow(codexThroughputGroup, tabLeft, codexTop, tabContentWidth, codexHeight, TRUE);
-        MoveWindow(
-            codexThroughputText,
-            codexSummaryLeft,
-            codexTop + 26,
-            codexSummaryColumnWidth,
-            codexSummaryHeight,
-            TRUE);
-        MoveWindow(
-            codexThroughputAveragesText,
-            codexSummarySecondX,
-            codexTop + 26,
-            codexSummaryColumnWidth,
-            codexSummaryHeight,
-            TRUE);
-        MoveWindow(
-            codexThroughputTotalsText,
-            codexSummaryThirdX,
-            codexTop + 26,
-            tabLeft + tabContentWidth - 18 - codexSummaryThirdX,
-            codexSummaryHeight,
-            TRUE);
-        MoveWindow(
-            codexThroughputChart,
-            18,
-            codexChartTop,
-            tabContentWidth - 36,
-            codexHeight - codexChartTop - 8,
-            TRUE);
+        card(1, usageGroup, left, quotaTop, cardWidth, quotaHeight);
+        move(quotaEmptyText, innerLeft, quotaTop + px(47), innerWidth, px(24));
+        const int quotaLabelWidth = std::min(px(244), innerWidth / 3);
+        for (size_t index = 0; index < quotaRowCount; ++index) {
+            const int y = quotaTop + px(42) + static_cast<int>(index) * px(43);
+            move(usageRows[index].label, innerLeft, y + px(9), quotaLabelWidth - gap, px(23));
+            move(usageRows[index].bar, innerLeft + quotaLabelWidth, y, innerWidth - quotaLabelWidth, px(34));
+        }
 
-        const int modelChartTop = codexTop + codexHeight + 10;
-        const int modelChartGap = 10;
-        const int modelChartHeight = 240;
-        MoveWindow(openAiUsageGroup, tabLeft, modelChartTop, tabContentWidth, modelChartHeight, TRUE);
-        MoveWindow(openAiUsageText, tabLeft + 18, modelChartTop + 26, tabContentWidth - 36, 52, TRUE);
-        MoveWindow(openAiUsageChart, 18, 82, tabContentWidth - 36, modelChartHeight - 90, TRUE);
+        card(2, codexThroughputGroup, left, throughputTop, cardWidth, throughputHeight);
+        const HWND summaries[] = {codexThroughputText, codexThroughputAveragesText, codexThroughputTotalsText};
+        const int summaryWidth = (innerWidth - (summaryColumns - 1) * gap) / summaryColumns;
+        for (int index = 0; index < 3; ++index) {
+            const int x = innerLeft + (index % summaryColumns) * (summaryWidth + gap);
+            const int y = throughputTop + px(43) + (index / summaryColumns) * (summaryHeight + gap);
+            const int w = (index == 2 || index == summaryColumns - 1) ? innerLeft + innerWidth - x : summaryWidth;
+            move(summaries[index], x, y, w, summaryHeight);
+        }
+        move(codexThroughputChart, innerLeft, throughputTop + px(49) + summaryBlockHeight, innerWidth, px(132));
 
-        const int hicapTop = modelChartTop + modelChartHeight + modelChartGap;
-        MoveWindow(hicapUsageGroup, tabLeft, hicapTop, tabContentWidth, modelChartHeight, TRUE);
-        MoveWindow(hicapUsageText, tabLeft + 18, hicapTop + 26, tabContentWidth - 36, 52, TRUE);
-        MoveWindow(hicapUsageChart, 18, 82, tabContentWidth - 36, modelChartHeight - 90, TRUE);
+        const int secondX = twoColumns ? left + cardWidth - modelWidth : left;
+        const auto modelCard = [&](size_t index, HWND title, HWND text, HWND chart, int x, int y, int summarySize,
+                                   int cardHeight) {
+            card(index, title, x, y, modelWidth, cardHeight);
+            move(text, x + inset, y + px(40), modelWidth - inset * 2, summarySize);
+            move(chart, x + inset, y + px(40) + summarySize, modelWidth - inset * 2, px(144));
+        };
+        modelCard(3, openAiUsageGroup, openAiUsageText, openAiUsageChart, left, modelTop, openAiSummaryHeight,
+                  openAiModelHeight);
+        modelCard(4, hicapUsageGroup, hicapUsageText, hicapUsageChart, secondX, secondModelTop, hicapSummaryHeight,
+                  hicapModelHeight);
+    }
 
-        MoveWindow(providersGroup, tabLeft, tabContentTop, tabContentWidth, tabContentHeight, TRUE);
-        MoveWindow(providerList, tabLeft + 12, tabContentTop + 24, tabContentWidth - 24, tabContentHeight - 36, TRUE);
-        configureProviderListColumns();
+    void scrollOverview(UINT command) {
+        SCROLLINFO info{};
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_ALL;
+        if (selectedMainTab != 0 || !GetScrollInfo(dashboardViewport, SB_VERT, &info)) {
+            return;
+        }
+        int next = overviewScroll;
+        switch (command) {
+            case SB_LINEUP:
+                next -= scaledPixels(32);
+                break;
+            case SB_LINEDOWN:
+                next += scaledPixels(32);
+                break;
+            case SB_PAGEUP:
+                next -= static_cast<int>(info.nPage);
+                break;
+            case SB_PAGEDOWN:
+                next += static_cast<int>(info.nPage);
+                break;
+            case SB_THUMBTRACK:
+                next = info.nTrackPos;
+                break;
+            case SB_TOP:
+                next = 0;
+                break;
+            case SB_BOTTOM:
+                next = info.nMax;
+                break;
+            default:
+                return;
+        }
+        setOverviewScroll(next, info);
+    }
 
-        MoveWindow(analysisLaunchGroup, tabLeft, tabContentTop, tabContentWidth, tabContentHeight, TRUE);
-        MoveWindow(analysisLaunchTitle, tabLeft + 28, tabContentTop + 40, tabContentWidth - 56, 28, TRUE);
-        MoveWindow(analysisLaunchInfo, tabLeft + 28, tabContentTop + 78, tabContentWidth - 56, 132, TRUE);
-        MoveWindow(analysisLaunchButton, tabLeft + 28, tabContentTop + 228, 196, 34, TRUE);
-        syncMainTabVisibility();
+    void scrollOverviewWheel(int delta) {
+        SCROLLINFO info{};
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_RANGE | SIF_PAGE;
+        if (!GetScrollInfo(dashboardViewport, SB_VERT, &info)) {
+            return;
+        }
+        UINT lines = 3;
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+        wheelDelta += delta;
+        const int ticks = wheelDelta / WHEEL_DELTA;
+        wheelDelta %= WHEEL_DELTA;
+        const int distance =
+            lines == WHEEL_PAGESCROLL ? static_cast<int>(info.nPage) : scaledPixels(24) * static_cast<int>(lines);
+        setOverviewScroll(overviewScroll - ticks * distance, info);
+    }
+
+    void setOverviewScroll(int next, const SCROLLINFO& info) {
+        next = std::clamp(next, 0, std::max(0, info.nMax - static_cast<int>(info.nPage) + 1));
+        const int offset = overviewScroll - next;
+        if (offset == 0) {
+            return;
+        }
+
+        overviewScroll = next;
+        dismissUsageTooltip();
+        HDWP positions = BeginDeferWindowPos(32);
+        for (HWND child = GetWindow(dashboardViewport, GW_CHILD); child != nullptr && positions != nullptr;
+             child = GetWindow(child, GW_HWNDNEXT)) {
+            if (!(GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE)) {
+                continue;
+            }
+            RECT rect{};
+            GetWindowRect(child, &rect);
+            MapWindowPoints(HWND_DESKTOP, dashboardViewport, reinterpret_cast<POINT*>(&rect), 2);
+            positions = DeferWindowPos(positions, child, nullptr, rect.left, rect.top + offset, 0, 0,
+                                       SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
+        }
+        if (positions == nullptr || !EndDeferWindowPos(positions)) {
+            layoutMainControls(copyViewModel());
+            return;
+        }
+
+        for (auto& card : overviewCards) {
+            OffsetRect(&card, 0, offset);
+        }
+        OffsetRect(&noticeRect, 0, offset);
+        SCROLLINFO position{};
+        position.cbSize = sizeof(position);
+        position.fMask = SIF_POS;
+        position.nPos = next;
+        SetScrollInfo(dashboardViewport, SB_VERT, &position, TRUE);
+        RedrawWindow(dashboardViewport, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
+
+    void revealOverviewControl(HWND control) {
+        if (selectedMainTab != 0 || control == nullptr) {
+            return;
+        }
+        RECT rect{};
+        RECT viewport{};
+        GetWindowRect(control, &rect);
+        GetClientRect(dashboardViewport, &viewport);
+        MapWindowPoints(HWND_DESKTOP, dashboardViewport, reinterpret_cast<POINT*>(&rect), 2);
+        SCROLLINFO info{};
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_RANGE | SIF_PAGE;
+        if (GetScrollInfo(dashboardViewport, SB_VERT, &info)) {
+            const int padding = scaledPixels(8);
+            if (rect.top < padding) {
+                setOverviewScroll(overviewScroll + rect.top - padding, info);
+            } else if (rect.bottom > viewport.bottom - padding) {
+                setOverviewScroll(overviewScroll + rect.bottom - viewport.bottom + padding, info);
+            }
+        }
     }
 
     DashboardViewModel copyViewModel() const {
@@ -3915,25 +3773,21 @@ public:
         const std::vector<UsageProgressSummary> summaries = buildUsageProgressSummaries(model);
         const auto colorForPercentage = [](int percentage, bool remainingSemantics) {
             if (!remainingSemantics) {
-                return RGB(52, 152, 219);
+                return RGB(41, 105, 213);
             }
             if (percentage >= 50) {
-                return RGB(46, 139, 87);
+                return RGB(24, 130, 96);
             }
             if (percentage >= 20) {
-                return RGB(255, 165, 0);
+                return RGB(177, 107, 20);
             }
-            return RGB(220, 53, 69);
+            return RGB(197, 55, 76);
         };
+        quotaRowCount = std::min(summaries.size(), kMaxUsageRows);
+        const bool localActivity = !summaries.empty() && !summaries.front().remainingSemantics;
+        setWindowText(usageGroup, localActivity ? L"Recent local activity" : L"Provider quota");
         for (size_t index = 0; index < kMaxUsageRows; ++index) {
-            const bool hasSummary = index < summaries.size();
-            const int overviewFlag = hasSummary && selectedMainTab == 0 ? SW_SHOW : SW_HIDE;
-
-            ShowWindow(usageRows[index].label, overviewFlag);
-            ShowWindow(usageRows[index].bar, overviewFlag);
-            ShowWindow(usageRows[index].value, SW_HIDE);
-
-            if (!hasSummary) {
+            if (index >= quotaRowCount) {
                 usageRows[index].overlayText.clear();
                 usageRows[index].secondaryOverlayText.clear();
                 usageRows[index].detailTooltipText.clear();
@@ -3970,7 +3824,7 @@ public:
         }
 #endif
 
-        setWindowText(versionValue, model.appVersion);
+        setWindowText(versionValue, model.appVersion.empty() ? "" : ("v" + model.appVersion));
         {
             const std::string title = model.appVersion.empty()
                 ? "JiStats"
@@ -4005,25 +3859,11 @@ public:
         setWindowText(codexThroughputTotalsText, utf8ToWide(codexThroughputColumns.totals));
         setWindowText(openAiUsageText, utf8ToWide(modelUsageOverviewText(model.analysis.openAiCodexModelUsage)));
         setWindowText(hicapUsageText, utf8ToWide(modelUsageOverviewText(model.analysis.hicapCodexModelUsage)));
-        if (codexThroughputChart != nullptr) {
-            InvalidateRect(codexThroughputChart, nullptr, TRUE);
-            UpdateWindow(codexThroughputChart);
-        }
-        if (openAiUsageChart != nullptr) {
-            InvalidateRect(openAiUsageChart, nullptr, TRUE);
-            UpdateWindow(openAiUsageChart);
-        }
-        if (hicapUsageChart != nullptr) {
-            InvalidateRect(hicapUsageChart, nullptr, TRUE);
-            UpdateWindow(hicapUsageChart);
-        }
-        setWindowText(updatedValue, localizeDisplayTimestamp(model.lastUpdateTime));
-        ShowWindow(offlineRetryButton, model.offlineRetryAvailable ? SW_SHOW : SW_HIDE);
-        ShowWindow(offlineNoticeTitle, model.offlineNoticeVisible ? SW_SHOW : SW_HIDE);
-        ShowWindow(offlineNoticeMessage, model.offlineNoticeVisible ? SW_SHOW : SW_HIDE);
-        ShowWindow(offlineDismissButton, model.offlineNoticeVisible ? SW_SHOW : SW_HIDE);
-        layoutMainControls();
+        updatedTooltipBody = utf8ToWide(model.lastUpdateTime.empty() ? "Waiting for first update"
+                                                                     : localizeDisplayTimestamp(model.lastUpdateTime));
+        setWindowText(updatedValue, updatedTooltipBody);
         syncUsageProgress(model);
+        layoutMainControls(model);
         populateProviderList(model);
         if (analysisPresenter != nullptr && analysisWindow != nullptr) {
             analysisPresenter->updateViewModel(model.analysis);
@@ -5453,32 +5293,6 @@ public:
             control == codexThroughputTotalsText;
     }
 
-    COLORREF codexThroughputSummaryTextColor(HWND control) const {
-        if (control == codexThroughputText) {
-            return RGB(24, 92, 169);
-        }
-        if (control == codexThroughputAveragesText) {
-            return RGB(36, 122, 72);
-        }
-        if (control == codexThroughputTotalsText) {
-            return RGB(142, 93, 0);
-        }
-        return GetSysColor(COLOR_WINDOWTEXT);
-    }
-
-    HBRUSH codexThroughputSummaryBrush(HWND control) const {
-        if (control == codexThroughputText) {
-            return codexRecentBrush != nullptr ? codexRecentBrush : windowBackgroundBrush;
-        }
-        if (control == codexThroughputAveragesText) {
-            return codexAveragesBrush != nullptr ? codexAveragesBrush : windowBackgroundBrush;
-        }
-        if (control == codexThroughputTotalsText) {
-            return codexTotalsBrush != nullptr ? codexTotalsBrush : windowBackgroundBrush;
-        }
-        return windowBackgroundBrush;
-    }
-
     std::vector<std::wstring> splitOwnerDrawLines(const std::wstring& text) const {
         std::vector<std::wstring> lines;
         size_t start = 0;
@@ -5500,7 +5314,10 @@ public:
     void drawCodexThroughputSummaryCell(const DRAWITEMSTRUCT& draw) {
         HDC dc = draw.hDC;
         RECT rect = draw.rcItem;
-        FillRect(dc, &rect, codexThroughputSummaryBrush(draw.hwndItem));
+        fillDashboardRect(dc, rect, dashboardColor(RGB(240, 244, 250), COLOR_WINDOW));
+        if (dashboardHighContrast) {
+            FrameRect(dc, &rect, GetSysColorBrush(COLOR_WINDOWTEXT));
+        }
 
         const int length = GetWindowTextLengthW(draw.hwndItem);
         std::wstring text(static_cast<size_t>(length + 1), L'\0');
@@ -5510,15 +5327,16 @@ public:
         text.resize(static_cast<size_t>(length));
 
         RECT contentRect = rect;
-        InflateRect(&contentRect, -8, -5);
-        const COLORREF textColor = codexThroughputSummaryTextColor(draw.hwndItem);
+        InflateRect(&contentRect, -scaledPixels(12), -scaledPixels(8));
+        const COLORREF textColor = dashboardColor(RGB(27, 40, 61), COLOR_WINDOWTEXT);
         const int oldBkMode = SetBkMode(dc, TRANSPARENT);
         const COLORREF oldColor = SetTextColor(dc, textColor);
-        HGDIOBJ oldFont = SelectObject(dc, bodyFont != nullptr ? bodyFont : GetStockObject(DEFAULT_GUI_FONT));
+        HGDIOBJ oldFont =
+            SelectObject(dc, dashboardBodyFont != nullptr ? dashboardBodyFont : GetStockObject(DEFAULT_GUI_FONT));
 
         TEXTMETRICW metrics{};
         GetTextMetricsW(dc, &metrics);
-        const int lineHeight = metrics.tmHeight + 2;
+        const int lineHeight = metrics.tmHeight + scaledPixels(3);
         int y = contentRect.top;
         const auto lines = splitOwnerDrawLines(text);
         for (size_t index = 0; index < lines.size(); ++index) {
@@ -5534,27 +5352,30 @@ public:
                 std::min<LONG>(contentRect.bottom, static_cast<LONG>(y + lineHeight + 2))
             };
             if (index == 0) {
-                SelectObject(dc, bodyBoldFont != nullptr ? bodyBoldFont : bodyFont);
+                SelectObject(dc, dashboardLabelFont);
                 DrawTextW(dc, line.c_str(), -1, &lineRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             } else if (line.rfind(L"Source:", 0) == 0 || line.rfind(L"Rates averaged", 0) == 0) {
-                SelectObject(dc, bodyItalicFont != nullptr ? bodyItalicFont : bodyFont);
+                SelectObject(dc, dashboardBodyFont);
                 DrawTextW(dc, line.c_str(), -1, &lineRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             } else {
                 const size_t colon = line.find(L':');
                 if (colon != std::wstring::npos) {
                     const std::wstring label = line.substr(0, colon + 1);
                     const std::wstring value = line.substr(colon + 1);
-                    SelectObject(dc, bodyBoldFont != nullptr ? bodyBoldFont : bodyFont);
+                    SelectObject(dc, dashboardLabelFont);
                     TextOutW(dc, lineRect.left, lineRect.top, label.c_str(), static_cast<int>(label.size()));
                     SIZE labelSize{};
                     GetTextExtentPoint32W(dc, label.c_str(), static_cast<int>(label.size()), &labelSize);
                     RECT valueRect = lineRect;
                     valueRect.left = std::min(valueRect.right, valueRect.left + labelSize.cx + 3);
-                    SelectObject(dc, bodyFont != nullptr ? bodyFont : GetStockObject(DEFAULT_GUI_FONT));
+                    SelectObject(dc,
+                                 dashboardBodyFont != nullptr ? dashboardBodyFont : GetStockObject(DEFAULT_GUI_FONT));
                     DrawTextW(dc, value.c_str(), -1, &valueRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
                 } else {
-                    SelectObject(dc, bodyFont != nullptr ? bodyFont : GetStockObject(DEFAULT_GUI_FONT));
-                    DrawTextW(dc, line.c_str(), -1, &lineRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    SelectObject(dc,
+                                 dashboardBodyFont != nullptr ? dashboardBodyFont : GetStockObject(DEFAULT_GUI_FONT));
+                    lineRect.bottom = contentRect.bottom;
+                    DrawTextW(dc, line.c_str(), -1, &lineRect, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
                 }
             }
             y += lineHeight;
@@ -5573,24 +5394,43 @@ public:
             window = hwnd;
             nextDashboardChartRefreshTick = GetTickCount64() + kDashboardChartRefreshIntervalMs;
             ensureFonts();
-            windowBackgroundBrush = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
-            codexRecentBrush = CreateSolidBrush(RGB(235, 244, 255));
-            codexAveragesBrush = CreateSolidBrush(RGB(235, 248, 240));
-            codexTotalsBrush = CreateSolidBrush(RGB(255, 247, 226));
+            refreshDashboardColors();
             createMainMenuBar(hwnd);
             createMainControls(hwnd);
-            layoutMainControls();
             syncViewModelToControls();
             SetTimer(hwnd, kDashboardChartRefreshTimerId, kDashboardChartCountdownTimerMs, nullptr);
             return 0;
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
-            info->ptMinTrackSize.x = kMinWidth;
-            info->ptMinTrackSize.y = kMinHeight;
-            info->ptMaxTrackSize.x = kMinWidth;
-            info->ptMaxTrackSize.y = kMinHeight;
+            info->ptMinTrackSize.x = scaledPixels(kMinWidth, hwnd);
+            info->ptMinTrackSize.y = scaledPixels(kMinHeight, hwnd);
             return 0;
         }
+        case WM_DPICHANGED: {
+            applyDashboardFonts();
+            const auto& bounds = *reinterpret_cast<const RECT*>(lParam);
+            SetWindowPos(hwnd, nullptr, bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            layoutMainControls(copyViewModel());
+            return 0;
+        }
+        case WM_SETTINGCHANGE:
+        case WM_SYSCOLORCHANGE:
+            refreshDashboardColors();
+            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        case WM_ERASEBKGND: {
+            RECT rect{};
+            GetClientRect(hwnd, &rect);
+            fillDashboardRect(reinterpret_cast<HDC>(wParam), rect, dashboardColor(RGB(245, 247, 251), COLOR_WINDOW));
+            return 1;
+        }
+        case WM_MOUSEWHEEL:
+            if (selectedMainTab == 0) {
+                scrollOverviewWheel(GET_WHEEL_DELTA_WPARAM(wParam));
+                return 0;
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_SIZE:
             if (wParam == SIZE_MINIMIZED) {
                 ShowWindow(hwnd, SW_HIDE);
@@ -5600,7 +5440,7 @@ public:
                 }
                 return 0;
             }
-            layoutMainControls();
+            layoutMainControls(copyViewModel());
             return 0;
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
@@ -5628,11 +5468,17 @@ public:
                 }
                 return 0;
             case kOfflineRetryButtonId:
+                if (HIWORD(wParam) == BN_SETFOCUS) {
+                    revealOverviewControl(offlineRetryButton);
+                }
                 if (HIWORD(wParam) == BN_CLICKED) {
                     notifyOfflineRetryRequested();
                 }
                 return 0;
             case kOfflineDismissButtonId:
+                if (HIWORD(wParam) == BN_SETFOCUS) {
+                    revealOverviewControl(offlineDismissButton);
+                }
                 if (HIWORD(wParam) == BN_CLICKED) {
                     notifyOfflineDismissRequested();
                 }
@@ -5687,7 +5533,6 @@ public:
                     if (selectedMainTab == 2) {
                         openAnalysisWindow(true);
                     }
-                    layoutMainControls();
                     syncViewModelToControls();
                     return 0;
                 }
@@ -5706,206 +5551,66 @@ public:
 
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
-        case WM_DRAWITEM:
-            {
+            case WM_DRAWITEM: {
                 const auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
-                if (draw != nullptr && isCodexThroughputSummaryControl(draw->hwndItem)) {
+                if (draw == nullptr) {
+                    return FALSE;
+                }
+                if (draw->hwndItem == mainTab) {
+                    drawDashboardTab(*draw);
+                    return TRUE;
+                }
+                if (isCodexThroughputSummaryControl(draw->hwndItem)) {
                     drawCodexThroughputSummaryCell(*draw);
                     return TRUE;
                 }
-                if (draw != nullptr &&
-                    draw->CtlID >= kUsageBarBaseId &&
-                    draw->CtlID < kUsageBarBaseId + kMaxUsageRows) {
-                    const size_t index = static_cast<size_t>(draw->CtlID - kUsageBarBaseId);
-                    const RECT rect = draw->rcItem;
-                    HDC dc = draw->hDC;
-                    HGDIOBJ previousFont = nullptr;
-                    if (bodyFont != nullptr) {
-                        previousFont = SelectObject(dc, bodyFont);
-                    }
-
-                    HBRUSH backgroundBrush = CreateSolidBrush(RGB(232, 236, 242));
-                    FillRect(dc, &rect, backgroundBrush);
-                    DeleteObject(backgroundBrush);
-
-                    const bool hasSecondary = usageRows[index].secondaryPercentage >= 0;
-                    if (!hasSecondary) {
-                        RECT fillRect = rect;
-                        const int fillWidth = MulDiv(
-                            std::max(0, std::min(usageRows[index].percentage, 100)),
-                            rect.right - rect.left,
-                            100);
-                        fillRect.right = fillRect.left + fillWidth;
-                        if (fillRect.right > fillRect.left) {
-                            HBRUSH fillBrush = CreateSolidBrush(usageRows[index].barColor);
-                            FillRect(dc, &fillRect, fillBrush);
-                            DeleteObject(fillBrush);
-                        }
-                    } else {
-                        const int gapWidth = 8;
-                        RECT leftRect = rect;
-                        RECT rightRect = rect;
-                        const int totalWidth = rect.right - rect.left;
-                        const int halfWidth = std::max(1, (totalWidth - gapWidth) / 2);
-                        leftRect.right = leftRect.left + halfWidth;
-                        rightRect.left = leftRect.right + gapWidth;
-
-                        HBRUSH leftBackgroundBrush = CreateSolidBrush(RGB(232, 236, 242));
-                        HBRUSH rightBackgroundBrush = CreateSolidBrush(RGB(232, 236, 242));
-                        FillRect(dc, &leftRect, leftBackgroundBrush);
-                        FillRect(dc, &rightRect, rightBackgroundBrush);
-                        DeleteObject(leftBackgroundBrush);
-                        DeleteObject(rightBackgroundBrush);
-
-                        RECT leftFillRect = leftRect;
-                        leftFillRect.right = leftFillRect.left + MulDiv(
-                            std::max(0, std::min(usageRows[index].percentage, 100)),
-                            leftRect.right - leftRect.left,
-                            100);
-                        if (leftFillRect.right > leftFillRect.left) {
-                            HBRUSH leftFillBrush = CreateSolidBrush(usageRows[index].barColor);
-                            FillRect(dc, &leftFillRect, leftFillBrush);
-                            DeleteObject(leftFillBrush);
-                        }
-
-                        RECT rightFillRect = rightRect;
-                        rightFillRect.right = rightFillRect.left + MulDiv(
-                            std::max(0, std::min(usageRows[index].secondaryPercentage, 100)),
-                            rightRect.right - rightRect.left,
-                            100);
-                        if (rightFillRect.right > rightFillRect.left) {
-                            HBRUSH rightFillBrush = CreateSolidBrush(usageRows[index].secondaryBarColor);
-                            FillRect(dc, &rightFillRect, rightFillBrush);
-                            DeleteObject(rightFillBrush);
-                        }
-
-                        FrameRect(dc, &leftRect, reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
-                        FrameRect(dc, &rightRect, reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
-
-                        SetBkMode(dc, TRANSPARENT);
-                        RECT leftTextRect = leftRect;
-                        OffsetRect(&leftTextRect, 1, 1);
-                        SetTextColor(dc, RGB(0, 0, 0));
-                        DrawTextW(
-                            dc,
-                            usageRows[index].overlayText.c_str(),
-                            -1,
-                            &leftTextRect,
-                            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                        SetTextColor(dc, RGB(255, 255, 255));
-                        leftTextRect = leftRect;
-                        DrawTextW(
-                            dc,
-                            usageRows[index].overlayText.c_str(),
-                            -1,
-                            &leftTextRect,
-                            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-                        RECT rightTextRect = rightRect;
-                        OffsetRect(&rightTextRect, 1, 1);
-                        SetTextColor(dc, RGB(0, 0, 0));
-                        DrawTextW(
-                            dc,
-                            usageRows[index].secondaryOverlayText.c_str(),
-                            -1,
-                            &rightTextRect,
-                            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                        SetTextColor(dc, RGB(255, 255, 255));
-                        rightTextRect = rightRect;
-                        DrawTextW(
-                            dc,
-                            usageRows[index].secondaryOverlayText.c_str(),
-                            -1,
-                            &rightTextRect,
-                            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-                        if (previousFont != nullptr) {
-                            SelectObject(dc, previousFont);
-                        }
-                        return TRUE;
-                    }
-
-                    FrameRect(dc, &rect, reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
-
-                    SetBkMode(dc, TRANSPARENT);
-                    RECT textRect = rect;
-                    OffsetRect(&textRect, 1, 1);
-                    SetTextColor(dc, RGB(0, 0, 0));
-                    DrawTextW(
-                        dc,
-                        usageRows[index].overlayText.c_str(),
-                        -1,
-                        &textRect,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    SetTextColor(dc, RGB(255, 255, 255));
-                    textRect = rect;
-                    DrawTextW(
-                        dc,
-                        usageRows[index].overlayText.c_str(),
-                        -1,
-                        &textRect,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    if (previousFont != nullptr) {
-                        SelectObject(dc, previousFont);
-                    }
+                if (draw->hwndItem == openAiUsageText || draw->hwndItem == hicapUsageText) {
+                    drawModelUsageSummary(*draw);
                     return TRUE;
                 }
-
-            }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
-        case WM_CTLCOLORSTATIC: {
-            HDC hdc = reinterpret_cast<HDC>(wParam);
-            HWND control = reinterpret_cast<HWND>(lParam);
-            
-            // Set transparent background for static controls
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
-            
-            // Color-code the connection status
-            if (control == connectionValue) {
-                RuntimeState runtimeState = RuntimeState::Unknown;
-                {
-                    std::lock_guard<std::mutex> lock(mutex);
-                    runtimeState = viewModel.runtimeState;
+                if (draw->CtlID >= kUsageBarBaseId && draw->CtlID < kUsageBarBaseId + kMaxUsageRows) {
+                    drawQuotaBar(*draw, usageRows[draw->CtlID - kUsageBarBaseId]);
+                    return TRUE;
                 }
-                COLORREF color = GetSysColor(COLOR_GRAYTEXT);
-                switch (runtimeState) {
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
+        case WM_CTLCOLORSTATIC: {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            HWND control = reinterpret_cast<HWND>(lParam);
+            const bool header = control == titleLabel || control == versionValue;
+            const bool notice = control == offlineNoticeTitle || control == offlineNoticeMessage;
+            const COLORREF background = notice   ? dashboardColor(RGB(255, 246, 232), COLOR_WINDOW)
+                                        : header ? dashboardColor(RGB(245, 247, 251), COLOR_WINDOW)
+                                                 : GetSysColor(COLOR_WINDOW);
+            COLORREF foreground = dashboardColor(RGB(29, 42, 65), COLOR_WINDOWTEXT);
+            if (control == versionValue || control == connectionLabel || control == recoveryLabel ||
+                control == scheduledExportLabel || control == updatedLabel || control == quotaEmptyText ||
+                control == openAiUsageText || control == hicapUsageText) {
+                foreground = dashboardColor(RGB(71, 88, 113), COLOR_WINDOWTEXT);
+            }
+            if (control == connectionValue) {
+                std::lock_guard<std::mutex> lock(mutex);
+                switch (viewModel.runtimeState) {
                     case RuntimeState::Current:
-                        color = RGB(40, 167, 69);
+                        foreground = dashboardColor(RGB(16, 108, 80), COLOR_WINDOWTEXT);
                         break;
                     case RuntimeState::CatchingUp:
-                        color = RGB(0, 123, 255);
+                        foreground = dashboardColor(RGB(35, 82, 174), COLOR_WINDOWTEXT);
                         break;
                     case RuntimeState::Stale:
-                        color = RGB(255, 165, 0);
+                        foreground = dashboardColor(RGB(135, 77, 13), COLOR_WINDOWTEXT);
                         break;
                     case RuntimeState::Offline:
-                        color = RGB(220, 53, 69);
+                        foreground = dashboardColor(RGB(172, 39, 57), COLOR_WINDOWTEXT);
                         break;
                     default:
                         break;
                 }
-                SetTextColor(hdc, color);
             }
-            if (control == codexThroughputText) {
-                SetBkMode(hdc, OPAQUE);
-                SetBkColor(hdc, RGB(235, 244, 255));
-                SetTextColor(hdc, RGB(24, 92, 169));
-                return reinterpret_cast<LRESULT>(codexRecentBrush != nullptr ? codexRecentBrush : windowBackgroundBrush);
-            }
-            if (control == codexThroughputAveragesText) {
-                SetBkMode(hdc, OPAQUE);
-                SetBkColor(hdc, RGB(235, 248, 240));
-                SetTextColor(hdc, RGB(36, 122, 72));
-                return reinterpret_cast<LRESULT>(codexAveragesBrush != nullptr ? codexAveragesBrush : windowBackgroundBrush);
-            }
-            if (control == codexThroughputTotalsText) {
-                SetBkMode(hdc, OPAQUE);
-                SetBkColor(hdc, RGB(255, 247, 226));
-                SetTextColor(hdc, RGB(142, 93, 0));
-                return reinterpret_cast<LRESULT>(codexTotalsBrush != nullptr ? codexTotalsBrush : windowBackgroundBrush);
-            }
-            return reinterpret_cast<LRESULT>(windowBackgroundBrush);
+            SetTextColor(dc, foreground);
+            SetBkMode(dc, TRANSPARENT);
+            SetDCBrushColor(dc, background);
+            return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
         }
         case WM_JISTATS_SYNC_VIEWMODEL:
             syncViewModelToControls();
@@ -5926,7 +5631,6 @@ public:
             if (selectedMainTab == 2) {
                 openAnalysisWindow(true);
             }
-            layoutMainControls();
             syncViewModelToControls();
             return 0;
         case WM_JISTATS_OPENAI_IMPORT_COMPLETE:
@@ -6023,6 +5727,7 @@ public:
                 helpDialog = {};
                 aboutDialog = {};
                 mainTab = nullptr;
+                dashboardViewport = nullptr;
                 codexThroughputGroup = nullptr;
                 codexThroughputText = nullptr;
                 codexThroughputAveragesText = nullptr;
@@ -6035,7 +5740,6 @@ public:
                 hicapUsageText = nullptr;
                 hicapUsageChart = nullptr;
                 providerList = nullptr;
-                analysisLaunchGroup = nullptr;
                 analysisLaunchTitle = nullptr;
                 analysisLaunchInfo = nullptr;
                 analysisLaunchButton = nullptr;
@@ -6053,26 +5757,147 @@ public:
             }
             releaseMenuBar();
             releaseFonts();
-            if (windowBackgroundBrush != nullptr) {
-                DeleteObject(windowBackgroundBrush);
-                windowBackgroundBrush = nullptr;
-            }
-            if (codexRecentBrush != nullptr) {
-                DeleteObject(codexRecentBrush);
-                codexRecentBrush = nullptr;
-            }
-            if (codexAveragesBrush != nullptr) {
-                DeleteObject(codexAveragesBrush);
-                codexAveragesBrush = nullptr;
-            }
-            if (codexTotalsBrush != nullptr) {
-                DeleteObject(codexTotalsBrush);
-                codexTotalsBrush = nullptr;
-            }
             PostQuitMessage(0);
             return 0;
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+    }
+
+    void refreshDashboardColors() {
+        HIGHCONTRASTW contrast{};
+        contrast.cbSize = sizeof(contrast);
+        dashboardHighContrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) &&
+                                (contrast.dwFlags & HCF_HIGHCONTRASTON);
+    }
+
+    COLORREF dashboardColor(COLORREF color, int systemColor) const {
+        return dashboardHighContrast ? GetSysColor(systemColor) : color;
+    }
+
+    static void fillDashboardRect(HDC dc, const RECT& rect, COLORREF color) {
+        const COLORREF oldColor = SetDCBrushColor(dc, color);
+        FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        SetDCBrushColor(dc, oldColor);
+    }
+
+    void drawDashboardTab(const DRAWITEMSTRUCT& draw) {
+        const bool selected = static_cast<int>(draw.itemID) == TabCtrl_GetCurSel(mainTab);
+        HDC dc = draw.hDC;
+        RECT rect = draw.rcItem;
+        const int saved = SaveDC(dc);
+        fillDashboardRect(dc, rect,
+                          selected ? dashboardColor(RGB(226, 235, 253), COLOR_HIGHLIGHT)
+                                   : dashboardColor(RGB(245, 247, 251), COLOR_WINDOW));
+        if (selected) {
+            RECT underline{rect.left, rect.bottom - scaledPixels(2), rect.right, rect.bottom};
+            fillDashboardRect(dc, underline, dashboardColor(RGB(43, 91, 190), COLOR_HIGHLIGHTTEXT));
+        }
+        wchar_t label[64]{};
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = label;
+        item.cchTextMax = static_cast<int>(std::size(label));
+        SendMessageW(mainTab, TCM_GETITEMW, draw.itemID, reinterpret_cast<LPARAM>(&item));
+        SelectObject(dc, dashboardLabelFont);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, selected ? dashboardColor(RGB(32, 75, 163), COLOR_HIGHLIGHTTEXT)
+                                  : dashboardColor(RGB(62, 78, 104), COLOR_WINDOWTEXT));
+        DrawTextW(dc, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (draw.itemState & ODS_FOCUS) {
+            InflateRect(&rect, -scaledPixels(3), -scaledPixels(3));
+            DrawFocusRect(dc, &rect);
+        }
+        RestoreDC(dc, saved);
+    }
+
+    void drawQuotaBar(const DRAWITEMSTRUCT& draw, const UsageProgressRow& row) {
+        HDC dc = draw.hDC;
+        const int saved = SaveDC(dc);
+        const RECT rect = draw.rcItem;
+        const bool paired = row.secondaryPercentage >= 0;
+        const int gap = scaledPixels(16);
+        const int middle = (rect.left + rect.right) / 2;
+
+        fillDashboardRect(dc, rect, GetSysColor(COLOR_WINDOW));
+        SelectObject(dc, dashboardLabelFont);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, dashboardColor(RGB(27, 40, 61), COLOR_WINDOWTEXT));
+        const auto segment = [&](LONG left, LONG right, int percentage, COLORREF color, const std::wstring& text) {
+            RECT label{left, rect.top, right, rect.bottom};
+            DrawTextW(dc, text.c_str(), -1, &label, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+            RECT track{left, rect.top + scaledPixels(21), right, rect.top + scaledPixels(28)};
+            fillDashboardRect(dc, track, dashboardColor(RGB(229, 235, 244), COLOR_WINDOW));
+            if (dashboardHighContrast) {
+                FrameRect(dc, &track, GetSysColorBrush(COLOR_WINDOWTEXT));
+            }
+            track.right = left + MulDiv(std::clamp(percentage, 0, 100), right - left, 100);
+            fillDashboardRect(dc, track, dashboardColor(color, COLOR_HIGHLIGHT));
+        };
+        segment(rect.left, paired ? middle - gap / 2 : rect.right, row.percentage, row.barColor,
+                paired ? row.overlayText + L" remaining" : row.overlayText);
+        if (paired) {
+            segment(middle + gap / 2, rect.right, row.secondaryPercentage, row.secondaryBarColor,
+                    row.secondaryOverlayText + L" remaining");
+        }
+        RestoreDC(dc, saved);
+    }
+
+    void paintDashboardViewport(HWND hwnd) {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(hwnd, &paint);
+        fillDashboardRect(dc, paint.rcPaint, dashboardColor(RGB(245, 247, 251), COLOR_WINDOW));
+        const auto drawCard = [&](const RECT& card) {
+            RECT visible{};
+            if (!IntersectRect(&visible, &card, &paint.rcPaint)) {
+                return;
+            }
+            fillDashboardRect(dc, card, GetSysColor(COLOR_WINDOW));
+            const auto oldColor = SetDCBrushColor(dc, dashboardColor(RGB(216, 225, 238), COLOR_WINDOWTEXT));
+            FrameRect(dc, &card, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            SetDCBrushColor(dc, oldColor);
+        };
+        if (selectedMainTab == 0) {
+            for (const auto& card : overviewCards) {
+                drawCard(card);
+            }
+            if (!IsRectEmpty(&noticeRect)) {
+                fillDashboardRect(dc, noticeRect, dashboardColor(RGB(255, 246, 232), COLOR_WINDOW));
+                RECT accent{noticeRect.left, noticeRect.top, noticeRect.left + scaledPixels(3), noticeRect.bottom};
+                fillDashboardRect(dc, accent, dashboardColor(RGB(186, 114, 31), COLOR_WINDOWTEXT));
+            }
+        } else {
+            drawCard(otherPageCard);
+        }
+        EndPaint(hwnd, &paint);
+    }
+
+    static LRESULT CALLBACK dashboardViewportProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (msg == WM_NCCREATE) {
+            const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        }
+        auto* self = reinterpret_cast<Impl*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (self == nullptr) {
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+        switch (msg) {
+            case WM_PAINT:
+                self->paintDashboardViewport(hwnd);
+                return 0;
+            case WM_ERASEBKGND:
+                return 1;
+            case WM_VSCROLL:
+                self->scrollOverview(LOWORD(wParam));
+                return 0;
+            case WM_CTLCOLORSTATIC:
+            case WM_DRAWITEM:
+            case WM_NOTIFY:
+            case WM_COMMAND:
+                return SendMessageW(GetParent(hwnd), msg, wParam, lParam);
+            default:
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
     }
 
@@ -6303,38 +6128,35 @@ public:
         return r;
     }
 
+    LONG throughputPointX(const RECT& plot, const AnalysisCodexHourlyHistory& history, size_t index) const {
+        const auto start = history.points.front().snapshotTime;
+        const auto end = history.points.back().snapshotTime;
+        const LONG width = plot.right - plot.left;
+        if (end <= start) {
+            return plot.left + width / 2;
+        }
+        return plot.left + static_cast<LONG>(static_cast<double>(history.points[index].snapshotTime - start) /
+                                             (end - start) * width);
+    }
+
     int codexChartHitTest(POINT pt, const RECT& rect, const AnalysisCodexHourlyHistory& history) {
-        if (!history.hasData || history.points.size() < 2) return -1;
-        const int padLeft = 50;
-        const int padRight = 50;
-        const int padTop = 20;
-        const int padBottom = 30;
-        const int chartLeft = rect.left + padLeft;
-        const int chartRight = rect.right - padRight;
-        const int chartTop = rect.top + padTop;
-        const int chartBottom = rect.bottom - padBottom;
-        const int chartWidth = chartRight - chartLeft;
-        if (pt.x < chartLeft || pt.x > chartRight || pt.y < chartTop || pt.y > chartBottom) return -1;
-        auto pointX = [&](size_t index, size_t count) {
-            if (count <= 1) return chartLeft + chartWidth / 2;
-            return chartLeft + static_cast<int>((index * chartWidth) / (count - 1));
-        };
-        int bestIdx = 0;
-        int bestDist = std::abs(pointX(0, history.points.size()) - pt.x);
-        for (size_t i = 1; i < history.points.size(); ++i) {
-            int x = pointX(i, history.points.size());
-            int dist = std::abs(x - pt.x);
-            if (dist < bestDist) {
-                bestDist = dist;
-                bestIdx = static_cast<int>(i);
+        if (!history.hasData || history.points.empty()) {
+            return -1;
+        }
+        const RECT plot = dashboardPlotRect(rect, true);
+        if (pt.x < plot.left || pt.x > plot.right || pt.y < plot.top || pt.y > plot.bottom) {
+            return -1;
+        }
+        int nearest = -1;
+        LONG nearestDistance = history.points.size() == 1 ? scaledPixels(14) : plot.right - plot.left + 1;
+        for (size_t index = 0; index < history.points.size(); ++index) {
+            const LONG distance = std::abs(throughputPointX(plot, history, index) - pt.x);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = static_cast<int>(index);
             }
         }
-        // Only select if within reasonable snap distance (half spacing)
-        if (history.points.size() > 1) {
-            int spacing = chartWidth / static_cast<int>(history.points.size() - 1);
-            if (bestDist > spacing / 2 + 4) return -1;
-        }
-        return bestIdx;
+        return nearest;
     }
 
     int dashboardChartRefreshSecondsRemaining() const {
@@ -6352,12 +6174,8 @@ public:
     }
 
     RECT chartRefreshCountdownRect(const RECT& rect) const {
-        return RECT{
-            std::max(rect.left + 8, rect.right - 68),
-            rect.top + 3,
-            rect.right - 8,
-            rect.top + 18
-        };
+        return RECT{std::max(rect.left + scaledPixels(8), rect.right - scaledPixels(50)), rect.top + scaledPixels(2),
+                    rect.right - scaledPixels(8), rect.top + scaledPixels(21)};
     }
 
     bool updateChartCountdownHover(HWND hwnd, POINT pt, const RECT& rect) {
@@ -6391,42 +6209,14 @@ public:
               << std::setfill(L'0')
               << (remainingSeconds % 60);
 
-        HFONT smallFont = CreateFontW(
-            -9,
-            0,
-            0,
-            0,
-            FW_NORMAL,
-            FALSE,
-            FALSE,
-            FALSE,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE,
-            L"Segoe UI");
-        HGDIOBJ oldFont = smallFont != nullptr ? SelectObject(hdc, smallFont) : nullptr;
-        const int oldBkMode = SetBkMode(hdc, TRANSPARENT);
-        const COLORREF oldColor = SetTextColor(hdc, RGB(115, 115, 115));
+        const int saved = SaveDC(hdc);
+        SelectObject(hdc, dashboardBodyFont);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, dashboardColor(RGB(71, 88, 113), COLOR_WINDOWTEXT));
 
         RECT textRect = chartRefreshCountdownRect(rect);
         const std::wstring text = label.str();
-        DrawTextW(
-            hdc,
-            text.c_str(),
-            static_cast<int>(text.size()),
-            &textRect,
-            DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
-
-        SetTextColor(hdc, oldColor);
-        SetBkMode(hdc, oldBkMode);
-        if (oldFont != nullptr) {
-            SelectObject(hdc, oldFont);
-        }
-        if (smallFont != nullptr) {
-            DeleteObject(smallFont);
-        }
+        DrawTextW(hdc, text.c_str(), -1, &textRect, DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
 
         if (chartCountdownHoverWindow == hwnd) {
             drawTooltipBox(
@@ -6439,6 +6229,7 @@ public:
                 rect.right - 8,
                 rect.bottom - 8);
         }
+        RestoreDC(hdc, saved);
     }
 
     void drawTooltipBox(
@@ -6478,10 +6269,10 @@ public:
         if (boxX < chartLeft) boxX = chartLeft;
 
         RECT boxRect{ boxX, boxY, boxX + boxW, boxY + boxH };
-        HBRUSH tipBrush = CreateSolidBrush(RGB(255, 255, 240));
+        HBRUSH tipBrush = CreateSolidBrush(dashboardColor(RGB(245, 248, 255), COLOR_WINDOW));
         FillRect(hdc, &boxRect, tipBrush);
         DeleteObject(tipBrush);
-        HPEN tipPen = CreatePen(PS_SOLID, 1, RGB(180, 180, 160));
+        HPEN tipPen = CreatePen(PS_SOLID, 1, dashboardColor(RGB(169, 187, 217), COLOR_WINDOWTEXT));
         HGDIOBJ oldPen = SelectObject(hdc, tipPen);
         HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
         Rectangle(hdc, boxRect.left, boxRect.top, boxRect.right, boxRect.bottom);
@@ -6489,7 +6280,7 @@ public:
         SelectObject(hdc, oldPen);
         DeleteObject(tipPen);
 
-        SetTextColor(hdc, RGB(40, 40, 40));
+        SetTextColor(hdc, dashboardColor(RGB(29, 42, 65), COLOR_WINDOWTEXT));
         SetBkMode(hdc, TRANSPARENT);
         int ty = boxY + boxPad;
         pos = 0;
@@ -6503,422 +6294,291 @@ public:
         }
     }
 
-    ModelChartPointHit modelChartHitTest(POINT pt, const RECT& rect, const AnalysisProviderModelUsageChart& chart) {
-        ModelChartPointHit hit;
-        if (!chart.hasData || chart.series.empty()) return hit;
+    RECT dashboardPlotRect(const RECT& rect, bool throughput) const {
+        return {rect.left + scaledPixels(55), rect.top + scaledPixels(35),
+                rect.right - scaledPixels(throughput ? 44 : 10), rect.bottom - scaledPixels(24)};
+    }
 
-        const int padLeft = 58;
-        const int padRight = 18;
-        const int padTop = 18;
-        const int padBottom = 28;
-        const int chartLeft = rect.left + padLeft;
-        const int chartRight = rect.right - padRight;
-        const int chartTop = rect.top + padTop;
-        const int chartBottom = rect.bottom - padBottom;
-        const int chartWidth = chartRight - chartLeft;
-        const int chartHeight = chartBottom - chartTop;
-        if (chartWidth <= 0 || chartHeight <= 0 ||
-            pt.x < chartLeft || pt.x > chartRight || pt.y < chartTop || pt.y > chartBottom) {
-            return hit;
+    std::wstring chartScaleLabel(double value) const {
+        for (const auto& [unit, suffix] :
+             {std::pair{1e12, L"T"}, std::pair{1e9, L"B"}, std::pair{1e6, L"M"}, std::pair{1e3, L"K"}}) {
+            if (value >= unit) {
+                std::wostringstream label;
+                label << std::fixed << std::setprecision(std::fmod(value, unit) == 0.0 ? 0 : 1) << value / unit
+                      << suffix;
+                return label.str();
+            }
         }
+        if (std::floor(value) != value) {
+            std::wostringstream label;
+            label << std::fixed << std::setprecision(2) << value;
+            std::wstring text = label.str();
+            if (text.back() == L'0') {
+                text.pop_back();
+            }
+            return text;
+        }
+        return std::to_wstring(static_cast<long long>(value));
+    }
 
-        long long maxTokens = 1;
-        std::time_t minTime = 0;
-        std::time_t maxTime = 0;
+    void drawChartAxes(HDC dc, const RECT& plot, double leftScale, double rightScale = 0) {
+        const int gap = scaledPixels(7);
+        const int labelHeight = scaledPixels(17);
+        SelectObject(dc, dashboardBodyFont);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, dashboardColor(RGB(71, 88, 113), COLOR_WINDOWTEXT));
+        for (int tick = 0; tick <= 4; ++tick) {
+            const int y = plot.bottom - (plot.bottom - plot.top) * tick / 4;
+            RECT grid{plot.left, y, plot.right, y + 1};
+            fillDashboardRect(dc, grid,
+                              dashboardColor(tick == 0 ? RGB(185, 199, 221) : RGB(229, 235, 244), COLOR_WINDOWTEXT));
+            RECT left{plot.left - scaledPixels(55), y - labelHeight / 2, plot.left - gap, y + labelHeight / 2};
+            const auto leftLabel = chartScaleLabel(leftScale * tick / 4);
+            DrawTextW(dc, leftLabel.c_str(), -1, &left, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            if (rightScale > 0) {
+                RECT right{plot.right + gap, left.top, plot.right + scaledPixels(44), left.bottom};
+                const auto rightLabel = chartScaleLabel(rightScale * tick / 4);
+                DrawTextW(dc, rightLabel.c_str(), -1, &right, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+        }
+    }
+
+    void drawChartTimeLabels(HDC dc, const RECT& rect, const RECT& plot, std::time_t first, std::time_t last) {
+        const LONG top = plot.bottom + scaledPixels(5);
+        SetTextColor(dc, dashboardColor(RGB(71, 88, 113), COLOR_WINDOWTEXT));
+        const auto firstLabel = utf8ToWide(formatChartBucketLabel(first));
+        if (first == last) {
+            RECT label{plot.left, top, plot.right, rect.bottom};
+            DrawTextW(dc, firstLabel.c_str(), -1, &label, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
+        } else {
+            const LONG middle = (plot.left + plot.right) / 2;
+            RECT left{plot.left, top, middle, rect.bottom};
+            RECT right{middle, top, plot.right, rect.bottom};
+            const auto lastLabel = utf8ToWide(formatChartBucketLabel(last));
+            DrawTextW(dc, firstLabel.c_str(), -1, &left, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            DrawTextW(dc, lastLabel.c_str(), -1, &right, DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
+    }
+
+    void drawEmptyChart(HDC dc, RECT rect, const wchar_t* text) {
+        fillDashboardRect(dc, rect, dashboardColor(RGB(245, 247, 251), COLOR_WINDOW));
+        if (dashboardHighContrast) {
+            FrameRect(dc, &rect, GetSysColorBrush(COLOR_WINDOWTEXT));
+        }
+        SelectObject(dc, dashboardBodyFont);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, dashboardColor(RGB(71, 88, 113), COLOR_WINDOWTEXT));
+        DrawTextW(dc, text, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+
+    COLORREF modelSeriesColor(size_t index) const {
+        const COLORREF colors[] = {RGB(42, 99, 205),  RGB(168, 79, 31), RGB(19, 122, 99),
+                                   RGB(120, 72, 173), RGB(9, 111, 147), RGB(146, 62, 111)};
+        return dashboardColor(colors[index % std::size(colors)], COLOR_WINDOWTEXT);
+    }
+
+    void drawModelUsageSummary(const DRAWITEMSTRUCT& draw) {
+        HDC dc = draw.hDC;
+        const int saved = SaveDC(dc);
+        fillDashboardRect(dc, draw.rcItem, GetSysColor(COLOR_WINDOW));
+        SelectObject(dc, dashboardBodyFont);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, dashboardColor(RGB(71, 88, 113), COLOR_WINDOWTEXT));
+        const auto lines = splitOwnerDrawLines(utf8ToWide(getWindowTextUtf8(draw.hwndItem)));
+        const int lineHeight = scaledPixels(16);
+        for (size_t index = 0; index < lines.size(); ++index) {
+            RECT line = draw.rcItem;
+            line.top += static_cast<int>(index) * lineHeight;
+            if (index == 0) {
+                DrawTextW(dc, lines[index].c_str(), -1, &line, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            } else {
+                const int markerTop = line.top + scaledPixels(5);
+                RECT marker{line.left, markerTop, line.left + scaledPixels(8), markerTop + scaledPixels(8)};
+                fillDashboardRect(dc, marker, modelSeriesColor(index - 1));
+                line.left += scaledPixels(15);
+                SetTextColor(dc, dashboardColor(RGB(27, 40, 61), COLOR_WINDOWTEXT));
+                DrawTextW(dc, lines[index].c_str(), -1, &line, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            }
+        }
+        RestoreDC(dc, saved);
+    }
+
+    struct ModelChartPlot {
+        RECT bounds;
+        double maxTokens = 4;
+        std::time_t first = 0;
+        std::time_t last = 0;
+
+        POINT position(std::time_t time, long long tokens) const {
+            const LONG width = bounds.right - bounds.left;
+            const LONG height = bounds.bottom - bounds.top;
+            const LONG x = last == first
+                               ? width / 2
+                               : static_cast<LONG>(static_cast<double>(time - first) / (last - first) * width);
+            return {bounds.left + x,
+                    bounds.bottom - static_cast<LONG>(static_cast<double>(tokens) / maxTokens * height)};
+        }
+    };
+
+    ModelChartPlot modelChartPlot(const RECT& rect, const AnalysisProviderModelUsageChart& chart) const {
+        ModelChartPlot plot{dashboardPlotRect(rect, false)};
         for (const auto& series : chart.series) {
             for (const auto& point : series.points) {
-                maxTokens = std::max(maxTokens, point.totalTokens);
-                minTime = minTime == 0 ? point.bucketStartUtc : std::min(minTime, point.bucketStartUtc);
-                maxTime = std::max(maxTime, point.bucketStartUtc);
+                plot.maxTokens = std::max(plot.maxTokens, static_cast<double>(point.totalTokens));
+                plot.first = plot.first == 0 ? point.bucketStartUtc : std::min(plot.first, point.bucketStartUtc);
+                plot.last = std::max(plot.last, point.bucketStartUtc);
             }
         }
-        if (maxTime <= minTime) maxTime = minTime + 3600;
+        // Four equal intervals with whole-number tick labels.
+        const double step = std::pow(10.0, std::floor(std::log10(plot.maxTokens / 4)));
+        plot.maxTokens = std::ceil(plot.maxTokens / (4 * step)) * 4 * step;
+        return plot;
+    }
 
-        auto pointX = [&](std::time_t t) {
-            return chartLeft + static_cast<int>(((t - minTime) * static_cast<long long>(chartWidth)) /
-                std::max<std::time_t>(1, maxTime - minTime));
-        };
-        auto pointY = [&](long long tokens) {
-            return chartBottom - static_cast<int>((tokens * static_cast<long long>(chartHeight)) / maxTokens);
-        };
-
-        int bestDistanceSquared = 0;
-        bool found = false;
-        for (size_t s = 0; s < chart.series.size(); ++s) {
-            const auto& series = chart.series[s];
-            for (size_t p = 0; p < series.points.size(); ++p) {
-                const int dx = pointX(series.points[p].bucketStartUtc) - pt.x;
-                const int dy = pointY(series.points[p].totalTokens) - pt.y;
-                const int distanceSquared = dx * dx + dy * dy;
-                if (!found || distanceSquared < bestDistanceSquared) {
-                    bestDistanceSquared = distanceSquared;
-                    hit.seriesIndex = static_cast<int>(s);
-                    hit.pointIndex = static_cast<int>(p);
-                    found = true;
+    ModelChartPointHit modelChartHitTest(POINT pt, const RECT& rect, const AnalysisProviderModelUsageChart& chart) {
+        ModelChartPointHit hit;
+        if (!chart.hasData || !PtInRect(&rect, pt)) {
+            return hit;
+        }
+        const ModelChartPlot plot = modelChartPlot(rect, chart);
+        const int radius = scaledPixels(14);
+        int nearest = radius * radius;
+        for (size_t series = 0; series < chart.series.size(); ++series) {
+            const auto& points = chart.series[series].points;
+            for (size_t index = 0; index < points.size(); ++index) {
+                const POINT point = plot.position(points[index].bucketStartUtc, points[index].totalTokens);
+                const int dx = point.x - pt.x;
+                const int dy = point.y - pt.y;
+                const int distance = dx * dx + dy * dy;
+                if (distance < nearest) {
+                    nearest = distance;
+                    hit = {static_cast<int>(series), static_cast<int>(index)};
                 }
             }
-        }
-        if (!found || bestDistanceSquared > (14 * 14)) {
-            return {};
         }
         return hit;
     }
 
-    void drawModelUsageChart(
-        HDC hdc,
-        const RECT& rect,
-        const AnalysisProviderModelUsageChart& chart,
-        int hoverSeries,
-        int hoverPoint) {
-        HBRUSH bgBrush = CreateSolidBrush(RGB(255, 255, 255));
-        FillRect(hdc, &rect, bgBrush);
-        DeleteObject(bgBrush);
-
-        const int padLeft = 58;
-        const int padRight = 18;
-        const int padTop = 18;
-        const int padBottom = 28;
-        const int chartLeft = rect.left + padLeft;
-        const int chartRight = rect.right - padRight;
-        const int chartTop = rect.top + padTop;
-        const int chartBottom = rect.bottom - padBottom;
-        const int chartWidth = chartRight - chartLeft;
-        const int chartHeight = chartBottom - chartTop;
-
-        HPEN axisPen = CreatePen(PS_SOLID, 1, RGB(180, 180, 180));
-        HPEN gridPen = CreatePen(PS_DOT, 1, RGB(225, 225, 225));
-        SelectObject(hdc, axisPen);
-        MoveToEx(hdc, chartLeft, chartTop, nullptr);
-        LineTo(hdc, chartLeft, chartBottom);
-        LineTo(hdc, chartRight, chartBottom);
-
-        for (int i = 1; i <= 4; ++i) {
-            int y = chartTop + (chartHeight * i / 5);
-            SelectObject(hdc, gridPen);
-            MoveToEx(hdc, chartLeft, y, nullptr);
-            LineTo(hdc, chartRight, y);
+    void drawChartSeries(HDC dc, const std::vector<POINT>& points, COLORREF color) {
+        if (points.size() == 1) {
+            const auto point = points.front();
+            const int radius = scaledPixels(3);
+            const int saved = SaveDC(dc);
+            SelectObject(dc, GetStockObject(NULL_PEN));
+            SelectObject(dc, GetStockObject(DC_BRUSH));
+            SetDCBrushColor(dc, color);
+            Ellipse(dc, point.x - radius, point.y - radius, point.x + radius, point.y + radius);
+            RestoreDC(dc, saved);
+        } else if (!points.empty()) {
+            HPEN pen = CreatePen(PS_SOLID, scaledPixels(2), color);
+            HGDIOBJ oldPen = SelectObject(dc, pen);
+            Polyline(dc, points.data(), static_cast<int>(points.size()));
+            SelectObject(dc, oldPen);
+            DeleteObject(pen);
         }
+    }
 
-        HFONT hFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-        SelectObject(hdc, hFont);
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(100, 100, 100));
-
+    void drawModelUsageChart(HDC dc, const RECT& rect, const AnalysisProviderModelUsageChart& chart, int hoverSeries,
+                             int hoverPoint) {
+        const int saved = SaveDC(dc);
         if (!chart.hasData || chart.series.empty()) {
-            std::wstring noData = L"Baseline only; no new local Codex usage deltas yet";
-            SIZE ts{};
-            GetTextExtentPoint32W(hdc, noData.c_str(), static_cast<int>(noData.size()), &ts);
-            TextOutW(hdc, (rect.left + rect.right - ts.cx) / 2, (rect.top + rect.bottom - ts.cy) / 2, noData.c_str(), static_cast<int>(noData.size()));
-            DeleteObject(axisPen);
-            DeleteObject(gridPen);
+            drawEmptyChart(dc, rect, L"Waiting for new model usage");
+            RestoreDC(dc, saved);
             return;
         }
 
-        long long maxTokens = 1;
-        std::time_t minTime = 0;
-        std::time_t maxTime = 0;
-        for (const auto& series : chart.series) {
+        fillDashboardRect(dc, rect, GetSysColor(COLOR_WINDOW));
+        const ModelChartPlot plot = modelChartPlot(rect, chart);
+        drawChartAxes(dc, plot.bounds, plot.maxTokens);
+        RECT units{rect.left, rect.top + scaledPixels(4), plot.bounds.right, plot.bounds.top};
+        DrawTextW(dc, L"Tokens per 5-minute bucket", -1, &units, DT_SINGLELINE | DT_NOPREFIX);
+        drawChartTimeLabels(dc, rect, plot.bounds, plot.first, plot.last);
+
+        for (size_t index = 0; index < chart.series.size(); ++index) {
+            const auto& series = chart.series[index];
+            std::vector<POINT> points;
+            points.reserve(series.points.size());
             for (const auto& point : series.points) {
-                maxTokens = std::max(maxTokens, point.totalTokens);
-                minTime = minTime == 0 ? point.bucketStartUtc : std::min(minTime, point.bucketStartUtc);
-                maxTime = std::max(maxTime, point.bucketStartUtc);
+                points.push_back(plot.position(point.bucketStartUtc, point.totalTokens));
             }
-        }
-        if (maxTime <= minTime) maxTime = minTime + 3600;
-
-        auto pointX = [&](std::time_t t) {
-            return chartLeft + static_cast<int>(((t - minTime) * static_cast<long long>(chartWidth)) / std::max<std::time_t>(1, maxTime - minTime));
-        };
-        auto pointY = [&](long long tokens) {
-            return chartBottom - static_cast<int>((tokens * static_cast<long long>(chartHeight)) / maxTokens);
-        };
-
-        const COLORREF colors[] = {
-            RGB(0, 120, 215), RGB(217, 83, 25), RGB(112, 173, 71),
-            RGB(112, 48, 160), RGB(91, 155, 213), RGB(165, 165, 165)
-        };
-        for (size_t s = 0; s < chart.series.size(); ++s) {
-            const auto& series = chart.series[s];
-            if (series.points.empty()) continue;
-            HPEN pen = CreatePen(PS_SOLID, 2, colors[s % (sizeof(colors) / sizeof(colors[0]))]);
-            SelectObject(hdc, pen);
-            bool first = true;
-            for (const auto& point : series.points) {
-                const int x = pointX(point.bucketStartUtc);
-                const int y = pointY(point.totalTokens);
-                if (first) {
-                    MoveToEx(hdc, x, y, nullptr);
-                    first = false;
-                } else {
-                    LineTo(hdc, x, y);
-                }
-            }
-            DeleteObject(pen);
+            drawChartSeries(dc, points, modelSeriesColor(index));
         }
 
-        auto drawScaleLabel = [&](long long value, int y) {
-            const std::wstring label = utf8ToWide(formatNumber(value));
-            SIZE ts{};
-            GetTextExtentPoint32W(hdc, label.c_str(), static_cast<int>(label.size()), &ts);
-            TextOutW(hdc, chartLeft - ts.cx - 4, y - ts.cy / 2, label.c_str(), static_cast<int>(label.size()));
-        };
-        for (int frac : {0, 25, 50, 75, 100}) {
-            int y = chartBottom - (chartHeight * frac / 100);
-            drawScaleLabel(maxTokens * frac / 100, y);
-        }
-
-        int legendX = chartLeft + 6;
-        int legendY = chartTop + 4;
-        for (size_t s = 0; s < chart.series.size(); ++s) {
-            const auto& series = chart.series[s];
-            HPEN pen = CreatePen(PS_SOLID, 2, colors[s % (sizeof(colors) / sizeof(colors[0]))]);
-            SelectObject(hdc, pen);
-            MoveToEx(hdc, legendX, legendY + 7, nullptr);
-            LineTo(hdc, legendX + 18, legendY + 7);
-            DeleteObject(pen);
-            std::wstring label = utf8ToWide(series.modelKey);
-            TextOutW(hdc, legendX + 24, legendY, label.c_str(), static_cast<int>(label.size()));
-            legendY += 18;
-        }
-
-        if (hoverSeries >= 0 &&
-            hoverSeries < static_cast<int>(chart.series.size()) &&
-            hoverPoint >= 0 &&
-            hoverPoint < static_cast<int>(chart.series[static_cast<size_t>(hoverSeries)].points.size())) {
+        if (hoverSeries >= 0 && static_cast<size_t>(hoverSeries) < chart.series.size()) {
             const auto& series = chart.series[static_cast<size_t>(hoverSeries)];
-            const auto& point = series.points[static_cast<size_t>(hoverPoint)];
-            const int hx = pointX(point.bucketStartUtc);
-            const int hy = pointY(point.totalTokens);
-            HPEN highlightPen = CreatePen(PS_SOLID, 2, RGB(40, 40, 40));
-            HGDIOBJ oldPen = SelectObject(hdc, highlightPen);
-            HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            Ellipse(hdc, hx - 5, hy - 5, hx + 5, hy + 5);
-
-            std::wostringstream tip;
-            tip << utf8ToWide(series.modelKey.empty() ? "unknown" : series.modelKey) << L"\n";
-            tip << L"Tokens: " << utf8ToWide(formatNumber(point.totalTokens)) << L"\n";
-            tip << L"Bucket: " << utf8ToWide(formatChartBucketLabel(point.bucketStartUtc));
-            drawTooltipBox(hdc, tip.str(), hx, hy, chartLeft, chartTop, chartRight, chartBottom);
-            SelectObject(hdc, oldBrush);
-            SelectObject(hdc, oldPen);
-            DeleteObject(highlightPen);
+            if (hoverPoint >= 0 && static_cast<size_t>(hoverPoint) < series.points.size()) {
+                const auto& value = series.points[static_cast<size_t>(hoverPoint)];
+                const POINT point = plot.position(value.bucketStartUtc, value.totalTokens);
+                drawChartSeries(dc, {point}, modelSeriesColor(static_cast<size_t>(hoverSeries)));
+                std::wostringstream tooltip;
+                tooltip << utf8ToWide(series.modelKey.empty() ? "unknown" : series.modelKey) << L"\n"
+                        << L"Tokens: " << utf8ToWide(formatNumber(value.totalTokens)) << L"\n"
+                        << L"Bucket: " << utf8ToWide(formatChartBucketLabel(value.bucketStartUtc));
+                drawTooltipBox(dc, tooltip.str(), point.x, point.y, rect.left, rect.top, rect.right, rect.bottom);
+            }
         }
-
-        DeleteObject(axisPen);
-        DeleteObject(gridPen);
+        RestoreDC(dc, saved);
     }
 
-    void drawCodexThroughputChart(HDC hdc, const RECT& rect, const AnalysisCodexHourlyHistory& history, int hoverIndex) {
-        const int padLeft = 50;
-        const int padRight = 50;
-        const int padTop = 20;
-        const int padBottom = 30;
-        const int chartLeft = rect.left + padLeft;
-        const int chartRight = rect.right - padRight;
-        const int chartTop = rect.top + padTop;
-        const int chartBottom = rect.bottom - padBottom;
-        const int chartWidth = chartRight - chartLeft;
-        const int chartHeight = chartBottom - chartTop;
+    void drawCodexThroughputChart(HDC dc, const RECT& rect, const AnalysisCodexHourlyHistory& history, int hoverIndex) {
+        const int saved = SaveDC(dc);
+        if (!history.hasData || history.points.empty()) {
+            drawEmptyChart(dc, rect, L"No Codex throughput in the last 30 minutes");
+            RestoreDC(dc, saved);
+            return;
+        }
 
-        HBRUSH bgBrush = CreateSolidBrush(RGB(255, 255, 255));
-        FillRect(hdc, &rect, bgBrush);
-        DeleteObject(bgBrush);
-
-        HPEN axisPen = CreatePen(PS_SOLID, 1, RGB(210, 214, 220));
-        HPEN gridPen = CreatePen(PS_DOT, 1, RGB(230, 230, 230));
-        HPEN tokenPen = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
-        HPEN promptPen = CreatePen(PS_SOLID, 2, RGB(180, 60, 30));
-
-        HBRUSH tokenBrush = CreateSolidBrush(RGB(0, 120, 215));
-        HBRUSH promptBrush = CreateSolidBrush(RGB(180, 60, 30));
-
-        SelectObject(hdc, axisPen);
-
-        MoveToEx(hdc, chartLeft, chartBottom, nullptr);
-        LineTo(hdc, chartRight, chartBottom);
-        MoveToEx(hdc, chartLeft, chartTop, nullptr);
-        LineTo(hdc, chartLeft, chartBottom);
-
+        fillDashboardRect(dc, rect, GetSysColor(COLOR_WINDOW));
+        const RECT plot = dashboardPlotRect(rect, true);
+        const LONG height = plot.bottom - plot.top;
         double maxTokens = 1.0;
         double maxPrompts = 1.0;
-        for (const auto& pt : history.points) {
-            if (pt.tokensPerMinute > maxTokens) maxTokens = pt.tokensPerMinute;
-            if (pt.promptsPerMinute > maxPrompts) maxPrompts = pt.promptsPerMinute;
+        for (const auto& point : history.points) {
+            maxTokens = std::max(maxTokens, point.tokensPerMinute);
+            maxPrompts = std::max(maxPrompts, point.promptsPerMinute);
         }
+        maxTokens = std::pow(2.0, std::ceil(std::log2(maxTokens)));
+        maxPrompts = std::pow(2.0, std::ceil(std::log2(maxPrompts)));
+        drawChartAxes(dc, plot, maxTokens, maxPrompts);
+        drawChartTimeLabels(dc, rect, plot, history.points.front().snapshotTime, history.points.back().snapshotTime);
 
-        auto niceCeiling = [](double v) {
-            if (v <= 0) return 1.0;
-            int exp = static_cast<int>(std::log2(v));
-            double base = std::pow(2.0, exp);
-            return (base >= v) ? base : base * 2.0;
-        };
-        maxTokens = niceCeiling(maxTokens);
-        maxPrompts = niceCeiling(maxPrompts);
+        const COLORREF tokenColor = modelSeriesColor(0);
+        const COLORREF promptColor = dashboardColor(RGB(168, 79, 31), COLOR_HIGHLIGHT);
+        RECT tokenUnits{rect.left, rect.top + scaledPixels(4), rect.right, plot.top};
+        SetTextColor(dc, tokenColor);
+        DrawTextW(dc, L"Tokens / min", -1, &tokenUnits, DT_SINGLELINE | DT_NOPREFIX);
+        RECT promptUnits = tokenUnits;
+        promptUnits.right -= scaledPixels(57);
+        SetTextColor(dc, promptColor);
+        DrawTextW(dc, L"Prompts / min", -1, &promptUnits, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
 
-        for (int frac : {25, 50, 75}) {
-            SelectObject(hdc, gridPen);
-            int yGrid = chartBottom - (chartHeight * frac / 100);
-            MoveToEx(hdc, chartLeft, yGrid, nullptr);
-            LineTo(hdc, chartRight, yGrid);
+        std::vector<POINT> tokens;
+        std::vector<POINT> prompts;
+        const size_t count = history.points.size();
+        tokens.reserve(count);
+        prompts.reserve(count);
+        for (size_t index = 0; index < count; ++index) {
+            const auto& point = history.points[index];
+            const LONG x = throughputPointX(plot, history, index);
+            tokens.push_back({x, plot.bottom - static_cast<LONG>(point.tokensPerMinute / maxTokens * height)});
+            prompts.push_back({x, plot.bottom - static_cast<LONG>(point.promptsPerMinute / maxPrompts * height)});
         }
+        drawChartSeries(dc, tokens, tokenColor);
+        drawChartSeries(dc, prompts, promptColor);
 
-        auto pointYToken = [&](double tok) {
-            return chartBottom - 1 - static_cast<int>((tok / maxTokens) * chartHeight);
-        };
-        auto pointYPrompt = [&](double prm) {
-            return chartBottom - 1 - static_cast<int>((prm / maxPrompts) * chartHeight);
-        };
-        auto pointX = [&](size_t index, size_t count) {
-            if (count <= 1) return chartLeft + chartWidth / 2;
-            return chartLeft + static_cast<int>((index * chartWidth) / (count - 1));
-        };
-
-        if (history.points.size() >= 2) {
-            std::vector<POINT> tokenPts;
-            std::vector<POINT> promptPts;
-            tokenPts.reserve(history.points.size());
-            promptPts.reserve(history.points.size());
-            for (size_t i = 0; i < history.points.size(); ++i) {
-                int x = pointX(i, history.points.size());
-                tokenPts.push_back({x, pointYToken(history.points[i].tokensPerMinute)});
-                promptPts.push_back({x, pointYPrompt(history.points[i].promptsPerMinute)});
-            }
-
-            SelectObject(hdc, tokenPen);
-            Polyline(hdc, tokenPts.data(), static_cast<int>(tokenPts.size()));
-            SelectObject(hdc, promptPen);
-            Polyline(hdc, promptPts.data(), static_cast<int>(promptPts.size()));
+        if (hoverIndex >= 0 && static_cast<size_t>(hoverIndex) < count) {
+            const size_t index = static_cast<size_t>(hoverIndex);
+            drawChartSeries(dc, {tokens[index]}, tokenColor);
+            drawChartSeries(dc, {prompts[index]}, promptColor);
+            const auto& point = history.points[index];
+            std::wostringstream tooltip;
+            tooltip << L"Tokens: " << utf8ToWide(formatRate(point.tokensPerMinute)) << L"/min\n"
+                    << L"Prompts: " << utf8ToWide(formatRate(point.promptsPerMinute)) << L"/min\n"
+                    << L"Bucket: " << utf8ToWide(formatChartBucketLabel(point.snapshotTime));
+            drawTooltipBox(dc, tooltip.str(), tokens[index].x, std::min(tokens[index].y, prompts[index].y), rect.left,
+                           rect.top, rect.right, rect.bottom);
         }
-
-        HFONT hFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(100, 100, 100));
-
-        SelectObject(hdc, hFont);
-
-        // Y-axis scale labels
-        auto drawScaleLabel = [&](double value, int y, bool rightSide) {
-            const std::wstring s = utf8ToWide(formatNumber(static_cast<long long>(value + 0.5)));
-            SIZE ts;
-            GetTextExtentPoint32W(hdc, s.c_str(), static_cast<int>(s.size()), &ts);
-            if (rightSide) {
-                TextOutW(hdc, chartRight + 4, y - ts.cy / 2, s.c_str(), static_cast<int>(s.size()));
-            } else {
-                TextOutW(hdc, chartLeft - ts.cx - 4, y - ts.cy / 2, s.c_str(), static_cast<int>(s.size()));
-            }
-        };
-
-        for (int frac : {0, 25, 50, 75, 100}) {
-            int y = chartBottom - (chartHeight * frac / 100);
-            drawScaleLabel(maxTokens * frac / 100.0, y, false);
-            drawScaleLabel(maxPrompts * frac / 100.0, y, true);
-        }
-
-        std::wstring yLabel = L"tok/min";
-        TextOutW(hdc, chartLeft - 45, chartTop + 2, yLabel.c_str(), static_cast<int>(yLabel.size()));
-
-        std::wstring yLabelR = L"prm/min";
-        TextOutW(hdc, chartRight + 5, chartTop + 2, yLabelR.c_str(), static_cast<int>(yLabelR.size()));
-
-        std::wstring xLabelL = L"30m ago";
-        TextOutW(hdc, chartLeft - 5, chartBottom + 4, xLabelL.c_str(), static_cast<int>(xLabelL.size()));
-        std::wstring xLabelR = L"now";
-        int xLabelRLen = static_cast<int>(xLabelR.size());
-        SIZE textSize;
-        GetTextExtentPoint32W(hdc, xLabelR.c_str(), xLabelRLen, &textSize);
-        TextOutW(hdc, chartRight - textSize.cx, chartBottom + 4, xLabelR.c_str(), xLabelRLen);
-
-        // Tooltip for hovered point
-        if (hoverIndex >= 0 && hoverIndex < static_cast<int>(history.points.size())) {
-            const auto& pt = history.points[hoverIndex];
-            int hx = pointX(static_cast<size_t>(hoverIndex), history.points.size());
-            int hyToken = pointYToken(pt.tokensPerMinute);
-            int hyPrompt = pointYPrompt(pt.promptsPerMinute);
-
-            // Draw highlight circles
-            SelectObject(hdc, tokenPen);
-            SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            Ellipse(hdc, hx - 4, hyToken - 4, hx + 4, hyToken + 4);
-            SelectObject(hdc, promptPen);
-            Ellipse(hdc, hx - 4, hyPrompt - 4, hx + 4, hyPrompt + 4);
-
-            // Build tooltip text
-            std::wostringstream tip;
-            tip << L"Tokens: " << utf8ToWide(formatRate(pt.tokensPerMinute)) << L"/min\n";
-            tip << L"Prompts: " << utf8ToWide(formatRate(pt.promptsPerMinute)) << L"/min\n";
-            tip << L"Bucket: " << utf8ToWide(formatChartBucketLabel(pt.snapshotTime));
-            std::wstring tipText = tip.str();
-
-            // Measure tooltip box
-            SIZE tipSize;
-            GetTextExtentPoint32W(hdc, tipText.c_str(), static_cast<int>(tipText.size()), &tipSize);
-            // Handle multiline: split and measure widest line
-            int lineCount = 1;
-            int maxLineW = 0;
-            size_t pos = 0;
-            while ((pos = tipText.find(L'\n', pos)) != std::wstring::npos) {
-                ++lineCount;
-                ++pos;
-            }
-            tipSize.cy = tipSize.cy * lineCount;
-            pos = 0;
-            while (pos < tipText.size()) {
-                size_t end = tipText.find(L'\n', pos);
-                if (end == std::wstring::npos) end = tipText.size();
-                SIZE ls;
-                GetTextExtentPoint32W(hdc, tipText.c_str() + pos, static_cast<int>(end - pos), &ls);
-                if (ls.cx > maxLineW) maxLineW = ls.cx;
-                pos = end + 1;
-            }
-            tipSize.cx = maxLineW;
-
-            int boxPad = 6;
-            int boxW = tipSize.cx + boxPad * 2;
-            int boxH = tipSize.cy + boxPad * 2;
-            int boxX = hx + 8;
-            int boxY = std::min(hyToken, hyPrompt) - boxH - 8;
-            if (boxX + boxW > chartRight) boxX = hx - boxW - 8;
-            if (boxY < chartTop) boxY = std::max(hyToken, hyPrompt) + 8;
-            if (boxY + boxH > chartBottom) boxY = chartBottom - boxH;
-            if (boxX < chartLeft) boxX = chartLeft;
-
-            RECT boxRect{ boxX, boxY, boxX + boxW, boxY + boxH };
-            HBRUSH tipBrush = CreateSolidBrush(RGB(255, 255, 240));
-            FillRect(hdc, &boxRect, tipBrush);
-            DeleteObject(tipBrush);
-            HPEN tipPen = CreatePen(PS_SOLID, 1, RGB(180, 180, 160));
-            SelectObject(hdc, tipPen);
-            SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            Rectangle(hdc, boxRect.left, boxRect.top, boxRect.right, boxRect.bottom);
-            DeleteObject(tipPen);
-
-            SetTextColor(hdc, RGB(40, 40, 40));
-            SetBkMode(hdc, TRANSPARENT);
-            int ty = boxY + boxPad;
-            pos = 0;
-            while (pos < tipText.size()) {
-                size_t end = tipText.find(L'\n', pos);
-                if (end == std::wstring::npos) end = tipText.size();
-                TextOutW(hdc, boxX + boxPad, ty, tipText.c_str() + pos, static_cast<int>(end - pos));
-                ty += tipSize.cy / lineCount;
-                pos = end + 1;
-            }
-        }
-
-        if (!history.hasData || history.points.empty()) {
-            SetTextColor(hdc, RGB(150, 150, 150));
-            std::wstring noData = L"No Codex data in last 24 hours";
-            int len = static_cast<int>(noData.size());
-            GetTextExtentPoint32W(hdc, noData.c_str(), len, &textSize);
-            TextOutW(hdc, (rect.left + rect.right - textSize.cx) / 2, (rect.top + rect.bottom - textSize.cy) / 2, noData.c_str(), len);
-        }
-
-        DeleteObject(axisPen);
-        DeleteObject(gridPen);
-        DeleteObject(tokenPen);
-        DeleteObject(promptPen);
-        DeleteObject(tokenBrush);
-        DeleteObject(promptBrush);
+        RestoreDC(dc, saved);
     }
 
     void ensureCodexChartClass() {
@@ -6941,14 +6601,19 @@ public:
         ensureAppIcons();
         HINSTANCE instance = GetModuleHandleW(nullptr);
 
-        // Use modern window background (white/light gray instead of classic gray)
         WNDCLASSW mainClass{};
         mainClass.lpfnWndProc = &Impl::mainWindowProc;
         mainClass.hInstance = instance;
         mainClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        mainClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         mainClass.lpszClassName = windowClassName();
         RegisterClassW(&mainClass);
+
+        WNDCLASSW viewportClass{};
+        viewportClass.lpfnWndProc = &Impl::dashboardViewportProc;
+        viewportClass.hInstance = instance;
+        viewportClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        viewportClass.lpszClassName = viewportClassName();
+        RegisterClassW(&viewportClass);
 
         WNDCLASSW preferencesClass{};
         preferencesClass.lpfnWndProc = &Impl::preferencesWindowProc;
@@ -6974,26 +6639,21 @@ public:
         shellDialogClass.lpszClassName = shellDialogWindowClassName();
         RegisterClassW(&shellDialogClass);
 
-        int windowX = CW_USEDEFAULT;
-        int windowY = CW_USEDEFAULT;
+        RECT bounds{0, 0, MulDiv(kDefaultWidth, GetDpiForSystem(), 96), MulDiv(kDefaultHeight, GetDpiForSystem(), 96)};
         if (const auto savedRect = loadSavedMainWindowRect()) {
-            windowX = savedRect->left;
-            windowY = savedRect->top;
+            bounds = *savedRect;
+        } else {
+            RECT workArea{};
+            if (tryGetMonitorWorkArea(bounds, workArea)) {
+                OffsetRect(&bounds, workArea.left + (workArea.right - workArea.left - bounds.right) / 2,
+                           workArea.top + (workArea.bottom - workArea.top - bounds.bottom) / 2);
+                clampRectToWorkArea(bounds, workArea);
+            }
         }
 
-        HWND hwnd = CreateWindowExW(
-            0,
-            windowClassName(),
-            L"JiStats | v1.0.0",
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-            windowX,
-            windowY,
-            kDefaultWidth,
-            kDefaultHeight,
-            nullptr,
-            nullptr,
-            instance,
-            this);
+        HWND hwnd = CreateWindowExW(0, windowClassName(), L"JiStats", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                                    bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
+                                    nullptr, nullptr, instance, this);
 
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -7010,29 +6670,22 @@ public:
             return;
         }
 
-        LONG_PTR windowStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        windowStyle &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
-        SetWindowLongPtrW(hwnd, GWL_STYLE, windowStyle);
-        SetWindowPos(
-            hwnd,
-            nullptr,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-        if (HMENU systemMenu = GetSystemMenu(hwnd, FALSE)) {
-            DeleteMenu(systemMenu, SC_SIZE, MF_BYCOMMAND);
-            DeleteMenu(systemMenu, SC_MAXIMIZE, MF_BYCOMMAND);
-            DrawMenuBar(hwnd);
-        }
-
         applyWindowIcons(hwnd);
         ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);
         UpdateWindow(hwnd);
 
         MSG msg{};
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            if (msg.hwnd == hwnd || IsChild(hwnd, msg.hwnd)) {
+                if (msg.message == WM_KEYDOWN && selectedMainTab == 0 &&
+                    (msg.wParam == VK_PRIOR || msg.wParam == VK_NEXT)) {
+                    scrollOverview(msg.wParam == VK_PRIOR ? SB_PAGEUP : SB_PAGEDOWN);
+                    continue;
+                }
+                if (IsDialogMessageW(hwnd, &msg)) {
+                    continue;
+                }
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -7040,6 +6693,7 @@ public:
         UnregisterClassW(shellDialogWindowClassName(), instance);
         UnregisterClassW(analysisWindowClassName(), instance);
         UnregisterClassW(preferencesWindowClassName(), instance);
+        UnregisterClassW(viewportClassName(), instance);
         UnregisterClassW(windowClassName(), instance);
 
         std::lock_guard<std::mutex> lock(mutex);

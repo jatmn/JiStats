@@ -4,6 +4,10 @@
 
 The dashboard is the main surface for current data and recent activity. **File** contains Settings, **Import OpenAI Export…**, **Export HTML Report…**, and Exit. **Help** contains View Help and About JiStats. Help and About should explain user-facing scope and provider availability. About summarizes the application and license. The tray stays available while the dashboard is closed and carries runtime status and offline actions.
 
+**Overview** puts connection, recovery, scheduled export, and freshness above quota and activity. Scroll the Overview with the wheel, scrollbar, or Page Up and Page Down. The OpenAI and HICAP model charts sit side by side when the window is wide enough and stack in a narrower window. The **Provider Snapshot** tab retains the detailed quota table. **Analysis** opens the dedicated Analysis window.
+
+The quota label above each track describes the value the track represents. Paired windows have separate labels and tracks. Hover over a quota row for reset and source details, or over a chart point for its exact value and time.
+
 ## Quota, freshness, and confidence
 
 Summary bars fill as remaining quota increases. The provider table's **Used** column shows normalized usage percentages for quota rows. Keep supporting counts labeled with their own units. Preserve individual quota windows, with 5-hour and 7-day windows shown together where supported. Include source and freshness and identify stale, backfilled, and unknown periods where applicable.

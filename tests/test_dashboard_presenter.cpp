@@ -12,6 +12,8 @@
 #include <optional>
 #include <thread>
 
+#include <windows.h>
+
 #include "gui/AnalysisPresenter.hpp"
 #include "gui/DashboardPresenter.hpp"
 #include "temp_test_directory.hpp"
@@ -373,15 +375,12 @@ TEST_CASE("DashboardPresenter runs MiniMax credential actions asynchronously", "
     presenter.shutdown();
 }
 
-TEST_CASE("DashboardPresenter keeps quota bars compact and handles native close safely", "[dashboard_presenter]") {
+TEST_CASE("DashboardPresenter handles native close safely", "[dashboard_presenter]") {
     DashboardPresenter presenter;
     REQUIRE(presenter.init());
     presenter.updateViewModel(makeQuotaViewModel());
 
-    REQUIRE(waitForCondition([&presenter]() {
-        return presenter.getUsageProgressBarWidthForTesting() > 0;
-    }));
-    CHECK(presenter.getUsageProgressBarWidthForTesting() <= 360);
+    REQUIRE(waitForCondition([&presenter]() { return presenter.getUsageProgressBarWidthForTesting() > 0; }));
 
     REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
     REQUIRE(waitForCondition([&presenter]() {
@@ -827,15 +826,79 @@ TEST_CASE("DashboardPresenter shows Codex throughput on the main overview tab", 
     CHECK(presenter.getOpenAiCodexModelUsageTextForTesting().find("gpt-5.4: 12,345 tokens") != std::string::npos);
     CHECK(presenter.getHicapCodexModelUsageTextForTesting().find("No new Codex SQLite usage observed yet") != std::string::npos);
 
-    const auto rect = presenter.getMainWindowRectForTesting();
-    CHECK((rect[3] - rect[1]) >= 640);
-
     const auto chartRect = presenter.getCodexThroughputChartRectForTesting();
-    CHECK(chartRect[0] == 18);
-    CHECK(chartRect[1] == 108);
+    CHECK(chartRect[0] == 0);
+    CHECK(chartRect[1] > 100);
     CHECK((chartRect[2] - chartRect[0]) > 300);
     CHECK((chartRect[3] - chartRect[1]) >= 120);
 
+    presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter scrolls to the final chart after a native resize", "[dashboard_presenter][layout]") {
+    DashboardPresenter presenter;
+    REQUIRE(presenter.init());
+    presenter.setVisible(true);
+
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    REQUIRE(dashboard != nullptr);
+    DWORD process = 0;
+    GetWindowThreadProcessId(dashboard, &process);
+    REQUIRE(process == GetCurrentProcessId());
+
+    RECT original{};
+    REQUIRE(GetWindowRect(dashboard, &original));
+    const UINT dpi = GetDpiForWindow(dashboard);
+    const auto resize = [dashboard, dpi](int width, int height) {
+        return SetWindowPos(dashboard, nullptr, 0, 0, MulDiv(width, dpi, 96), MulDiv(height, dpi, 96),
+                            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    };
+    const HWND viewport = FindWindowExW(dashboard, nullptr, L"JiStatsDashboardViewport", nullptr);
+    REQUIRE(viewport != nullptr);
+    const HWND throughput = FindWindowExW(viewport, nullptr, L"JistatsCodexChart", nullptr);
+    const HWND openAi = FindWindowExW(viewport, throughput, L"JistatsCodexChart", nullptr);
+    const HWND hicap = FindWindowExW(viewport, openAi, L"JistatsCodexChart", nullptr);
+    REQUIRE(throughput != nullptr);
+    REQUIRE(openAi != nullptr);
+    REQUIRE(hicap != nullptr);
+
+    RECT viewportBounds{};
+    RECT openAiBounds{};
+    RECT hicapBounds{};
+    REQUIRE(resize(1040, 500));
+    REQUIRE(GetWindowRect(openAi, &openAiBounds));
+    REQUIRE(GetWindowRect(hicap, &hicapBounds));
+    CHECK(openAiBounds.top == hicapBounds.top);
+    CHECK(openAiBounds.right < hicapBounds.left);
+
+    REQUIRE(resize(680, 500));
+    REQUIRE(GetWindowRect(viewport, &viewportBounds));
+    REQUIRE(GetWindowRect(openAi, &openAiBounds));
+    REQUIRE(GetWindowRect(hicap, &hicapBounds));
+    CHECK(openAiBounds.bottom < hicapBounds.top);
+    CHECK(hicapBounds.top > viewportBounds.bottom);
+
+    SendMessageW(viewport, WM_VSCROLL, SB_BOTTOM, 0);
+    REQUIRE(GetWindowRect(hicap, &hicapBounds));
+    CHECK(hicapBounds.top >= viewportBounds.top);
+    CHECK(hicapBounds.bottom < viewportBounds.bottom);
+
+    REQUIRE(PostMessageW(dashboard, WM_KEYDOWN, VK_PRIOR, 0));
+    REQUIRE(waitForCondition(
+        [&]() { return GetWindowRect(hicap, &hicapBounds) && hicapBounds.bottom > viewportBounds.bottom; }));
+
+    SendMessageW(viewport, WM_VSCROLL, SB_TOP, 0);
+    UINT wheelLines = 0;
+    if (SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &wheelLines, 0) && wheelLines != 0) {
+        SendMessageW(throughput, WM_MOUSEWHEEL, MAKEWPARAM(0, -WHEEL_DELTA), 0);
+        SCROLLINFO scroll{};
+        scroll.cbSize = sizeof(scroll);
+        scroll.fMask = SIF_POS;
+        REQUIRE(GetScrollInfo(viewport, SB_VERT, &scroll));
+        CHECK(scroll.nPos > 0);
+    }
+    REQUIRE(SetWindowPos(dashboard, nullptr, original.left, original.top, original.right - original.left,
+                         original.bottom - original.top, SWP_NOZORDER | SWP_NOACTIVATE));
     presenter.shutdown();
 }
 
@@ -881,18 +944,14 @@ TEST_CASE("DashboardPresenter opens a dedicated Analysis window from the Analysi
         return presenter.getAnalysisScopeLabelForTesting() == "Active filters: OpenAI / openai.primary / Last 7 Days";
     }, std::chrono::milliseconds(4000)));
 
-    const auto mainRect = presenter.getMainWindowRectForTesting();
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    const HWND analysis = FindWindowW(L"JiStatsAnalysisWindow", nullptr);
+    REQUIRE(dashboard != nullptr);
+    REQUIRE(analysis != nullptr);
+    CHECK(GetWindow(analysis, GW_OWNER) == dashboard);
     const auto analysisRect = presenter.getAnalysisWindowRectForTesting();
-    const int mainWidth = mainRect[2] - mainRect[0];
-    const int mainHeight = mainRect[3] - mainRect[1];
-    const int analysisWidth = analysisRect[2] - analysisRect[0];
-    const int analysisHeight = analysisRect[3] - analysisRect[1];
-    CHECK(analysisWidth > mainWidth);
-    CHECK(mainHeight > 0);
-    CHECK(analysisHeight > 0);
-    // The dashboard is the taller fixed window. The analysis window is wider,
-    // and a short work area clamps both heights to the same value.
-    CHECK(analysisHeight <= mainHeight);
+    CHECK(analysisRect[2] > analysisRect[0]);
+    CHECK(analysisRect[3] > analysisRect[1]);
 
     presenter.shutdown();
 }
