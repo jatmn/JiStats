@@ -1146,10 +1146,11 @@ public:
         int seriesIndex = -1;
         int pointIndex = -1;
         POINT position{};
+        bool onMarker = false;
 
         bool operator==(const ModelChartPointHit& other) const {
             return seriesIndex == other.seriesIndex && pointIndex == other.pointIndex &&
-                   position.x == other.position.x && position.y == other.position.y;
+                   position.x == other.position.x && position.y == other.position.y && onMarker == other.onMarker;
         }
     };
 
@@ -6417,47 +6418,62 @@ public:
 
     static constexpr int kModelMarkerRadius = 5;
 
-    void drawModelMarker(HDC dc, POINT center, size_t series, int size = kModelMarkerRadius) {
-        const int saved = SaveDC(dc);
-        const COLORREF color = modelSeriesColor(series);
-        SelectObject(dc, GetStockObject(DC_PEN));
-        SelectObject(dc, GetStockObject(DC_BRUSH));
-        SetDCPenColor(dc, color);
-        SetDCBrushColor(dc, dashboardHighContrast ? GetSysColor(COLOR_WINDOW) : color);
-
+    HRGN createModelMarkerRegion(POINT center, size_t series, int size) const {
         const LONG radius = scaledPixels(size);
         const LONG x = center.x;
         const LONG y = center.y;
         switch (series % 6) {
             case 0:
-                Ellipse(dc, x - radius, y - radius, x + radius + 1, y + radius + 1);
-                break;
+                return CreateEllipticRgn(x - radius, y - radius, x + radius + 1, y + radius + 1);
             case 1:
-                Rectangle(dc, x - radius, y - radius, x + radius + 1, y + radius + 1);
-                break;
+                return CreateRectRgn(x - radius, y - radius, x + radius + 1, y + radius + 1);
             case 2: {
                 const POINT triangle[] = {{x, y - radius}, {x + radius, y + radius}, {x - radius, y + radius}};
-                Polygon(dc, triangle, static_cast<int>(std::size(triangle)));
-                break;
+                return CreatePolygonRgn(triangle, static_cast<int>(std::size(triangle)), WINDING);
             }
             case 3: {
                 const POINT diamond[] = {{x, y - radius}, {x + radius, y}, {x, y + radius}, {x - radius, y}};
-                Polygon(dc, diamond, static_cast<int>(std::size(diamond)));
-                break;
+                return CreatePolygonRgn(diamond, static_cast<int>(std::size(diamond)), WINDING);
             }
             case 4: {
                 const POINT triangle[] = {{x - radius, y - radius}, {x + radius, y - radius}, {x, y + radius}};
-                Polygon(dc, triangle, static_cast<int>(std::size(triangle)));
-                break;
+                return CreatePolygonRgn(triangle, static_cast<int>(std::size(triangle)), WINDING);
             }
-            case 5:
-                MoveToEx(dc, x - radius, y, nullptr);
-                LineTo(dc, x + radius + 1, y);
-                MoveToEx(dc, x, y - radius, nullptr);
-                LineTo(dc, x, y + radius + 1);
-                break;
+            default: {
+                HRGN bar = CreateRectRgn(x - radius, y, x + radius + 1, y + 1);
+                HRGN stem = CreateRectRgn(x, y - radius, x + 1, y + radius + 1);
+                const bool joined = bar != nullptr && stem != nullptr && CombineRgn(bar, bar, stem, RGN_OR) != ERROR;
+                if (stem != nullptr) {
+                    DeleteObject(stem);
+                }
+                if (!joined && bar != nullptr) {
+                    DeleteObject(bar);
+                }
+                return joined ? bar : nullptr;
+            }
         }
-        RestoreDC(dc, saved);
+    }
+
+    void drawModelMarker(HDC dc, POINT center, size_t series, int size = kModelMarkerRadius) {
+        HRGN shape = createModelMarkerRegion(center, series, size);
+        if (shape == nullptr) {
+            return;
+        }
+
+        const auto brush = static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
+        const COLORREF previous = SetDCBrushColor(dc, modelSeriesColor(series));
+        const int saved = dashboardHighContrast ? SaveDC(dc) : 0;
+        if (saved != 0 && ExtSelectClipRgn(dc, shape, RGN_AND) != ERROR) {
+            FillRgn(dc, shape, GetSysColorBrush(COLOR_WINDOW));
+            FrameRgn(dc, shape, brush, 1, 1);
+        } else {
+            FillRgn(dc, shape, brush);
+        }
+        if (saved != 0) {
+            RestoreDC(dc, saved);
+        }
+        SetDCBrushColor(dc, previous);
+        DeleteObject(shape);
     }
 
     void drawModelUsageSummary(const DRAWITEMSTRUCT& draw) {
@@ -6546,11 +6562,20 @@ public:
 
     ModelChartPointHit modelChartHitTest(POINT pt, const ModelChartPlot& plot) const {
         const int markerRadius = scaledPixels(kModelMarkerRadius);
-        // Match the paint order if markers share any pixels.
+        // The box filters out distant markers. Only the painted region gets priority over samples.
         for (auto marker = plot.markers.rbegin(); marker != plot.markers.rend(); ++marker) {
-            if (std::abs(marker->center.x - pt.x) <= markerRadius &&
-                std::abs(marker->center.y - pt.y) <= markerRadius) {
-                return {static_cast<int>(marker->seriesIndex), static_cast<int>(marker->pointIndex), marker->center};
+            if (std::abs(marker->center.x - pt.x) > markerRadius || std::abs(marker->center.y - pt.y) > markerRadius) {
+                continue;
+            }
+            HRGN shape = createModelMarkerRegion(marker->center, marker->seriesIndex, kModelMarkerRadius);
+            if (shape == nullptr) {
+                continue;
+            }
+            const bool inside = PtInRegion(shape, pt.x, pt.y) != FALSE;
+            DeleteObject(shape);
+            if (inside) {
+                return {static_cast<int>(marker->seriesIndex), static_cast<int>(marker->pointIndex), marker->center,
+                        true};
             }
         }
         ModelChartPointHit hit;
@@ -6706,7 +6731,9 @@ public:
             const auto& series = chart.series[static_cast<size_t>(hit.seriesIndex)];
             const auto& value = series.points[static_cast<size_t>(hit.pointIndex)];
             const POINT point = hit.position;
-            drawModelMarker(dc, point, static_cast<size_t>(hit.seriesIndex), 7);
+            if (!hit.onMarker) {
+                drawModelMarker(dc, point, static_cast<size_t>(hit.seriesIndex), 7);
+            }
             std::wostringstream tooltip;
             tooltip << utf8ToWide(series.modelKey.empty() ? "unknown" : series.modelKey) << L"\n"
                     << L"Tokens: " << utf8ToWide(formatNumber(value.totalTokens)) << L"\n"
