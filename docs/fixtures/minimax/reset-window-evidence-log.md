@@ -58,7 +58,7 @@ The validation met that condition:
 
 - Coding Plan has the direct full pre/post rollover proof
 - Token Plan satisfies the accepted archived-pre/live-post comparison path
-- `docs/minimax-mirror-spec.md`, `docs/capability-matrix.md`, and `docs/progress.md` reflect the observed semantics
+- The [MiniMax provider reference](../../providers/minimax.md) and [provider matrix](../../capability-matrix.md) reflect the observed semantics
 
 ## Future Confidence Questions
 
@@ -72,5 +72,5 @@ Remaining questions for a follow-up capture are:
 ## Related Files
 
 - `docs/fixtures/minimax/reset-window-capture-inputs.md`
-- `docs/minimax-mirror-spec.md`
+- [MiniMax provider reference](../../providers/minimax.md)
 - `docs/capability-matrix.md`

@@ -4,8 +4,8 @@ This folder contains a synthetic Kimi local-runtime fixture pack for `P7.8`.
 
 It follows the Phase 7 boundary in:
 
-- `docs/kimi-local-parser-spike.md`
-- `docs/claude-kimi-local-redaction-contract.md`
+- [Kimi Code provider reference](../../providers/claude-kimi.md#kimi-code)
+- [Local redaction contract](../../providers/local-redaction.md#kimi-appendix)
 
 What is intentionally included:
 

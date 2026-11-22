@@ -1,0 +1,40 @@
+# Windows desktop validation
+
+Use a Windows 11 desktop session and a build of the candidate. Record the revision and build, display layout, taskbar theme and transparency settings, adjacent utilities, provider surfaces exercised, and the observed result for each selected scenario.
+
+## Dashboard and background checks
+
+- Launch normally and with `--background`. Check that the tray opens the dashboard and that closing the dashboard leaves the app available.
+- Test **Start with Windows** with the packaged build in an isolated Windows profile. Enable the setting and exit JiStats. Place a disposable copy of a supported database with a pending migration at the profile's JiStats data path. Record its version with `SELECT MAX(version) FROM schema_version;`, then sign out and back in without launching the app manually. Verify the tray appears and the same database reaches the expected schema version. Record both versions. See [migration discovery](../reference/storage.md#migration-behavior) for why a tray icon can appear even when the migration is skipped.
+- Enable the providers being tested. Compare Overview remaining bars and provider-table used percentages with the returned quota windows. Confirm each bar fills as remaining quota increases. Verify paired windows, missing data, and stale state without treating local activity as quota.
+- Check the offline notice, its retry and dismiss actions, and the persistent status through recovery. Verify that Analysis range controls reflect the effective persisted scope and that manual export uses that scope when relevant.
+- For MiniMax Settings, exercise the [credential scenarios](../providers/minimax.md#credential-behavior-to-preserve).
+
+### Fresh packaged database
+
+In a separate isolated Windows profile with no existing JiStats database, launch the packaged executable from the directory containing `db_migrations/`. Leave all integrations disabled so provider activity cannot create the Kimi row. Exit JiStats and open the new `%LOCALAPPDATA%\JiStats\jistats.db` read-only in a SQLite client. Run:
+
+```sql
+SELECT
+    EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'export_runs') AS has_export_runs,
+    EXISTS(SELECT 1 FROM providers WHERE provider_key = 'kimi') AS has_kimi_provider;
+```
+
+Record both results. Both must be `1` before marking the package verified. The two `010` migrations create the export table and seed Kimi separately, so the recorded schema version can reach `12` with either effect missing.
+
+## Taskbar checks
+
+- Enable, disable, and re-enable the overlay. Check compact width, readable text, color bands and low-quota emphasis, and placement around the clock, notification area, and TrafficMonitor if present.
+- Compare OpenAI, MiniMax, and Kimi subscription rows with the corresponding dashboard quota. Check dual-window formatting where data exists. With local activity only or no eligible quota, verify the overlay has no rows even in a degraded runtime state. Check that the dashboard and tray continue to show that state.
+- Check hover text, repeated right-click and dismiss, and hover recovery. Verify the overlay returns after Explorer restarts. Include resizing, auto-hide, or monitor changes when they affect the change under test.
+- Use the [taskbar shell signoff script](../../scripts/run_taskbar_shell_signoff.ps1) for repeated menu/click-away and Explorer restart checks in the desktop session. Use [controller](../../tests/test_app_controller.cpp) and [presenter](../../tests/test_taskbar_presenter.cpp) tests for deterministic row filtering, formatting, placement, and state transitions.
+
+## Recorded coverage
+
+| Date | Observed |
+| --- | --- |
+| Earlier toggle smoke | Repeated overlay off/on, notification-area clearance, and TrafficMonitor coexistence. |
+| 2026-04-20 | Live dark-theme display pass with transparency, OpenAI dual-window and MiniMax single-window rows, and TrafficMonitor placement. Low-quota styling, Kimi quota, and Claude activity were outside this pass. |
+| 2026-04-21 | Scripted Release shell pass covered three right-click/click-away cycles and Explorer restart recovery. The focused `[taskbar]` suite recorded 230 assertions across 27 cases. Hover suppression and recovery rely on focused test coverage. |
+
+See the [archived taskbar record](https://github.com/jatmn/JiStats-public-prep/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/taskbar-manual-validation.md) for the original evidence matrix.

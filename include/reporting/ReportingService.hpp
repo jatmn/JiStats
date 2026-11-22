@@ -44,7 +44,7 @@ struct ReportRequest {
 
 /**
  * Report metadata containing freshness, backfill, and confidence labeling.
- * Per docs/plan.md section 13.1, reports must include:
+ * Per docs/reference/reporting.md, reports must include:
  * - provider and account scope
  * - data freshness timestamp
  * - whether the report contains backfilled data
@@ -148,12 +148,12 @@ struct ReportResult {
 };
 
 /**
- * ReportingService handles report generation per docs/plan.md section 13.
- * 
+ * ReportingService handles report generation per docs/reference/reporting.md.
+ *
  * Reports are export artifacts (not live viewing).
  * HTML is the primary v1.0 format.
- * 
- * Per docs/plan.md section 13.1:
+ *
+ * Per docs/reference/reporting.md:
  * - Reports include generation timestamp
  * - Data source attribution (provider, API, local)
  * - Confidence indicators for mirrored data

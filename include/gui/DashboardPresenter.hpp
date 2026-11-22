@@ -308,7 +308,7 @@ struct QuotaInfo {
     std::string confidenceTier; // "high", "medium", "low"
     std::string providerSurface; // normalized provenance label when known
 
-    // Backfill and gap state (per plan.md section 13.1)
+    // Backfill and gap state (per docs/reference/reporting.md)
     // Set by reconciliation logic when data is reconstructed from multiple sources
     bool isBackfilled = false;
     // Set when there are gaps in the data that could not be filled

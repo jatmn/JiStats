@@ -1,8 +1,5 @@
 # SQLite-Backed Storage Quality Gate
 
-> **Status**: Lane 2 quality note
-> **Purpose**: Define the minimum evidence required before storage/schema work is treated as verified
-
 ## Intent
 
 JiStats storage and migration tests are written to use real SQLite when it is available.
@@ -16,7 +13,7 @@ Before closing a storage or schema checkpoint that touches migrations, `SchemaMa
 A valid gate requires all of these:
 
 - tests are built with `JISTATS_BUILD_TESTS=ON`
-- SQLite is actually enabled through either `JISTATS_USE_SYSTEM_SQLITE=ON` or a future bundled path that defines `JISTATS_HAS_SQLITE`
+- SQLite is actually enabled through either the bundled SQLite target defining `JISTATS_HAS_SQLITE` or `JISTATS_USE_SYSTEM_SQLITE=ON` with system SQLite
 - the selected tests execute against a real opened SQLite database instead of taking the `SQLite not available` early-return path
 
 ## Minimum Required Test Coverage
@@ -60,16 +57,9 @@ Bad evidence examples:
 - `ctest` passed, without proving SQLite was enabled
 - a default build where storage tests quietly took the `SQLite not available` branch
 
-## Suggested Windows Validation Pattern
+## Windows validation
 
-Any supported generator is acceptable as long as SQLite is truly enabled.
-
-A typical Windows validation flow looks like:
-
-1. configure with tests on and SQLite enabled
-2. build the test target
-3. run the storage/schema-focused tests
-4. record the command lines and outcome in the active handoff/progress note
+Run [`scripts/run_sqlite_quality_gate.ps1`](../../scripts/run_sqlite_quality_gate.ps1) from the repository or dispatch [Windows CI](../../.github/workflows/ci.yml). Both routes configure with bundled SQLite and tests enabled, build, and run CTest. Record the commands and outcome in the handoff.
 
 ## Exit Rule
 

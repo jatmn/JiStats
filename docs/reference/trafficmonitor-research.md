@@ -96,7 +96,7 @@ Evidence:
 Key lines:
 - `TrafficMonitor/TrafficMonitorDlg.cpp:3023-3052`
 
-## Corrections to Previous Notes
+## Integration implications
 
 - `ITaskbarList3`-only approach was incorrect for TrafficMonitor parity.
 - “Do NOT review source code” was incorrect for this task; source review is required to extract actual mechanism.
@@ -114,14 +114,9 @@ Implement a `TaskbarSurface` spike using the same architectural pattern:
    - Retry open/attach on failure.
    - If repeated failure, degrade to tray-only indicator + dashboard.
 
-## Follow-up Checklist
+## JiStats implementation
 
-- [x] Verify real TrafficMonitor mechanism from source
-- [x] Verify Explorer restart strategy from source
-- [x] Verify update/repaint cadence from source
-- [ ] Write JiStats `taskbar-spike.md` implementation checklist
-- [ ] Update `docs/taskbar-metrics.md` with source-backed approach decision
-- [ ] Convert “taskbar integration” from research to execution task breakdown
+For the implementation that followed this research, see [TaskbarPresenter](../../src/taskbar/TaskbarPresenter.cpp), the [taskbar reference](presentation.md#taskbar), and the [Windows desktop validation record](../validation/desktop.md#recorded-coverage).
 
 ## Primary Source Links
 

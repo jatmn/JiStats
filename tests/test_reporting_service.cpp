@@ -742,7 +742,7 @@ TEST_CASE("ReportingService generateReport metadata with backfilled data shows c
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
-        // Set backfill state on quotas - per plan.md section 13.1
+        // Set backfill state on quotas - per docs/reference/reporting.md
         for (auto& provider : viewModel.providers) {
             for (auto& quota : provider.quotas) {
                 quota.isBackfilled = true;

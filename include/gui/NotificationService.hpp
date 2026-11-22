@@ -43,8 +43,8 @@ struct Notice {
 };
 
 /**
- * NotificationService handles dismissible notices per offline-retry-policy.md.
- * 
+ * NotificationService handles dismissible notices per docs/reference/runtime.md.
+ *
  * Key behaviors:
  * - One notice on initial state transition
  * - 60-minute cooldown after dismissal
