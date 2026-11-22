@@ -13,6 +13,8 @@ JiStats is a local-first Windows 11 desktop app for monitoring AI provider quota
 
 The build requires CMake 3.20 or newer.
 
+CMake downloads pinned dependencies during configuration and verifies their SHA-256 hashes. For an offline configure, reuse a populated build directory or point `FETCHCONTENT_SOURCE_DIR_SQLITE`, `FETCHCONTENT_SOURCE_DIR_SPDLOG`, and, for test builds, `FETCHCONTENT_SOURCE_DIR_CATCH2` at local copies of the pinned sources. The pins are in [CMakeLists.txt](CMakeLists.txt).
+
 ### Building on Linux
 
 To run the portable Catch2 tests directly on Debian or Ubuntu, install the native C++ toolchain, CMake and Ninja. This exercises the same sources used by the Windows app, including quota mirroring, observation persistence and bundled SQLite migrations.
@@ -32,7 +34,7 @@ cmake -S . -B build-mingw -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw
 cmake --build build-mingw
 ```
 
-`build-mingw/bin/` then holds `JiStats.exe`. Add `-DJISTATS_BUILD_TESTS=ON` for `JiStatsTests.exe`. The executables link the MinGW runtime statically. ImageMagick generates the app icon when cross-building. To produce `JiStats-upx.exe`, put a Linux `upx` on `PATH` or pass `-DJISTATS_UPX_EXECUTABLE=/path/to/upx` at configure time.
+`build-mingw/bin/` then holds `JiStats.exe`. Add `-DJISTATS_BUILD_TESTS=ON` for `JiStatsTests.exe`. The executables link the MinGW runtime statically. ImageMagick generates the app icon when cross-building.
 
 Cross-builds use bundled SQLite by default. With bundled or statically linked SQLite, you can copy the executables to Windows without extra DLLs. To use `-DJISTATS_USE_SYSTEM_SQLITE=ON`, install SQLite built for Windows x64 into the MinGW target prefix or set `CMAKE_FIND_ROOT_PATH` to the Windows dependency prefix. If the build links a shared SQLite package, copy that package's SQLite DLL (typically `sqlite3.dll`) alongside the executables. Configure in a fresh build directory if CMake previously cached Linux SQLite paths.
 
@@ -51,7 +53,7 @@ cmake --build build-ucrt
 ctest --test-dir build-ucrt --output-on-failure
 ```
 
-Release outputs are in `build-ucrt/bin/`. To also produce the optional packed `JiStats-upx.exe`, put an official [UPX release](https://github.com/upx/upx/releases) on `PATH` or pass `-DJISTATS_UPX_EXECUTABLE=C:/path/to/upx.exe` at configure time. Configure with `-DJISTATS_ENABLE_UPX=OFF` to skip it.
+Release outputs are in `build-ucrt/bin/`.
 
 For an existing Visual Studio build tree, run `pwsh -File .\scripts\build_release.ps1 -BuildDir build`. Replace `build` with your configured directory. The helper stops running JiStats binaries to release file locks and builds the Release configuration. The Visual Studio generator puts executables under that directory's `bin/Release/`.
 
@@ -59,18 +61,13 @@ For an existing Visual Studio build tree, run `pwsh -File .\scripts\build_releas
 
 For standalone MiniMax readiness, capture, and diagnostics commands, add `-DJISTATS_BUILD_MINIMAX_CLI=ON` to either Windows-target CMake configure command above. The option defaults to `OFF`. When enabled, the build produces `JiStatsMiniMaxCli.exe` alongside the app, and `cmake --install` installs it to the install prefix's `bin/` directory. The desktop MiniMax integration is available in either configuration, and `JISTATS_BUILD_TESTS` controls the tests independently.
 
-## 📦 Third-Party Components
+### Optional UPX compression
 
-Third-party sources are not stored in this repository. The first CMake configure downloads the pinned upstream releases below and verifies each archive's SHA-256 hash; the versions and hashes are declared in [CMakeLists.txt](CMakeLists.txt). Downloads are cached in the build directory's `_deps/`, so later builds in that directory work offline. To build without network access, pass `-DFETCHCONTENT_SOURCE_DIR_<NAME>=/path/to/extracted/release` for `SQLITE`, `SPDLOG` and `CATCH2`. To use an installed SQLite instead of the pinned amalgamation, configure with `-DJISTATS_USE_SYSTEM_SQLITE=ON`.
+[UPX](https://upx.github.io/) compresses the Windows executable so the standalone download is smaller and the file takes up less disk space. The packed app decompresses itself at launch, which adds startup work. Both variants run on Windows without a separate UPX installation.
 
-| Component | Version | Upstream | Purpose | License |
-| --- | --- | --- | --- | --- |
-| SQLite amalgamation | 3.53.0 | https://www.sqlite.org/ | local storage engine, compiled into the executables | Public domain |
-| spdlog | 1.15.1 | https://github.com/gabime/spdlog | header-only logging, compiled into the executables | MIT |
-| `fmt` bundled inside spdlog | 11.1.3 | https://github.com/fmtlib/fmt | formatting support used through spdlog | MIT with an object-code exception |
-| Catch2 amalgamation | 3.7.1 | https://github.com/catchorg/Catch2 | test framework, only downloaded with `-DJISTATS_BUILD_TESTS=ON` | BSL-1.0 |
+CMake looks for UPX by default when targeting Windows. To produce `JiStats-upx.exe` alongside `JiStats.exe` in a Release build, put an [official UPX release](https://github.com/upx/upx/releases) for your build host on `PATH` or configure with `-DJISTATS_UPX_EXECUTABLE=/path/to/upx`. Use a Linux UPX executable when cross-building from Linux. If CMake cannot find UPX, the Release build produces the unpacked executable. Set `-DJISTATS_ENABLE_UPX=OFF` to skip detection and packing.
 
-UPX is an optional external build tool for the `-upx` release variants. It is not stored in the repository or required by the app. See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for the notices that ship with release binaries.
+For packed releases, follow the [redistribution instructions](#license).
 
 ## License
 
