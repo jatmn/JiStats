@@ -7,6 +7,11 @@ on:
   push:
     branches: [main, 'release/**']
   workflow_dispatch:
+    inputs:
+      repeat_offline_notice_tests:
+        description: Run eight additional offline notice passes to diagnose restart stalls
+        type: boolean
+        default: false
 
 concurrency:
   # A docs-only push must never cancel a pending or running build for a prior push.
@@ -167,6 +172,8 @@ jobs:
           path: build-mingw/bin
       # Run from the checkout root so the suite can read the test fixtures.
       - name: Run Windows suite and diagnose intermittent restart stalls
+        env:
+          REPEAT_OFFLINE_NOTICE_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.repeat_offline_notice_tests }}
         shell: pwsh
         run: |
           function Invoke-WindowsTests([string[]] $testArguments, [int] $diagnosticDelay) {
@@ -185,6 +192,7 @@ jobs:
             if ($process.ExitCode -ne 0) { exit $process.ExitCode }
           }
           Invoke-WindowsTests @() 300000
+          if ($env:REPEAT_OFFLINE_NOTICE_TESTS -ne 'true') { exit 0 }
           foreach ($attempt in 1..8) {
             Write-Host "Checking offline notice restart timing, pass $attempt"
             Invoke-WindowsTests @('[offline_notice]', '--reporter', 'compact', '--success') 60000
