@@ -328,12 +328,6 @@ if(JISTATS_SQLITE_TARGET)
     target_link_libraries(JiStatsMiniMaxCli PRIVATE ${JISTATS_SQLITE_TARGET})
 endif()
 
-# Link ImGui if available
-if(JISTATS_HAS_IMGUI)
-    target_link_libraries(JiStats PRIVATE imgui)
-    target_compile_definitions(JiStats PRIVATE JISTATS_HAS_IMGUI=1)
-endif()
-
 # Link spdlog if available
 if(JISTATS_HAS_SPDLOG)
     target_link_libraries(JiStats PRIVATE spdlog)
@@ -350,8 +344,6 @@ if(WIN32)
     target_link_libraries(JiStats PRIVATE
         comctl32
         comdlg32
-        d3d11
-        dxgi
         gdiplus
         user32
         gdi32
