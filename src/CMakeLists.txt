@@ -286,23 +286,6 @@ else()
     add_executable(JiStats ${JISTATS_SOURCES})
 endif()
 
-set(JISTATS_MINIMAX_CLI_SOURCES
-    app/MiniMaxCliMain.cpp
-    observation/LocalObservationService.cpp
-    platform/WindowsCredentialStore.cpp
-    db/StorageService.cpp
-    db/SchemaManager.cpp
-    db/QueryResult.cpp
-    providers/minimax/MiniMaxAdapter.cpp
-    providers/minimax/MiniMaxLiveCapture.cpp
-    analytics/GapClassifier.cpp
-    core/Logger.cpp
-    core/HttpClient.cpp
-    core/JsonParser.cpp
-)
-
-add_executable(JiStatsMiniMaxCli ${JISTATS_MINIMAX_CLI_SOURCES})
-
 # Target properties
 set_target_properties(JiStats PROPERTIES
     OUTPUT_NAME "JiStats"
@@ -325,21 +308,14 @@ target_include_directories(JiStats PRIVATE
     $<$<BOOL:${WIN32}>:${CMAKE_CURRENT_BINARY_DIR}>
 )
 
-target_include_directories(JiStatsMiniMaxCli PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-)
-
 if(JISTATS_SQLITE_TARGET)
     target_link_libraries(JiStats PRIVATE ${JISTATS_SQLITE_TARGET})
-    target_link_libraries(JiStatsMiniMaxCli PRIVATE ${JISTATS_SQLITE_TARGET})
 endif()
 
 # Link spdlog if available
 if(JISTATS_HAS_SPDLOG)
     target_link_libraries(JiStats PRIVATE spdlog)
     target_compile_definitions(JiStats PRIVATE JISTATS_HAS_SPDLOG=1)
-    target_link_libraries(JiStatsMiniMaxCli PRIVATE spdlog)
-    target_compile_definitions(JiStatsMiniMaxCli PRIVATE JISTATS_HAS_SPDLOG=1)
 endif()
 
 # Windows specific settings
@@ -362,26 +338,15 @@ if(WIN32)
         NOMINMAX
     )
 
-    target_link_libraries(JiStatsMiniMaxCli PRIVATE
-        advapi32
-        winhttp
-    )
-    target_compile_definitions(JiStatsMiniMaxCli PRIVATE
-        WIN32_LEAN_AND_MEAN
-        NOMINMAX
-    )
-
     if(MSVC)
         set_target_properties(JiStats PROPERTIES LINK_FLAGS "/MANIFEST:NO")
         target_compile_options(JiStats PRIVATE /utf-8 /W4 /EHsc /FS)
-        target_compile_options(JiStatsMiniMaxCli PRIVATE /utf-8 /W4 /EHsc /FS)
     elseif(MINGW)
         # MSVC links Shlwapi through #pragma comment; MinGW ignores that pragma.
         target_link_libraries(JiStats PRIVATE shlwapi)
         # Use the wWinMain entry point that MSVC selects automatically.
         target_link_options(JiStats PRIVATE -municode)
         target_sources(JiStats PRIVATE platform/MinGwCompat.cpp)
-        target_sources(JiStatsMiniMaxCli PRIVATE platform/MinGwCompat.cpp)
     endif()
 endif()
 
@@ -411,4 +376,49 @@ jistats_enable_upx_for_target(JiStats)
 
 # Installation
 install(TARGETS JiStats)
-install(TARGETS JiStatsMiniMaxCli)
+
+if(JISTATS_BUILD_MINIMAX_CLI)
+    add_executable(JiStatsMiniMaxCli
+        app/MiniMaxCliMain.cpp
+        observation/LocalObservationService.cpp
+        platform/WindowsCredentialStore.cpp
+        db/StorageService.cpp
+        db/SchemaManager.cpp
+        db/QueryResult.cpp
+        providers/minimax/MiniMaxAdapter.cpp
+        providers/minimax/MiniMaxLiveCapture.cpp
+        analytics/GapClassifier.cpp
+        core/Logger.cpp
+        core/HttpClient.cpp
+        core/JsonParser.cpp
+    )
+    target_include_directories(JiStatsMiniMaxCli PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+    )
+
+    if(JISTATS_SQLITE_TARGET)
+        target_link_libraries(JiStatsMiniMaxCli PRIVATE ${JISTATS_SQLITE_TARGET})
+    endif()
+
+    if(JISTATS_HAS_SPDLOG)
+        target_link_libraries(JiStatsMiniMaxCli PRIVATE spdlog)
+        target_compile_definitions(JiStatsMiniMaxCli PRIVATE JISTATS_HAS_SPDLOG=1)
+    endif()
+
+    target_link_libraries(JiStatsMiniMaxCli PRIVATE
+        advapi32
+        winhttp
+    )
+    target_compile_definitions(JiStatsMiniMaxCli PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+    )
+
+    if(MSVC)
+        target_compile_options(JiStatsMiniMaxCli PRIVATE /utf-8 /W4 /EHsc /FS)
+    elseif(MINGW)
+        target_sources(JiStatsMiniMaxCli PRIVATE platform/MinGwCompat.cpp)
+    endif()
+
+    install(TARGETS JiStatsMiniMaxCli)
+endif()

@@ -145,6 +145,7 @@ jobs:
           -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake
           -DCMAKE_BUILD_TYPE=Debug
           -DJISTATS_BUILD_TESTS=ON
+          -DJISTATS_BUILD_MINIMAX_CLI=ON
       - name: Build the app, MiniMax CLI, and tests
         run: cmake --build build-mingw --parallel
       - name: Upload the test executable for Windows

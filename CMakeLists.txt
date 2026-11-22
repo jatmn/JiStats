@@ -13,6 +13,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Project options
 option(JISTATS_BUILD_TESTS "Build tests" OFF)
+option(JISTATS_BUILD_MINIMAX_CLI "Build the standalone MiniMax developer CLI" OFF)
 option(JISTATS_BUILD_EXAMPLES "Build examples" OFF)
 option(JISTATS_USE_SYSTEM_SQLITE "Use system SQLite" OFF)
 option(JISTATS_ENABLE_UPX "Compress Release executables with an external unmodified UPX tool" ON)

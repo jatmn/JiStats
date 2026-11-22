@@ -20,6 +20,8 @@ Confirm that [Pullfrog automatic reviews](../CONTRIBUTING.md#pullfrog) run while
 
 Update the tracker when work changes state. At handoff, record what changed, the revision, the verification commands and results, and any blocker or next step. Keep dated release evidence in the release checklist. Record new decisions with their rationale and link to the current contract.
 
+- Made the standalone MiniMax CLI opt-in for [#23](https://github.com/jatmn/JiStats/issues/23). Using the [build commands](../README.md#building-on-linux), MinGW Release builds and `cmake --install` produced the desktop app by default and included the CLI with [its flag enabled](../README.md#building-the-minimax-cli). The full Windows test executable cross-built in both configurations, and native Linux CTest passed all 125 cases. The hosted Windows job covers runtime validation.
+
 - Completed the CodeQL cutover after GitHub-managed default setup scanned Markdown-only PR #20. Disabled default setup and removed `CODEQL_UPLOAD_DISABLED`. A manual scan on `eba30e2` published C/C++, JavaScript/TypeScript, and GitHub Actions results through the repository workflow. [CodeQL analysis run](https://github.com/jatmn/JiStats/actions/runs/45069746335)
 
 - Audited the documentation against main at `eba30e2`. Updated the quick start, Codex SQLite behavior, build and CI guidance, and release evidence. The [Linux CMake/Ninja build](../README.md#building-on-linux) passed CTest with bundled SQLite, covering 125 cases and 920 assertions. The Codex SQLite setting behavior remains open.

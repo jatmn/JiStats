@@ -126,6 +126,7 @@ function Invoke-CmakeConfigure {
         "-DCMAKE_BUILD_TYPE=$BuildType",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
         "-DJISTATS_BUILD_TESTS=ON",
+        "-DJISTATS_BUILD_MINIMAX_CLI=ON",
         "-DJISTATS_ENABLE_UPX=OFF"
     )
 
