@@ -3744,6 +3744,11 @@ std::chrono::milliseconds adaptiveWatcherIntervalOrDormantForTesting(
 
 class AppController::Impl {
 public:
+    struct ProviderConnectivityUpdates {
+        std::vector<PersistedConnectivityState> rows;
+        bool confirmedRecovery = false;
+    };
+
     bool initialized = false;
     std::string state = "uninitialized";
     DashboardPresenter dashboardPresenter;
@@ -5798,32 +5803,17 @@ public:
         viewModel.offlineNoticeMessage = activeNotice->message;
     }
 
-    std::time_t latestOfflineNoticeDismissal(const DashboardViewModel& viewModel) {
+    std::time_t latestOfflineNoticeDismissal() {
         if (!storageAvailable || !storageService.isOpen()) {
             return 0;
         }
 
-        std::time_t dismissedAt = 0;
-        for (const auto& provider : viewModel.providers) {
-            if (provider.state != ProviderState::Offline) {
-                continue;
-            }
-
-            const auto providerId = findProviderIdByKey(storageService, provider.providerKey);
-            const auto runtimeAccountId =
-                ensureRuntimeTrackingAccountId(storageService, provider.providerKey, provider.displayName);
-            if (!providerId.has_value() || !runtimeAccountId.has_value()) {
-                continue;
-            }
-
-            const auto connectivity =
-                storageService.getConnectivityState(*providerId, *runtimeAccountId);
-            if (connectivity.has_value() && connectivity->status == "offline") {
-                dismissedAt = std::max(dismissedAt, connectivity->noticeDismissedAt);
-            }
-        }
-
-        return dismissedAt;
+        const auto result = storageService.execute(
+            "SELECT MAX(notice_dismissed_at_utc) FROM connectivity_state "
+            "WHERE account_id IN (SELECT id FROM accounts WHERE scope_type = 'runtime');");
+        return result.success() && result.rowCount() == 1
+            ? parseRuntimeTimestamp(result.getString(0, 0))
+            : 0;
     }
 
     void persistOfflineNoticeDismissal(const DashboardViewModel& viewModel, std::time_t now) {
@@ -5916,7 +5906,7 @@ public:
         const RuntimeStatusTransition transition =
             describeRuntimeStateTransition(lastRuntimeState, viewModel.runtimeState);
         if (transition.enteredOffline) {
-            const std::time_t dismissedAt = latestOfflineNoticeDismissal(viewModel);
+            const std::time_t dismissedAt = latestOfflineNoticeDismissal();
             if (dismissedAt > 0 && (now - dismissedAt) <= kOfflineNoticeCooldownSeconds) {
                 notificationService.suppressUntilCleared(NoticeType::Offline);
             }
@@ -6030,12 +6020,21 @@ public:
         }
     }
 
-    std::vector<PersistedConnectivityState> persistProviderRefreshState(
+    ProviderConnectivityUpdates persistProviderRefreshState(
         const DashboardViewModel& viewModel, std::time_t now) {
-        std::vector<PersistedConnectivityState> connectivityUpdates;
+        ProviderConnectivityUpdates connectivityUpdates;
         if (!storageAvailable || !storageService.isOpen()) {
             return connectivityUpdates;
         }
+
+        // Sample-only and empty results can change presentation without confirming recovery.
+        connectivityUpdates.confirmedRecovery =
+            std::any_of(viewModel.providers.begin(), viewModel.providers.end(), [](const auto& provider) {
+                return provider.state == ProviderState::Live || provider.state == ProviderState::Stale;
+            }) &&
+            std::none_of(viewModel.providers.begin(), viewModel.providers.end(), [](const auto& provider) {
+                return provider.state == ProviderState::Offline;
+            });
 
         PersistedRuntimeState runtimeState;
         if (const auto existing = loadPersistedRuntimeState()) {
@@ -6090,7 +6089,7 @@ public:
                 syncState.lastFailureCategory.clear();
             }
 
-            connectivityUpdates.push_back(std::move(connectivity));
+            connectivityUpdates.rows.push_back(std::move(connectivity));
             storageService.upsertSyncState(syncState);
         }
 
@@ -6108,37 +6107,38 @@ public:
     }
 
     void persistConnectivityForPublication(
-        std::vector<PersistedConnectivityState>& updates,
-        RuntimeState nextRuntimeState,
+        ProviderConnectivityUpdates& updates,
         std::time_t now) {
         if (!storageAvailable || !storageService.isOpen()) {
             return;
         }
 
-        // Read the app-wide dismissal before replacing the previous offline rows.
-        const bool stillOffline =
-            lastRuntimeState == RuntimeState::Offline && nextRuntimeState == RuntimeState::Offline;
-        const std::time_t carriedDismissal = stillOffline
-            ? latestOfflineNoticeDismissal(dashboardPresenter.getViewModel())
-            : 0;
-
-        for (auto& connectivity : updates) {
-            if (connectivity.status == "offline") {
+        // The newest saved dismissal belongs to the app-wide episode, even
+        // when a refresh omitted the provider that originally stored it.
+        const bool hasOfflineRows = std::any_of(updates.rows.begin(), updates.rows.end(), [](const auto& row) {
+            return row.status == "offline";
+        });
+        const std::time_t carriedDismissal = hasOfflineRows ? latestOfflineNoticeDismissal() : 0;
+        const bool preserveExistingDismissals = !updates.confirmedRecovery && !hasOfflineRows;
+        for (auto& connectivity : updates.rows) {
+            const bool isOffline = connectivity.status == "offline";
+            if (isOffline || preserveExistingDismissals) {
                 const auto existing = storageService.getConnectivityState(
                     connectivity.providerId, connectivity.accountId);
-                const bool wasOffline = existing.has_value() && existing->status == "offline";
-                connectivity.nextRetryAt =
-                    now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
-                if (nextRuntimeState == RuntimeState::Offline) {
-                    const std::time_t previousDismissal = existing.has_value() ? existing->noticeDismissedAt : 0;
-                    connectivity.noticeDismissedAt = std::max(carriedDismissal, previousDismissal);
+                if (isOffline) {
+                    const bool wasOffline = existing.has_value() && existing->status == "offline";
+                    connectivity.nextRetryAt =
+                        now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
+                    connectivity.noticeDismissedAt = carriedDismissal;
+                } else if (existing.has_value()) {
+                    connectivity.noticeDismissedAt = existing->noticeDismissedAt;
                 }
             }
             storageService.upsertConnectivityState(connectivity);
         }
 
-        // A live result ends the saved episode even after a restart and for omitted providers.
-        if (nextRuntimeState != RuntimeState::Offline) {
+        // Confirmed recovery ends the saved episode, including for omitted providers.
+        if (updates.confirmedRecovery) {
             const auto result = storageService.execute(
                 "UPDATE connectivity_state SET notice_dismissed_at_utc = NULL, "
                 "updated_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
@@ -6365,7 +6365,7 @@ public:
         DashboardViewModel& viewModel,
         const DashboardPreferences& preferences,
         std::time_t now,
-        std::vector<PersistedConnectivityState>& connectivityUpdates) {
+        ProviderConnectivityUpdates& connectivityUpdates) {
         bool executedCatchUp = false;
         if (viewModel.runtimeState != RuntimeState::Offline && hasPendingRecovery()) {
             executedCatchUp = executePendingCatchUp(now, viewModel, activeProviderManager());
@@ -6388,7 +6388,7 @@ public:
     void applyRuntimeViewModel(
         const DashboardViewModel& viewModel,
         std::time_t now,
-        std::optional<std::vector<PersistedConnectivityState>> connectivityUpdates = std::nullopt) {
+        std::optional<ProviderConnectivityUpdates> connectivityUpdates = std::nullopt) {
         syncTrayRuntimeIndicator(viewModel);
 
         DashboardViewModel presentedViewModel = viewModel;
@@ -6396,7 +6396,7 @@ public:
             std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
             // Display-only publications have no live connectivity result.
             if (connectivityUpdates.has_value()) {
-                persistConnectivityForPublication(*connectivityUpdates, presentedViewModel.runtimeState, now);
+                persistConnectivityForPublication(*connectivityUpdates, now);
             }
             updateOfflineNotice(presentedViewModel, now);
             publishDashboardWithOfflineNotice(presentedViewModel);
@@ -6653,7 +6653,7 @@ public:
         }
         DashboardViewModel viewModel = buildDashboardViewModel(now);
         viewModel.preferences = preferences;
-        std::vector<PersistedConnectivityState> connectivityUpdates;
+        ProviderConnectivityUpdates connectivityUpdates;
         applyRecoveryPersistenceCycle(viewModel, preferences, now, connectivityUpdates);
         applyPersistedActivitySummaries(viewModel, now);
         applyDashboardOperationalStatus(viewModel);
@@ -7046,7 +7046,7 @@ bool AppController::init(bool launchInBackground) {
         bool usedPersistedStartupHydration = false;
         bool executedStartupCatchUp = false;
         DashboardViewModel viewModel;
-        std::optional<std::vector<PersistedConnectivityState>> connectivityUpdates;
+        std::optional<Impl::ProviderConnectivityUpdates> connectivityUpdates;
         if (const auto hydratedViewModel =
                 pImpl->buildPersistedStartupHydrationViewModel(now, loadedPreferences)) {
             viewModel = *hydratedViewModel;

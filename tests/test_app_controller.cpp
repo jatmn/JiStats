@@ -2456,6 +2456,83 @@ TEST_CASE("AppController clears saved offline dismissal on live recovery after r
     restarted.shutdown();
 }
 
+TEST_CASE("AppController preserves saved offline dismissal through inconclusive quota checks", "[app][runtime][offline_notice][kimi]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, false, false, true);
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        REQUIRE(ensureProviderId(storage, "kimi", "Kimi Code") > 0);
+    }
+    const auto offline = makeFailedQuotaResponse("network unreachable");
+    auto kimi = std::make_shared<ControlledQuotaProviderAdapter>("kimi", "Kimi Code", offline);
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(kimi);
+    ScopedTrayTestHandler handler([](TrayController::TestOperation,
+                                     TrayStatus,
+                                     const std::string&,
+                                     std::string&) -> std::optional<bool> {
+        return true;
+    });
+
+    AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setDisableTaskbarForTesting(true);
+    REQUIRE(app.init());
+    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
+    REQUIRE(app.clickDashboardOfflineDismissForTesting());
+    REQUIRE(waitForCondition([&app]() {
+        return !app.isDashboardOfflineNoticeVisibleForTesting();
+    }, std::chrono::seconds(5)));
+    const auto dismissed = app.getConnectivityStateForTesting("kimi");
+    REQUIRE(dismissed.has_value());
+    REQUIRE(dismissed->noticeDismissedAt > 0);
+
+    kimi->setQuotaResponse(makeFailedQuotaResponse("Kimi quota API credentials are not available"));
+    app.refreshRuntimeForTesting();
+    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Unknown);
+    const auto withoutCredentials = app.getConnectivityStateForTesting("kimi");
+    REQUIRE(withoutCredentials.has_value());
+    CHECK(withoutCredentials->noticeDismissedAt == dismissed->noticeDismissedAt);
+
+    kimi->setQuotaResponse(offline);
+    app.refreshRuntimeForTesting();
+    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
+
+    const std::time_t now = std::time(nullptr);
+    kimi->setQuotaResponse(makeQuotaResponse(now, 4, 10, "interval", "kimi_code_local"));
+    app.refreshRuntimeForTesting();
+    const DashboardViewModel sample = app.getDashboardViewModelForTesting();
+    const auto* sampleKimi = findProviderStatus(sample, "kimi");
+    REQUIRE(sampleKimi != nullptr);
+    CHECK(sampleKimi->state == ProviderState::Sample);
+    const auto withSample = app.getConnectivityStateForTesting("kimi");
+    REQUIRE(withSample.has_value());
+    CHECK(withSample->noticeDismissedAt == dismissed->noticeDismissedAt);
+
+    kimi->setQuotaResponse(offline);
+    app.refreshRuntimeForTesting();
+    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
+
+    kimi->setQuotaResponse(makeQuotaResponse(now, 4, 10, "interval", "kimi_subscription_api"));
+    app.refreshRuntimeForTesting();
+    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Current);
+    const auto recovered = app.getConnectivityStateForTesting("kimi");
+    REQUIRE(recovered.has_value());
+    CHECK(recovered->noticeDismissedAt == 0);
+
+    kimi->setQuotaResponse(offline);
+    app.refreshRuntimeForTesting();
+    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK(app.isDashboardOfflineNoticeVisibleForTesting());
+    app.shutdown();
+}
+
 TEST_CASE("AppController surfaces stale provider runtime state for taskbar validation", "[app][runtime]") {
     TempTestDatabase dbPath;
     const std::time_t now = std::time(nullptr);
