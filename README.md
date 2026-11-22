@@ -57,22 +57,6 @@ Notes:
 - `tools/upx/` is a build/distribution tool path, not a runtime dependency of the app.
 - See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for the current notice file and redistribution notes.
 
-## 🤖 Vibecoded By
-
-This project was lovingly vibecoded by a small parade of AI agents:
-
-- GPT-5.4
-- GPT-5.3-Codex
-- GPT-5.3-Codex-Spark
-- GPT-5-nano
-- DeepSeek v3.2
-- GLM-5
-- Kimi K2.6
-- MiniMax M2.7
-- Claude Sonnet 4.6
-- Claude Opus 4.6
-- Bonsai Ai (Beta)
-
 ## License
 
 JiStats' first-party code is source-available under Apache-2.0 with Commons Clause.
