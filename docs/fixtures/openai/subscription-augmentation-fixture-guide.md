@@ -1,6 +1,6 @@
 # OpenAI Subscription Augmentation Fixture Guide
 
-Use this guide when changing Codex-local parsing or ChatGPT export import. Follow-ups are recorded in the [work tracker](../../progress.md).
+Use this guide when changing Codex-local parsing or ChatGPT export import. Follow-ups are recorded in the [roadmap checklist](../../plan.md#remaining-work).
 
 ## Fixture Families
 

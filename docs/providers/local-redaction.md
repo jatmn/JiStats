@@ -196,7 +196,7 @@ Before any Claude or Kimi local parser grows beyond the boundaries above, update
 
 1. the [provider reference](claude-kimi.md)
 2. this shared contract
-3. the [work tracker](../progress.md)
+3. the [progress log](../progress.md)
 
 Do not widen parser or fixture work first and document the boundary later.
 

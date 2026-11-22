@@ -1,6 +1,6 @@
 # Verify a change
 
-Choose checks for the behavior affected and record the commands, results, and any untested paths in the [tracker handoff](../progress.md#handoffs).
+Choose checks for the behavior affected and record the commands, results, and any untested paths in the [progress log](../progress.md#handoffs).
 
 | Change | Verification |
 | --- | --- |
