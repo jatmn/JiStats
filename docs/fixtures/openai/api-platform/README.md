@@ -20,10 +20,10 @@ The helper writes `readiness-<timestamp>.json` before checking whether a credent
 
 ## Capture Command
 
-Use the repo helper:
+Run the helper from the repository root with `-BucketWidth 1d`. The helper sends the same bucket width to both requests, and the Costs endpoint only accepts daily buckets. [Costs API reference](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/costs)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\capture_openai_api_platform_evidence.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\capture_openai_api_platform_evidence.ps1 -BucketWidth 1d
 ```
 
 The helper:

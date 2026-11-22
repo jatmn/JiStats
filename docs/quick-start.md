@@ -4,6 +4,9 @@ JiStats runs on Windows 11 from a portable folder. If you need the executable, c
 
 ## Launch
 
+> [!IMPORTANT]
+> If a local Codex state database is present, JiStats can read it at startup and save source and thread baselines to its own `jistats.db`, even with OpenAI subscription tracking off. See what JiStats reads and stores in the [Codex SQLite reference](providers/openai.md#codex-sqlite-privacy-boundary).
+
 Use one desktop binary, either `JiStats.exe` or the optional packed `JiStats-upx.exe`. The executable contains the SQLite baseline and can initialize it from any working directory.
 
 ```powershell
@@ -18,7 +21,7 @@ If JiStats warns that it rejected a development database, exit JiStats. Move the
 
 ## Enable providers
 
-Open **File → Settings**. All four provider tracking toggles start off. JiStats can still read a local Codex SQLite database for model attribution with OpenAI subscription tracking off. See the [provider matrix](capability-matrix.md) for setup and the [Codex SQLite reference](providers/openai.md#codex-sqlite-privacy-boundary) for what JiStats reads and stores.
+Open **File → Settings**. All four provider tracking toggles start off. See the [provider matrix](capability-matrix.md) for setup.
 
 ## View and export history
 
