@@ -8,7 +8,7 @@
 
 ## Maintain JiStats
 
-- [Roadmap](plan.md), [work tracker](progress.md), and [release checklist](release-checklist.md) cover product scope, open work, and signoff.
+- [Roadmap and work checklist](plan.md), [progress log](progress.md), and [release checklist](release-checklist.md) cover product scope, handoffs, and signoff.
 - [Runtime and recovery](reference/runtime.md), [storage](reference/storage.md), [dashboard and taskbar](reference/presentation.md), and [Analysis and reporting](reference/reporting.md) document the shared behavior.
 - [TrafficMonitor research](reference/trafficmonitor-research.md) records the taskbar integration patterns JiStats drew on.
 

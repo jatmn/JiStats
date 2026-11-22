@@ -6,7 +6,7 @@ This optional path requires separate API-platform billing and organization crede
 
 The [capture script](../../scripts/capture_openai_api_platform_evidence.ps1) queries organization completions usage and costs using a recent time range. Use the [capture instructions](../fixtures/openai/api-platform/README.md) for credential variables and output paths. Use costs for financial reconciliation and usage for model/request/token activity.
 
-The first live probe on 2026-04-19 reached both endpoints and returned HTTP 403 with `Missing scopes: api.usage.read`. For a successful probe, use an organization credential with the required usage scope, role, and organization context. The [tracker](../progress.md#blocked-backlog) records this dependency as A0.2d.
+The first live probe on 2026-04-19 reached both endpoints and returned HTTP 403 with `Missing scopes: api.usage.read`. For a successful probe, use an organization credential with the required usage scope, role, and organization context. The [roadmap checklist](../plan.md#blocked-backlog) records this dependency as A0.2d.
 
 ## Freshness
 
