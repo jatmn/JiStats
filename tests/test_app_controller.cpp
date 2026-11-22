@@ -30,6 +30,7 @@
 #include "providers/claude/ClaudeCodeAdapter.hpp"
 #include "providers/kimi/KimiAdapter.hpp"
 #include "providers/minimax/MiniMaxAdapter.hpp"
+#include "providers/openai/OpenAIAdapter.hpp"
 #include "providers/openai/OpenAIExportImport.hpp"
 #include "taskbar/TaskbarPresenter.hpp"
 #include "runtime_test_support.hpp"
@@ -2353,6 +2354,8 @@ TEST_CASE("AppController keeps an offline dismissal across a provider handoff an
     CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
     CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
 
+    // OpenAI recovered earlier and has no direct quota API, so its result
+    // does not confirm that MiniMax's outage ended.
     auto preferences = restarted.getDashboardViewModelForTesting().preferences;
     preferences.miniMaxSubscriptionTrackingEnabled = false;
     restarted.applyDashboardPreferencesForTesting(preferences);
@@ -2360,13 +2363,13 @@ TEST_CASE("AppController keeps an offline dismissal across a provider handoff an
     const auto disabled = restarted.getConnectivityStateForTesting("minimax");
     REQUIRE(disabled.has_value());
     CHECK(disabled->status == "offline");
-    CHECK(disabled->noticeDismissedAt == 0);
+    CHECK(disabled->noticeDismissedAt == dismissed->noticeDismissedAt);
 
     preferences.miniMaxSubscriptionTrackingEnabled = true;
     restarted.applyDashboardPreferencesForTesting(preferences);
     CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK(restarted.isDashboardOfflineNoticeVisibleForTesting());
-    CHECK(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
+    CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
+    CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
     restarted.shutdown();
 }
 
@@ -2462,6 +2465,12 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
 
     TempTestDirectory profile("jistats_offline_profile");
     ScopedEnvironmentVariable userProfile("USERPROFILE", profile.path().string());
+    // This Codex rollout predates the dismissal and does not change.
+    const std::time_t rolloutTime = std::time(nullptr) - 30 * 60;
+    writeCodexRolloutFile(
+        profile.path() / ".codex" / "sessions" / "2026" / "04" / "19" / "rollout-existing.jsonl",
+        25.0, rolloutTime, rolloutTime + 5 * 3600);
+    ScopedEnvironmentVariable codexHome("CODEX_HOME", (profile.path() / ".codex").string());
     TempTestDatabase dbPath;
     seedStartupPreferences(dbPath.path(), false, false, false, false, false, true);
     {
@@ -2473,9 +2482,11 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     auto kimi = std::make_shared<ControlledQuotaProviderAdapter>("kimi", "Kimi Code", offline);
     auto claude = std::make_shared<ClaudeCodeAdapter>();
     claude->setMockStatsCachePath("docs/fixtures/claude/stats-cache.redacted.json");
+    auto openai = std::make_shared<OpenAIAdapter>();
     auto providerManager = std::make_shared<ProviderManager>();
     providerManager->addProvider(kimi);
     providerManager->addProvider(claude);
+    providerManager->addProvider(openai);
     ScopedTrayTestHandler handler([](TrayController::TestOperation,
                                      TrayStatus,
                                      const std::string&,
@@ -2506,14 +2517,21 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
 
     auto preferences = app.getDashboardViewModelForTesting().preferences;
     preferences.claudeCodeEnabled = true;
+    preferences.openaiSubscriptionTrackingEnabled = true;
     app.applyDashboardPreferencesForTesting(preferences);
     const DashboardViewModel localOnly = app.getDashboardViewModelForTesting();
+    CHECK(localOnly.runtimeState != RuntimeState::Offline);
     CHECK(findProviderStatus(localOnly, "kimi") == nullptr);
     const auto* localClaude = findProviderStatus(localOnly, "claude_code");
     REQUIRE(localClaude != nullptr);
     CHECK(localClaude->state == ProviderState::Live);
     REQUIRE_FALSE(localClaude->quotas.empty());
     CHECK(localClaude->quotas.front().used > 0);
+    const auto* localCodex = findProviderStatus(localOnly, "openai");
+    REQUIRE(localCodex != nullptr);
+    CHECK(localCodex->state == ProviderState::Live);
+    REQUIRE_FALSE(localCodex->quotas.empty());
+    CHECK(localCodex->quotas.front().limit == 100);
     const auto afterLocalStats = app.getConnectivityStateForTesting("kimi");
     REQUIRE(afterLocalStats.has_value());
     CHECK(afterLocalStats->noticeDismissedAt == dismissed->noticeDismissedAt);

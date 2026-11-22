@@ -3749,11 +3749,19 @@ public:
     struct QuotaRefresh {
         std::uint64_t generation;
         std::set<std::string> fetchedProviderKeys;
+        // Subset of fetchedProviderKeys whose result came from a direct provider API.
+        std::set<std::string> providerApiKeys;
+    };
+
+    struct StagedConnectivity {
+        PersistedConnectivityState connectivity;
+        // The provider returned a non-offline result fetched in this refresh.
+        bool fetchedRecovery = false;
     };
 
     struct ProviderConnectivityUpdates {
-        std::vector<PersistedConnectivityState> rows;
-        bool confirmedRecovery = false;
+        std::vector<StagedConnectivity> rows;
+        bool providerApiConfirmedRecovery = false;
     };
 
     bool initialized = false;
@@ -4065,6 +4073,7 @@ public:
             // The post-catch-up rebuild may reuse a result fetched in this cycle.
             if (pollState.fetchedInRefresh == refresh.generation) {
                 refresh.fetchedProviderKeys.insert(provider->getProviderKey());
+                refresh.providerApiKeys.insert(provider->getProviderKey());
             }
             return pollState.response;
         }
@@ -4080,6 +4089,7 @@ public:
         pollState.response = response;
         pollState.fetchedInRefresh = refresh.generation;
         refresh.fetchedProviderKeys.insert(provider->getProviderKey());
+        refresh.providerApiKeys.insert(provider->getProviderKey());
 
         if (response.success) {
             if (!unchanged || pollState.stableSince <= 0) {
@@ -6045,14 +6055,13 @@ public:
             return connectivityUpdates;
         }
 
-        // Recovery requires quota evidence fetched in this refresh.
-        connectivityUpdates.confirmedRecovery =
+        // Only quota fetched from a provider API in this refresh confirms that
+        // connectivity returned. Local reads and cached responses do not.
+        connectivityUpdates.providerApiConfirmedRecovery =
             std::any_of(viewModel.providers.begin(), viewModel.providers.end(), [&refresh](const auto& provider) {
                 return (provider.state == ProviderState::Live || provider.state == ProviderState::Stale) &&
-                    refresh.fetchedProviderKeys.count(provider.providerKey) != 0 &&
-                    std::any_of(provider.quotas.begin(), provider.quotas.end(), [&provider](const auto& quota) {
-                        return !isLimitlessLocalActivityQuota(provider, quota);
-                    });
+                    refresh.providerApiKeys.count(provider.providerKey) != 0 &&
+                    !provider.quotas.empty();
             }) &&
             std::none_of(viewModel.providers.begin(), viewModel.providers.end(), [](const auto& provider) {
                 return provider.state == ProviderState::Offline;
@@ -6078,7 +6087,8 @@ public:
                 continue;
             }
 
-            PersistedConnectivityState connectivity;
+            StagedConnectivity staged;
+            PersistedConnectivityState& connectivity = staged.connectivity;
             connectivity.providerId = *providerId;
             connectivity.accountId = *runtimeAccountId;
             connectivity.lastCheckedAt = now;
@@ -6106,12 +6116,15 @@ public:
                     (provider.state == ProviderState::Stale ? "stale" : "online");
                 connectivity.failureCategory.clear();
                 connectivity.nextRetryAt = 0;
+                staged.fetchedRecovery =
+                    (provider.state == ProviderState::Live || provider.state == ProviderState::Stale) &&
+                    refresh.fetchedProviderKeys.count(provider.providerKey) != 0;
 
                 syncState.lastSuccessAt = now;
                 syncState.lastFailureCategory.clear();
             }
 
-            connectivityUpdates.rows.push_back(std::move(connectivity));
+            connectivityUpdates.rows.push_back(std::move(staged));
             storageService.upsertSyncState(syncState);
         }
 
@@ -6138,15 +6151,37 @@ public:
         // The newest saved dismissal belongs to the app-wide episode, even
         // when a refresh omitted the provider that originally stored it.
         const bool hasOfflineRows = std::any_of(updates.rows.begin(), updates.rows.end(), [](const auto& row) {
-            return row.status == "offline";
+            return row.connectivity.status == "offline";
         });
         const std::time_t carriedDismissal = hasOfflineRows ? latestOfflineNoticeDismissal() : 0;
-        const bool preserveExistingDismissals = !updates.confirmedRecovery && !hasOfflineRows;
-        for (auto& connectivity : updates.rows) {
+
+        std::vector<std::optional<PersistedConnectivityState>> existingRows;
+        existingRows.reserve(updates.rows.size());
+        for (const auto& row : updates.rows) {
+            existingRows.push_back(storageService.getConnectivityState(
+                row.connectivity.providerId, row.connectivity.accountId));
+        }
+
+        // A provider that was offline in the dismissed outage and now returns a
+        // fetched result has recovered through its own path, even when that path is local.
+        bool confirmedRecovery = updates.providerApiConfirmedRecovery;
+        if (!confirmedRecovery && !hasOfflineRows) {
+            const std::time_t episodeDismissal = latestOfflineNoticeDismissal();
+            for (size_t index = 0; !confirmedRecovery && episodeDismissal > 0 && index < updates.rows.size(); ++index) {
+                const auto& existing = existingRows[index];
+                confirmedRecovery = updates.rows[index].fetchedRecovery &&
+                    existing.has_value() &&
+                    existing->status == "offline" &&
+                    existing->noticeDismissedAt == episodeDismissal;
+            }
+        }
+
+        const bool preserveExistingDismissals = !confirmedRecovery && !hasOfflineRows;
+        for (size_t index = 0; index < updates.rows.size(); ++index) {
+            PersistedConnectivityState& connectivity = updates.rows[index].connectivity;
             const bool isOffline = connectivity.status == "offline";
             if (isOffline || preserveExistingDismissals) {
-                const auto existing = storageService.getConnectivityState(
-                    connectivity.providerId, connectivity.accountId);
+                const auto& existing = existingRows[index];
                 if (isOffline) {
                     const bool wasOffline = existing.has_value() && existing->status == "offline";
                     connectivity.nextRetryAt =
@@ -6160,7 +6195,7 @@ public:
         }
 
         // Confirmed recovery ends the saved episode, including for omitted providers.
-        if (updates.confirmedRecovery) {
+        if (confirmedRecovery) {
             const auto result = storageService.execute(
                 "UPDATE connectivity_state SET notice_dismissed_at_utc = NULL, "
                 "updated_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
@@ -6539,6 +6574,7 @@ public:
 
     DashboardViewModel buildDashboardViewModel(std::time_t now, QuotaRefresh& refresh) {
         refresh.fetchedProviderKeys.clear();
+        refresh.providerApiKeys.clear();
 #ifdef JISTATS_ENABLE_TEST_HOOKS
         if (testProviderManager) {
             const auto providers = testProviderManager->getEnabledProviders();
@@ -6675,7 +6711,7 @@ public:
         if (importLocalActivity) {
             importEnabledLocalProviderActivity(preferences);
         }
-        QuotaRefresh refresh{++quotaRefreshGeneration, {}};
+        QuotaRefresh refresh{++quotaRefreshGeneration, {}, {}};
         DashboardViewModel viewModel = buildDashboardViewModel(now, refresh);
         viewModel.preferences = preferences;
         ProviderConnectivityUpdates connectivityUpdates;
@@ -7079,7 +7115,7 @@ bool AppController::init(bool launchInBackground) {
         } else {
             pImpl->runProviderDiscovery();
             pImpl->importEnabledLocalProviderActivity(loadedPreferences);
-            Impl::QuotaRefresh refresh{++pImpl->quotaRefreshGeneration, {}};
+            Impl::QuotaRefresh refresh{++pImpl->quotaRefreshGeneration, {}, {}};
             viewModel = pImpl->buildDashboardViewModel(now, refresh);
             viewModel.preferences = loadedPreferences; // Use persisted preferences
             executedStartupCatchUp =
