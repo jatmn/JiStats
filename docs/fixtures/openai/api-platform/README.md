@@ -1,8 +1,6 @@
 # OpenAI API-Platform Capture
 
-> **Status**: Capture helper ready; the first live API-platform probe returned an authorization error, but usage/cost freshness is still blocked until a credential with `api.usage.read` exists
-
-This directory is reserved for the optional OpenAI API-platform evidence set.
+This directory documents the optional OpenAI API-platform probe. The initial probe reached both endpoints and received HTTP 403. Usage and cost freshness remain unverified.
 
 It is intentionally separate from the subscription-first OpenAI fixture set so JiStats does not mix:
 
@@ -11,11 +9,10 @@ It is intentionally separate from the subscription-first OpenAI fixture set so J
 - `openai_subscription_export_import`
 - `openai_api_import`
 
-## Expected Files
+## Local output files
 
-When the optional API-platform path is available, this folder should contain:
+The helper writes `readiness-<timestamp>.json` before checking whether a credential is available. If it can make the requests, it also writes:
 
-- `readiness-<timestamp>.json`
 - `usage-<timestamp>.json`
 - `costs-<timestamp>.json`
 - `capture-<timestamp>.metadata.json`
@@ -33,7 +30,7 @@ The helper:
 
 - reads `OPENAI_ADMIN_KEY` first, then falls back to `OPENAI_API_KEY`
 - optionally sends `OpenAI-Organization` when `OPENAI_ORG_ID` or `OPENAI_ORGANIZATION` is set
-- captures the minimum Worktree A probe set:
+- queries both organization endpoints:
   - `GET /v1/organization/usage/completions`
   - `GET /v1/organization/costs`
 - writes raw JSON, a small metadata file recording request parameters and status codes, and a note template for freshness/lag plus any identifier redaction notes
@@ -42,16 +39,6 @@ The helper:
 
 The first live probe returned `403` from both organization endpoints because the credential lacked `api.usage.read`.
 
-That means the directory already serves two purposes:
-
-- a local `readiness-*.json` record for authorization and credential checks
-- future successful usage/cost capture once the higher-scope credential exists
-
-Freshness / lag is still blocked because the tested credential lacks:
-
-- `api.usage.read`
-- the correct organization-scoped role and, when needed, explicit org context
-
-Successful usage and cost responses still need validation with a credential that has the required scope.
+To validate freshness, use a credential with `api.usage.read`, the correct organization-scoped role, and explicit organization context when needed. See the [provider validation guide](../../../providers/openai-api-platform.md) for what to record.
 
 The capture helper writes raw output under `%LOCALAPPDATA%/JiStats/captures/openai/api-platform` by default. Keep those files local.

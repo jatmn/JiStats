@@ -1,6 +1,6 @@
 # Portable quick start
 
-JiStats runs on Windows 11 from a portable folder. If you are building from source, see [Build and packaging](../README.md#build-and-packaging).
+JiStats runs on Windows 11 from a portable folder. If you need the executable, check [GitHub Releases](https://github.com/jatmn/JiStats/releases) for a published bundle or follow [Build and packaging](../README.md#build-and-packaging) to build it from source.
 
 ## Launch
 
@@ -18,7 +18,7 @@ If JiStats warns that it rejected a development database, exit JiStats. Move the
 
 ## Enable providers
 
-Open **File → Settings**. All integrations begin disabled. The [provider matrix](capability-matrix.md) explains setup and available data for OpenAI / Codex, MiniMax, Claude Code, and Kimi Code.
+Open **File → Settings**. All four provider tracking toggles start off. JiStats can still read a local Codex SQLite database for model attribution with OpenAI subscription tracking off. See the [provider matrix](capability-matrix.md) for setup and the [Codex SQLite reference](providers/openai.md#codex-sqlite-privacy-boundary) for what JiStats reads and stores.
 
 ## View and export history
 

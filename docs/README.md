@@ -19,4 +19,4 @@
 - [Testing](validation/testing.md), the [SQLite quality gate](validation/sqlite-quality-gate.md), and [desktop validation](validation/desktop.md) explain how to verify a change.
 - [Provider validation record](validation/provider-evidence-2026-04-21.md) captures dated live checks. [OpenAI API-platform validation](providers/openai-api-platform.md) covers the optional probe.
 
-The [pre-cleanup documentation snapshot](https://github.com/jatmn/JiStats-public-prep/tree/fd934179646f130fe346a20fb1ca7d82162902f6/docs) contains the original phase plans, design explorations, and detailed closeout records.
+The [pre-cleanup documentation snapshot](https://github.com/jatmn/JiStats/tree/fd934179646f130fe346a20fb1ca7d82162902f6/docs) contains the original phase plans, design explorations, and detailed closeout records.

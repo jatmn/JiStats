@@ -8,17 +8,21 @@ The [pull request lint workflow](../.github/workflows/lint.yml) checks changed C
 
 ## Active work
 
-Follow the [release queue](release-checklist.md#evidence-backed-release-queue) and use the [Windows SQLite quality gate](validation/sqlite-quality-gate.md) for automated build and test results. Phases 0–7 are closed for the current implementation scope.
+Follow the [release queue](release-checklist.md#evidence-backed-release-queue) and use the [SQLite quality gate](validation/sqlite-quality-gate.md) for automated build and test results. Phases 0–7 are closed for the current implementation scope.
 
-[PR #5](https://github.com/jatmn/JiStats/pull/5) removed the dormant Dear ImGui build path and trimmed spdlog to its headers and license. Verify the cleanup with the Windows Debug build and test suite.
+Verify the packaged SQLite baseline, historical version 12 repair, and the older-database warning in the Windows release-candidate checks. The [release queue](release-checklist.md#evidence-backed-release-queue) tracks that signoff.
 
-SQLite baseline consolidation is in progress. New databases start at schema version 12. JiStats repairs artifacts missing from either historical migration `010` on reopen and warns before running with persistence disabled when it rejects versions 1 through 11. Concurrent startup rechecks the schema after acquiring the SQLite write transaction so both instances can use the repaired database. Follow the [release queue](release-checklist.md#evidence-backed-release-queue) for Windows checks.
+Complete the [CodeQL cutover](validation/testing.md#codeql-scanning). The repository workflow is active, with GitHub-managed default setup still publishing results.
 
-Verify that [Pullfrog automatic reviews](../CONTRIBUTING.md#pullfrog) run on an owner-authored draft and a subsequent push.
+The local [Codex SQLite import](providers/openai.md#codex-sqlite-privacy-boundary) can run at startup with OpenAI subscription tracking off. The setting behavior remains an open follow-up under the opt-in policy.
+
+Confirm that [Pullfrog automatic reviews](../CONTRIBUTING.md#pullfrog) run while an owner-authored PR is still a draft.
 
 ## Handoffs
 
 Update the tracker when work changes state. At handoff, record what changed, the revision, the verification commands and results, and any blocker or next step. Keep dated release evidence in the release checklist. Record new decisions with their rationale and link to the current contract.
+
+- Audited the documentation against main at `eba30e2`. Updated the quick start, Codex SQLite behavior, build and CI guidance, and release evidence. The [Linux CMake/Ninja build](../README.md#building-on-linux) passed CTest with bundled SQLite, covering 125 cases and 920 assertions. The CodeQL cutover and Codex SQLite setting behavior remain open.
 
 - Fixed an intermittent shutdown hang seen in the [Windows test stack trace](https://github.com/jatmn/JiStats/actions/runs/45066218501/job/137343424464). AppController now sets the stop flag while holding both worker wait mutexes before waking and joining the workers. A controlled shutdown interleaving reproduced the missed wakeup and verified the fix.
 
@@ -36,10 +40,14 @@ Update the tracker when work changes state. At handoff, record what changed, the
 
 | Decision | Where it applies |
 | --- | --- |
-| Codex SQLite is an opt-in local usage-attribution source. Rollouts supply Codex quota. | [OpenAI sources and privacy](providers/openai.md#sources-and-boundaries) |
+| Codex SQLite stays local and supplies model attribution. Rollouts supply Codex quota. | [OpenAI sources and privacy](providers/openai.md#sources-and-boundaries) |
 | The v1.0 release uses a portable bundle. | [Portable launch and upgrade](quick-start.md#launch) |
 
 ## Recently completed
+
+- [PR #5](https://github.com/jatmn/JiStats/pull/5) removed the dormant Dear ImGui build path and trimmed spdlog to its headers and license. [Integrated CI](https://github.com/jatmn/JiStats/actions/runs/45068074135) built the trimmed checkout and passed the full Windows suite.
+- [PR #6](https://github.com/jatmn/JiStats/pull/6) consolidated new databases onto schema version 12, added in-place repair for both historical version 12 layouts, and added the startup warning for rejected versions 1–11. Concurrent startup rechecks the version 12 schema inside the write transaction. See the [storage reference](reference/storage.md#migration-behavior).
+- [PR #16](https://github.com/jatmn/JiStats/pull/16) received automatic Pullfrog reviews on multiple heads after it was marked ready. The [contributor guide](../CONTRIBUTING.md#pullfrog) describes the authorization path.
 
 - Linux developers can run the portable Catch2 suite with CMake and Ninja. MinGW-w64 builds the Windows release binaries and powers CI for code PRs, protected-branch pushes, and manual runs. The full suite executes on a hosted Windows runner. See the [build instructions](../README.md#building-on-linux) and [CI verification guide](validation/testing.md#continuous-integration).
 
@@ -62,7 +70,7 @@ Update the tracker when work changes state. At handoff, record what changed, the
 | --- | --- | --- | --- |
 | `⏸️ DEFERRED` | Expand OpenAI API-platform import beyond the initial validation pass | `v1.x` refinement | Keep richer importer UX and broader endpoint coverage separate from the subscription-first OpenAI story. Revisit the adapter's 0–100 quota representation when a new quota surface needs richer fields, and extend provider-surface population beyond the current Codex-local quota path when additional OpenAI sources land. |
 | `⏸️ DEFERRED` | Extend OpenAI subscription fixtures and export inputs | `v1.x` refinement | A redacted consumer-dashboard capture is still optional. Raw `.zip` handling and its fixture coverage, and a UI picker for an extracted export directory, are future work. |
-| `⏸️ DEFERRED` | Refine the Analysis workspace | `v1.x` refinement | Candidate slices include interactive drill-down, richer scope presets, comparisons, and export preview. The [archived design record](https://github.com/jatmn/JiStats-public-prep/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/in-app-reporting-and-analysis-spike.md) preserves the rationale and acceptance questions. |
+| `⏸️ DEFERRED` | Refine the Analysis workspace | `v1.x` refinement | Candidate slices include interactive drill-down, richer scope presets, comparisons, and export preview. The [archived design record](https://github.com/jatmn/JiStats/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/in-app-reporting-and-analysis-spike.md) preserves the rationale and acceptance questions. |
 | `⏸️ DEFERRED` | Extend MiniMax PAYG support beyond the first real-surface validation pass | `v1.x` refinement | Keep broader PAYG runtime UX and scheduled polling behind the current subscription-first v1.0 baseline. |
 | `⏸️ DEFERRED` | Decide post-v1.x provider expansion order beyond the four-provider v1.0 baseline | Post-v1.x | Kilo Code and broader provider expansion stay deferred until OpenAI + MiniMax + Claude + Kimi ship and stabilize. |
 | `⚪ TODO` | Redact Codex rollout raw response persistence | Privacy hardening | `OpenAIAdapter` still forwards full local rollout JSONL/file content through `snapshot.rawResponse` / `QuotaResponse::rawResponse`. Replace with parsed quota fields plus minimal sanitized provenance so local Codex session metadata cannot leak into persisted diagnostics or UI/reporting paths. |
@@ -96,4 +104,4 @@ Reviewed the four superseded plans and related Analysis and fixture plans agains
 - Keep the taskbar overlay scoped to subscription quota. Codex throughput belongs in dashboard/Analysis and may provide OpenAI hover context. Local activity and SQLite model attribution stay out of the overlay metrics.
 - Keep optional OpenAI organization usage/cost validation and expanded MiniMax PAYG work outside the subscription-first release scope.
 
-Earlier task-by-task closeouts, decisions, and benchmarking are available in the [archived tracker](https://github.com/jatmn/JiStats-public-prep/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/progress.md).
+Earlier task-by-task closeouts, decisions, and benchmarking are available in the [archived tracker](https://github.com/jatmn/JiStats/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/progress.md).

@@ -1,6 +1,6 @@
 # OpenAI and Codex
 
-OpenAI tracking is opt-in and subscription-first. Disabling it stops new subscription collection and preserves persisted history. The setting rehydrates before startup refresh. Enabling schedules a refresh during the running session. Keep late in-flight results from overriding a newly disabled state. Use the [provider-path tests](../../tests/test_provider_data_path.cpp) and [controller tests](../../tests/test_app_controller.cpp) when changing activation or startup behavior.
+OpenAI subscription tracking is opt-in. Disabling it stops new rollout quota and throughput collection and preserves persisted history. The setting rehydrates before startup refresh. Enabling schedules a refresh during the running session. Manual ChatGPT export import and local Codex SQLite model attribution are separate paths. Keep late in-flight results from overriding a newly disabled state. Use the [provider-path tests](../../tests/test_provider_data_path.cpp) and [controller tests](../../tests/test_app_controller.cpp) when changing activation or startup behavior.
 
 ## Sources and boundaries
 
@@ -18,13 +18,15 @@ The [throughput query](../../src/reporting/AnalysisQueryEngine.cpp) calculates d
 
 ### Codex SQLite privacy boundary
 
+The [app controller](../../src/app/AppController.cpp) checks for a local Codex state database at startup and during Analysis data refreshes, including when OpenAI subscription tracking is off. It looks for `state_5.sqlite` under `CODEX_HOME`, then `.codex` under the user profile or home directory.
+
 The [read-only SQLite reader](../../src/providers/openai/CodexLocalSqliteReader.cpp) limits its `threads` query to `id`, `model_provider`, `model`, `reasoning_effort`, `tokens_used`, `created_at_ms`, and `updated_at_ms`. Apply the same allowlist to fixtures. Exclude `title`, `cwd`, prompts, messages, conversation bodies, authentication and configuration data, API keys, and bearer tokens from ingestion, persistence, and fixtures.
 
-The [importer](../../src/providers/openai/CodexLocalUsageImporter.cpp) establishes a baseline on first scan. Later scans import eligible OpenAI and HICAP deltas and new threads. The freshness check considers WAL and SHM sidecars. Overview uses 5-minute model buckets from this source.
+On the first scan, the [importer](../../src/providers/openai/CodexLocalUsageImporter.cpp) saves source and thread baselines in the JiStats database. Later scans persist eligible usage deltas and data for new OpenAI and HICAP threads. The freshness check considers WAL and SHM sidecars. Overview uses 5-minute model buckets from this source.
 
 ## Import ChatGPT history
 
-Extract the official export. In **File → Import OpenAI Export…**, select the extracted `conversations.json` and keep it with the export's companion files. The [importer](../../src/providers/openai/OpenAIExportImport.cpp) accepts the extracted directory or its `conversations.json` when a recognized companion file is present. The app picker selects the JSON file. Raw ZIP import is deferred.
+Extract the official export. In **File → Import OpenAI Export…**, select the extracted `conversations.json`. Keep at least one recognized companion file beside it (`chat.html`, `message_feedback.json`, or `user.json`). The [importer](../../src/providers/openai/OpenAIExportImport.cpp) accepts the extracted directory or its `conversations.json`. The app picker selects the JSON file. Raw ZIP import is deferred.
 
 The importer records timestamped user messages as historical activity. Live quota, reset times, and exact token or cost totals come from their own sources. Use the [export fixture and redaction note](../fixtures/openai/chatgpt-export-derived-fixture-note.md) and the [augmentation fixture checklist](../fixtures/openai/subscription-augmentation-fixture-guide.md) when changing the parser or import flow.
 

@@ -12,4 +12,4 @@ The first live probe on 2026-04-19 reached both endpoints and returned HTTP 403 
 
 Once authorized, compare returned bucket timestamps and totals against known recent API activity over repeated polls. Record the delay before usage and costs become visible. Record usage and cost behavior separately. Keep raw captures, organization/project identifiers, and credentials outside the checkout. Use a redacted summary or synthetic fixture when contributing evidence.
 
-See the [organization usage and costs reference](https://platform.openai.com/docs/api-reference/usage/costs) and the [dated provider validation record](../validation/provider-evidence-2026-04-21.md).
+See the [organization usage and costs reference](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage) and the [dated provider validation record](../validation/provider-evidence-2026-04-21.md).

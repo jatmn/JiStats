@@ -6,4 +6,4 @@ No general consumer quota API was validated in that work. Keep automated collect
 
 Recursive rollout discovery was selected for quota. The examined Codex SQLite thread metadata did not supply rate-limit fields. JiStats now uses that SQLite source separately for sanitized model attribution. See the [OpenAI provider reference](../../providers/openai.md) for the current paths.
 
-A redacted Codex Usage Dashboard capture remains optional. Follow [consumer artifact redaction](codex-consumer-artifact-redaction-note.md) if adding one. The [original evidence and references](https://github.com/jatmn/JiStats-public-prep/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/fixtures/openai/subscription-surface-notes.md) preserve the research record.
+A redacted capture of the Codex usage surface remains optional. Follow [consumer artifact redaction](codex-consumer-artifact-redaction-note.md) if adding one. The [original evidence and references](https://github.com/jatmn/JiStats/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/fixtures/openai/subscription-surface-notes.md) preserve the research record.

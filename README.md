@@ -4,12 +4,14 @@
 
 JiStats is a local-first Windows 11 desktop app for monitoring AI provider quota, recent activity, and usage history. It supports OpenAI / Codex, MiniMax, Claude Code, and Kimi Code. Enable the integrations you use in Settings.
 
-- [Quick start](docs/quick-start.md) covers the portable app.
+- [Quick start](docs/quick-start.md) covers getting and launching the portable app.
 - [Provider support](docs/capability-matrix.md) explains the quota and history each integration can show.
 - [Documentation](docs/README.md) links to architecture, validation, and project planning.
 - [Release checklist](docs/release-checklist.md) tracks v1.0 signoff.
 
 ## Build and packaging
+
+The build and test commands below use CMake 3.20 or newer.
 
 ### Building on Linux
 
@@ -30,13 +32,13 @@ cmake -S . -B build-mingw -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw
 cmake --build build-mingw
 ```
 
-`build-mingw/bin/` then holds `JiStats.exe` and `JiStatsMiniMaxCli.exe`. Add `-DJISTATS_BUILD_TESTS=ON` for `JiStatsTests.exe`. The executables link the MinGW runtime statically. ImageMagick replaces the Windows-only PowerShell step that builds the app icon. The bundled `tools/upx/upx.exe` only runs on Windows, so packed `-upx` variants need a `upx` on `PATH`.
+`build-mingw/bin/` then holds `JiStats.exe` and `JiStatsMiniMaxCli.exe`. Add `-DJISTATS_BUILD_TESTS=ON` for `JiStatsTests.exe`. The executables link the MinGW runtime statically. ImageMagick generates the app icon when cross-building. To produce `JiStats-upx.exe`, put a Linux `upx` on `PATH` or pass `-DJISTATS_UPX_EXECUTABLE=/path/to/upx` at configure time.
 
 Cross-builds use bundled SQLite by default. With bundled or statically linked SQLite, you can copy the executables to Windows without extra DLLs. To use `-DJISTATS_USE_SYSTEM_SQLITE=ON`, install SQLite built for Windows x64 into the MinGW target prefix or set `CMAKE_FIND_ROOT_PATH` to the Windows dependency prefix. If the build links a shared SQLite package, copy that package's SQLite DLL (typically `sqlite3.dll`) alongside the executables. Configure in a fresh build directory if CMake previously cached Linux SQLite paths.
 
 For a portable release, take `JiStats.exe` from `build-mingw/bin/` (it embeds the SQLite baseline) and include the [redistribution notices](#license), including the [toolchain notices for MinGW builds](THIRD_PARTY_NOTICES.md#mingw-w64-and-winpthreads). The CLI and test executable are developer tools. Follow the [release checklist](docs/release-checklist.md) to smoke-test the assembled bundle on Windows.
 
-GitHub Actions uses MinGW-w64 for pull requests, protected-branch pushes, and manual builds. Linux runs the portable tests and Windows runs the full cross-built test executable. See the [verification guide](docs/validation/testing.md).
+For changes that require a build, GitHub Actions runs the portable tests and MinGW-w64 cross-build on Linux, then runs the full suite on Windows. See the [verification guide](docs/validation/testing.md#continuous-integration) for build triggers and manual dispatch.
 
 ### Building on Windows
 
@@ -51,7 +53,7 @@ ctest --test-dir build-ucrt --output-on-failure
 
 Release outputs are in `build-ucrt/bin/`. On Windows, the optional packed `JiStats-upx.exe` uses the bundled UPX. Configure with `-DJISTATS_ENABLE_UPX=OFF` to omit it.
 
-An existing Visual Studio build tree also works with `pwsh -File .\scripts\build_release.ps1`. The helper stops running JiStats binaries to release file locks and builds the Release configuration in `build/bin/Release/`.
+For an existing Visual Studio build tree, run `pwsh -File .\scripts\build_release.ps1 -BuildDir build`. Replace `build` with your configured directory. The helper stops running JiStats binaries to release file locks and builds the Release configuration. The Visual Studio generator puts executables under that directory's `bin/Release/`.
 
 ## 📦 Third-Party Components
 

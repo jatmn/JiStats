@@ -38,4 +38,4 @@ Record all three results. The schema version must be `12`, and both existence ch
 | 2026-04-20 | Live dark-theme display pass with transparency, OpenAI dual-window and MiniMax single-window rows, and TrafficMonitor placement. Low-quota styling, Kimi quota, and Claude activity were outside this pass. |
 | 2026-04-21 | Scripted Release shell pass covered three right-click/click-away cycles and Explorer restart recovery. The focused `[taskbar]` suite recorded 230 assertions across 27 cases. Hover suppression and recovery rely on focused test coverage. |
 
-See the [archived taskbar record](https://github.com/jatmn/JiStats-public-prep/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/taskbar-manual-validation.md) for the original evidence matrix.
+See the [archived taskbar record](https://github.com/jatmn/JiStats/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/taskbar-manual-validation.md) for the original evidence matrix.

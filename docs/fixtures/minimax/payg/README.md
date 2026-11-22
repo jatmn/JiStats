@@ -2,7 +2,7 @@
 
 > **Status**: Dedicated PAYG-key validation returned per-request usage
 
-This directory stores the dedicated-key MiniMax PAYG validation artifacts.
+This directory documents the dedicated-key MiniMax PAYG probe. The helper stores raw captures outside the checkout by default.
 
 It is intentionally separate from the MiniMax subscription `coding_plan/remains` and `token_plan/remains` fixture set so JiStats does not mix:
 
@@ -10,7 +10,7 @@ It is intentionally separate from the MiniMax subscription `coding_plan/remains`
 - PAYG per-request usage evidence
 - undocumented endpoint probing
 
-## Expected Files
+## Local output files
 
 - `completion-<timestamp>.json`
 - `completion-<timestamp>.headers.txt`

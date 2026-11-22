@@ -11,11 +11,9 @@ These inputs exist to settle three remaining MiniMax questions without inventing
 - whether the returned `start_time` / `end_time` windows move on a fixed reset boundary or a rolling interval
 - how fresh the remains payload appears around a reset boundary
 
-## Current Archived Observation Status
+## Initial evidence and fixtures
 
-The committed fixture archive currently contains one remains snapshot per validated subscription surface from `2026-04-17`.
-
-That is enough to confirm the field inventory, but it is **not** enough to settle reset semantics.
+The [April 17 validation](api-validation-2026-04-17.md) confirmed the fields returned by each subscription surface. The checked-in [fixture examples](README.md) are synthetic. Use the [reset-window findings](reset-window-evidence-log.md) for the later rollover evidence.
 
 Important nuance from the single archived payloads:
 

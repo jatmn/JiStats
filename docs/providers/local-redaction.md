@@ -215,4 +215,4 @@ This contract decides only:
 ## Related Files
 
 - [Fixture inventory](../fixtures/README.md)
-- [Original feasibility research](https://github.com/jatmn/JiStats-public-prep/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/phase7-claude-kimi-feasibility.md)
+- [Original feasibility research](https://github.com/jatmn/JiStats/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/phase7-claude-kimi-feasibility.md)
