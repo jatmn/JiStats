@@ -76,6 +76,18 @@ The repo now has a dedicated SQLite-enabled verification lane:
 
 This is the current highest-signal automated storage/migration gate because it configures a clean bundled-SQLite build, builds `JiStatsTests`, and runs the full suite through `ctest`.
 
+### Pull Request Lint
+
+The [Lint workflow](../.github/workflows/lint.yml) checks changed first-party C and C++ lines under `src/`, `include/`, and `tests/` against `.clang-format` with LLVM 18. It runs `actionlint` on GitHub Actions definitions when a workflow changes.
+
+To preview formatting fixes locally, substitute the pull request's target branch for `origin/main` if needed.
+
+```bash
+git-clang-format-18 --binary clang-format-18 --diff "$(git merge-base origin/main HEAD)" HEAD -- src/ include/ tests/
+```
+
+Use `scripts/run_clang_quality_gate.ps1` for full-tree formatting and `clang-tidy` analysis on Windows.
+
 ## Fixture Archive Reality
 
 Fixture material now lives primarily under `docs/fixtures/`, not `test/fixtures/`.

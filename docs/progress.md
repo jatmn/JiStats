@@ -4,6 +4,8 @@ This file tracks JiStats work and handoffs. The [roadmap](plan.md) records scope
 
 The repository includes an automatic [Windows SQLite workflow](../.github/workflows/ci.yml) on GitHub Actions. Public-facing fixtures use synthetic or redacted examples. Raw provider captures stay local. The [security policy](../SECURITY.md) covers private vulnerability reports.
 
+The [pull request lint workflow](../.github/workflows/lint.yml) checks changed C and C++ lines and validates GitHub Actions definitions when they change. See the [test strategy](test-strategy.md#pull-request-lint) for local verification.
+
 ## 📍 How To Use This File
 
 - Update this file whenever work changes state.
