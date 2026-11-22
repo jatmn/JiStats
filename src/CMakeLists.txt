@@ -237,6 +237,7 @@ try {
                 ${JISTATS_ICON_SCRIPT}
             VERBATIM
         )
+        file(TO_NATIVE_PATH "${JISTATS_GENERATED_ICON}" JISTATS_GENERATED_ICON_NATIVE)
     else()
         # Cross-compiling from Linux or macOS: System.Drawing is Windows-only, so
         # build the same icon sizes with ImageMagick instead.
@@ -256,9 +257,10 @@ try {
                 ${CMAKE_SOURCE_DIR}/cmake/GenerateAppIcon.cmake
             VERBATIM
         )
+        # The resource header needs a file path without POSIX shell escaping.
+        set(JISTATS_GENERATED_ICON_NATIVE "${JISTATS_GENERATED_ICON}")
     endif()
 
-    file(TO_NATIVE_PATH "${JISTATS_GENERATED_ICON}" JISTATS_GENERATED_ICON_NATIVE)
     string(REPLACE "\\" "\\\\" JISTATS_GENERATED_ICON_ESCAPED "${JISTATS_GENERATED_ICON_NATIVE}")
     file(GENERATE
         OUTPUT ${JISTATS_RESOURCE_INCLUDE}
