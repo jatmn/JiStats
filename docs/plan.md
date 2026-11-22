@@ -4,7 +4,7 @@ This roadmap records product scope, architecture, and milestone decisions. See t
 
 ## 1. 📌 Summary
 
-JiStats is a lightweight Windows 11 desktop application for monitoring local AI usage.
+JiStats is a lightweight Windows 11 desktop application for monitoring AI usage from a local machine.
 
 OpenAI and Codex remain the primary proof-of-concept provider for v1.0 validation depth, MiniMax remains in initial scope, and Phase 7 now brings Claude Code and Kimi Code into the v1.0 release through bounded local-first support.
 

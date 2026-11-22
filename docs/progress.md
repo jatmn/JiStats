@@ -41,7 +41,7 @@ Reviewed the four superseded plans and related Analysis and fixture plans agains
 | --- | --- | --- |
 | Provider-fed data path | [AppController](../src/app/AppController.cpp) registers production adapters and routes quota through ProviderManager. [OpenAIAdapter](../src/providers/openai/OpenAIAdapter.cpp) uses local Codex rollouts and reports missing, empty, and invalid input. [Adapter fixture tests](../tests/openai_fixture_tests.cpp) exercise successful and failed quota fetches. [Provider-path tests](../tests/test_provider_data_path.cpp) exercise application routing with injected adapters. | The optional real-adapter controller fixture and finer parser diagnostics are tracked below. Full provider-history fetch during startup remains outside this slice. |
 | Codex rollout throughput and isolation correction | AppController stores timestamped, deduplicated `codex_local_rollout` events. [AnalysisQueryEngine](../src/reporting/AnalysisQueryEngine.cpp) uses persisted events and computes token deltas within each rollout. The subscription report, recovery, and rollup paths exclude these events. The dashboard and Analysis show 5m/30m rates, with [query](../tests/test_analysis_query_engine.cpp) and [rollup](../tests/test_storage_usage_rollups.cpp) coverage. | The direct-file query workaround is superseded. The proposed 5h rate and standalone taskbar gauges remain deferred. The OpenAI hover tooltip can show throughput context. Direct controller import coverage and database-level deduplication remain optional follow-ups. |
-| Codex SQLite usage by model | [Migration 012](../db_migrations/012_add_codex_local_sqlite_usage.sql), the [read-only reader](../src/providers/openai/CodexLocalSqliteReader.cpp), and the [importer](../src/providers/openai/CodexLocalUsageImporter.cpp) are wired into the app. First scan establishes a baseline. Later scans import deltas and eligible new threads for OpenAI and HICAP. The read gate includes WAL/SHM metadata, and Overview shows 5-minute model buckets from those events. [Importer tests](../tests/test_codex_local_usage_import.cpp) cover baseline, growth, new threads, and repeat scans. | Overview queries this source directly and general usage rollups exclude it. The proposed dedicated sync checkpoint and shared event/state transaction were never added. MiniMax attribution is deferred. Live Windows first-run, refresh, and chart smoke coverage is unverified. |
+| Codex SQLite usage by model | [Migration 012](../db_migrations/012_add_codex_local_sqlite_usage.sql), the [read-only reader](../src/providers/openai/CodexLocalSqliteReader.cpp), and the [importer](../src/providers/openai/CodexLocalUsageImporter.cpp) are wired into the app. First scan establishes a baseline. Later scans import deltas and eligible new threads for OpenAI and HICAP. The import freshness check includes WAL/SHM metadata, and Overview shows 5-minute model buckets from those events. [Importer tests](../tests/test_codex_local_usage_import.cpp) cover baseline, growth, new threads, and repeat scans. | Overview queries this source directly and general usage rollups exclude it. The proposed dedicated sync checkpoint and shared event/state transaction were never added. MiniMax attribution is deferred. Live Windows first-run, refresh, and chart smoke coverage is unverified. |
 | Analysis and reporting | The dashboard launches the dedicated Analysis workspace with persisted scope, history, trends, and provenance. Manual and scheduled HTML export use the shared scope. The [first slice](in-app-reporting-first-slice.md) records the original design. | The initial slice is closed. Further drill-down, scope presets, comparisons, and export preview remain deferred. |
 | OpenAI subscription fixtures | The rate-limit sample, redacted rollout, and extracted ChatGPT export fixture are available. [Fixture replay](../tests/openai_fixture_tests.cpp) covers Codex parsing, and [import tests](../tests/test_openai_export_import.cpp) cover extracted export input and raw archive rejection. | Direct archive support and the optional consumer-dashboard capture remain deferred. The [fixture guide](fixtures/openai/subscription-augmentation-fixture-guide.md) records test expectations. |
 
@@ -50,6 +50,8 @@ Reviewed the four superseded plans and related Analysis and fixture plans agains
 The [release checklist](release-checklist.md#evidence-backed-release-queue) is the active v1.0 queue. Start with the Windows CI startup timing failure.
 
 ## ✅ Recently Completed
+
+Keep this section focused on the most recent release-shaping work. Older milestone detail now lives in `docs/plan.md`, the phase-specific docs, and git history.
 
 | Status | Item | Notes |
 | --- | --- | --- |
@@ -81,6 +83,7 @@ The [release checklist](release-checklist.md#evidence-backed-release-queue) is t
 - The dashboard Overview model chart area now has a taller layout, matching hover-point details for model token buckets, and a one-minute refresh timer with small per-chart countdown labels while the dashboard window remains open. The model-usage import freshness check includes `state_5.sqlite-wal` / `state_5.sqlite-shm` sidecar metadata so active SQLite WAL writes are not skipped as unchanged.
 - Codex usage-by-model chart aggregation uses 5-minute buckets for the last-24-hour local SQLite view; this keeps active recent deltas visible as separate points rather than collapsing them into hourly buckets.
 - The taskbar overlay itself remains subscription-quota-only, but the OpenAI hover tooltip can include local Codex throughput context for the last 5 and 30 minutes when that Analysis data is available.
+- Taskbar overlay scope is subscription quota only. Codex throughput and local SQLite token attribution may appear in dashboard/Analysis surfaces, but must not feed taskbar overlay request/token-rate summaries.
 
 Closed implementation lanes:
 
@@ -96,8 +99,6 @@ Guardrails:
 - Treat the remaining queue as release signoff and documentation truthfulness work first; do not reopen closed Phase 6/7 implementation lanes unless a concrete regression is found.
 
 ### Earlier closeouts
-
-Keep this section focused on the most recent release-shaping work. Older milestone detail now lives in `docs/plan.md`, the phase-specific docs, and git history.
 
 | Status | Item | Notes |
 | --- | --- | --- |
@@ -172,7 +173,7 @@ Keep this section focused on the most recent release-shaping work. Older milesto
 
 | Status | Item | Target | Notes |
 | --- | --- | --- | --- |
-| `⏸️ DEFERRED` | Expand OpenAI API-platform import beyond the initial validation pass | `v1.x` refinement | Keep richer importer UX and broader endpoint coverage separate from the subscription-first OpenAI story. Revisit the adapter's 0–100 quota representation when a new quota surface needs richer fields. |
+| `⏸️ DEFERRED` | Expand OpenAI API-platform import beyond the initial validation pass | `v1.x` refinement | Keep richer importer UX and broader endpoint coverage separate from the subscription-first OpenAI story. Revisit the adapter's 0–100 quota representation when a new quota surface needs richer fields, and extend provider-surface population beyond the current Codex-local quota path when additional OpenAI sources land. |
 | `⏸️ DEFERRED` | Extend OpenAI subscription fixtures and export inputs | `v1.x` refinement | A redacted consumer-dashboard capture is still optional. Raw `.zip` handling and its fixture coverage, and a UI picker for an extracted export directory, are future work. |
 | `⏸️ DEFERRED` | Refine the Analysis workspace | `v1.x` refinement | Candidate slices include interactive drill-down, richer scope presets, comparisons, and export preview. The [design record](in-app-reporting-and-analysis-spike.md) preserves the rationale and acceptance questions. |
 | `⏸️ DEFERRED` | Extend MiniMax PAYG support beyond the first real-surface validation pass | `v1.x` refinement | Keep broader PAYG runtime UX and scheduled polling behind the current subscription-first v1.0 baseline. |
@@ -186,6 +187,7 @@ Keep this section focused on the most recent release-shaping work. Older milesto
 | `⏸️ DEFERRED` | Exercise the real Codex rollout path through AppController | Test follow-up | Use a temporary rollout directory to cover quota fetch, failure, and duplicate-safe token import across application refreshes. Existing controller tests inject provider responses and disable live rollout token import. |
 | `⏸️ DEFERRED` | Review Codex import durability | Storage follow-up | Assess database-level rollout deduplication and whether SQLite delta writes and thread checkpoints should share a transaction. Add targeted retry and counter-reset coverage if this work is picked up. |
 | `⏸️ DEFERRED` | Run a live Codex SQLite smoke pass | Windows validation | Launch with existing thread totals, check that first scan produces no new chart usage, generate new activity, and confirm OpenAI/HICAP model deltas and unchanged source data. Cover a WAL-only refresh where possible. |
+| `⏸️ DEFERRED` | Add a 5-hour Codex throughput window | `v1.x` refinement | The original throughput plan proposed 5-minute, 30-minute, and 5-hour windows. The dashboard and Analysis compute only the 5-minute and 30-minute rates. |
 | `⏸️ DEFERRED` | Extract shared test temp-db and polling helpers | Test cleanup | Review found repeated temp DB/path fixtures and polling helpers across presenter, controller, analysis, and storage tests. Leave until more test cleanup is underway; avoid broad churn during current release slice. |
 | `⏸️ DEFERRED` | Extract shared GUI formatting/conversion helpers | UI cleanup | `DashboardPresenter`, `AnalysisPresenter`, and taskbar presenter repeat UTF-8/wide and number/time formatting helpers. Consolidate after chart/reporting surfaces stabilize. |
 

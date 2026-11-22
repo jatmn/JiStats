@@ -61,7 +61,7 @@ Required:
 
 ### Integration Tests
 
-Required for changes to the import or reporting path:
+Required before the change is complete:
 
 - import flow records metadata without pretending imported history is live
 - Codex-local parsed fields map to the correct source label and confidence tier
@@ -84,14 +84,14 @@ Required for changes to the import or reporting path:
 
 ## Parser Acceptance Checklist
 
-For Codex-local parsing:
+Before a Codex-local parsing change is complete:
 
 - fixture source is documented
 - source is labeled as Codex-specific
 - parser rejects malformed required fields
 - parser output can carry `Imported` confidence without claiming broader OpenAI truth
 
-For export import:
+Before an export-import change is complete:
 
 - accepted input types match `docs/openai-export-import-contract.md`
 - parser rejects unknown layouts safely
