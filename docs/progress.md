@@ -2,7 +2,7 @@
 
 This file tracks JiStats work and handoffs. The [roadmap](plan.md) records scope and architecture, and the [release checklist](release-checklist.md) records signoff criteria and evidence.
 
-The repository includes a manual Windows SQLite workflow on GitHub Actions. Public-facing fixtures use synthetic or redacted examples. Raw provider captures stay local.
+The repository includes a manual Windows SQLite workflow on GitHub Actions. Public-facing fixtures use synthetic or redacted examples. Raw provider captures stay local. The [security policy](../SECURITY.md) covers private vulnerability reports.
 
 ## 📍 How To Use This File
 
