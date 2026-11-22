@@ -228,5 +228,5 @@ This contract now assumes:
 - `docs/capability-matrix.md`
 - `docs/openai-export-import-implementation-handoff.md`
 - `docs/fixtures/openai/subscription-surface-notes.md`
-- `docs/fixtures/openai/subscription-augmentation-fixture-plan.md`
+- [Subscription augmentation fixture guide](fixtures/openai/subscription-augmentation-fixture-guide.md)
 - `docs/fixtures/openai/chatgpt-export-derived-fixture-note.md`

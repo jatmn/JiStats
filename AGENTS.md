@@ -4,7 +4,7 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 
 ## Working agreement
 
-- Use [docs/plan.md](docs/plan.md) for scope, architecture, and roadmap, and [docs/progress.md](docs/progress.md) for current work and handoffs. Update the tracker when work changes state and update the relevant docs when behavior or decisions change.
+- Keep project planning in [the roadmap](docs/plan.md) and [the work tracker](docs/progress.md). Update the tracker when work changes state and update the relevant technical docs when behavior or decisions change.
 - Check the implementation and its tests when documentation disagrees with the code. Keep changes focused and fit new work into the existing design.
 - Use the [capability matrix](docs/capability-matrix.md) for provider evidence and the [release checklist](docs/release-checklist.md) for release signoff.
 

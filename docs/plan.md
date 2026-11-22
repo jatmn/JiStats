@@ -1,8 +1,10 @@
 # 📘 JiStats Plan
 
+This roadmap records product scope, architecture, and milestone decisions. See the [work tracker](progress.md) for current status, follow-ups, and handoffs, and the [release checklist](release-checklist.md) for signoff.
+
 ## 1. 📌 Summary
 
-JiStats is planned as a lightweight Windows 11 desktop application for monitoring AI usage from a local machine.
+JiStats is a lightweight Windows 11 desktop application for monitoring local AI usage.
 
 OpenAI and Codex remain the primary proof-of-concept provider for v1.0 validation depth, MiniMax remains in initial scope, and Phase 7 now brings Claude Code and Kimi Code into the v1.0 release through bounded local-first support.
 
@@ -871,7 +873,7 @@ The dashboard should focus on clarity over density.
 
 The dashboard is the primary live-data surface for JiStats. Users should not need to export HTML just to understand current status, recent usage, mirror pressure, or freshness.
 
-The current compact quota/status shell is a valid baseline, but richer in-app analysis and historical inspection should grow inside the app instead of being pushed into HTML export. See `docs/in-app-reporting-and-analysis-spike.md` for the companion expansion plan.
+The dedicated Analysis workspace handles richer in-app analysis and historical inspection. See the [Analysis design record](in-app-reporting-and-analysis-spike.md) for the rationale and the [work tracker](progress.md) for potential refinements.
 
 Recommended tiles:
 
@@ -1204,6 +1206,8 @@ Closeout note:
 
 ### Phase 6: Reporting
 
+Status for the current v1.0 baseline is complete. Manual and scheduled HTML export share the dedicated Analysis workspace's provider, account, and date scope.
+
 Goals:
 
 - implement standalone HTML export
@@ -1218,9 +1222,11 @@ Planning note:
 - manual and scheduled HTML export remain the core Phase 6 reporting deliverables
 - the current companion in-app analysis baseline now includes a dedicated Analysis workspace window launched from the dashboard, with persisted provider/account/date-range scope, daily history rows, provider/account breakdowns, compact trend presentation, provenance/data-quality messaging, and gap visibility on the shared `AnalysisPresenter` + `AnalysisQueryEngine` path
 - the remaining companion work is now release signoff and polish rather than missing reporting persistence seams: the retained rollup provenance, structured recovery metadata, quota-snapshot history queries, and export-run metadata are already landed, and the remaining follow-up is broader manual GUI/release validation so the in-app view and HTML export stay equally trustworthy
-- use `docs/in-app-reporting-and-analysis-spike.md` to plan that companion UI work without reopening the narrow reporting/export baseline unnecessarily
+- use the [Analysis design record](in-app-reporting-and-analysis-spike.md) for design context and the [work tracker](progress.md) for follow-ups
 
 ### Phase 7: Claude Code And Kimi Code V1 Implementation
+
+Status for the current v1.0 baseline is complete. See the [Phase 7 closeout](phase7-v1-closeout-notes.md) for provider scope and acceptance.
 
 Goals:
 
@@ -1559,7 +1565,7 @@ The repo should eventually include:
 - coding conventions
 - release checklist
 
-## 21. ✅ Immediate Next Planning Tasks
+## 21. ✅ Milestone A Planning References
 
 This section is now historical context for how Milestone A was closed.
 

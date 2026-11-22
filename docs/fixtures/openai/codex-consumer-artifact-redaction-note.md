@@ -117,4 +117,4 @@ This note is intended to support:
 - `docs/fixtures/openai/subscription-surface-notes.md`
 - `docs/fixtures/openai/codex-rate-limits-shape.sample.json`
 - `docs/openai-export-import-contract.md`
-- `docs/fixtures/openai/subscription-augmentation-fixture-plan.md`
+- [Subscription augmentation fixture guide](subscription-augmentation-fixture-guide.md)

@@ -1,8 +1,7 @@
 # In-App Reporting First Slice: Scope Controls And History Surface
 
-> **Status**: Implementation-ready queue (selected from `docs/in-app-reporting-and-analysis-spike.md` Slice B + C)
-> **Prerequisite**: P6.1/P6.1a manual HTML export (now landed)
-> **Purpose**: Define the first real in-app analysis surface to ship inside the dashboard shell
+> **Status**: Historical design for the shipped scope controls and history views. The dashboard launches a dedicated Analysis window, which shares its scope with manual and scheduled HTML export. See the [work tracker](progress.md) for follow-ups.
+> **Purpose**: Preserve the original first-slice design and acceptance criteria.
 
 ## Selected Slice
 
@@ -153,7 +152,7 @@ WHERE provider_key = ?
   AND period_start_utc >= ? AND period_end_utc <= ?
 ```
 
-## Implementation Queue
+## Original Implementation Sequence
 
 ### Step 1: Scope state and persistence
 

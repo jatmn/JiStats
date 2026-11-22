@@ -1,15 +1,6 @@
-# OpenAI Subscription Augmentation Fixture Plan
+# OpenAI Subscription Augmentation Fixture Guide
 
-> **Status**: Lane 2 quality/support plan
-> **Purpose**: Pin down fixture and test expectations for Codex-local parsing and ChatGPT export import before implementation spreads into runtime code
-
-This note is the quality checklist for the current OpenAI subscription augmentation track.
-
-## Goals
-
-- make fixture expectations explicit before Lane 1 parser work begins
-- keep Codex-local and export-import evidence clearly separated
-- define what must be tested versus what is only nice to have
+Use this guide when changing Codex-local parsing or ChatGPT export import. Follow-ups are recorded in the [work tracker](../../progress.md).
 
 ## Fixture Families
 
@@ -24,11 +15,6 @@ Supporting target:
 - a safe redacted local rollout excerpt represented through
   `docs/fixtures/openai/codex-rollout-rate-limits.redacted.jsonl`
 
-Future support target:
-
-- a safe redacted Codex usage-dashboard capture represented through
-  `docs/fixtures/openai/codex-consumer-artifact-redaction-note.md`
-
 Minimum parser expectations:
 
 - parse `usedPercent`
@@ -42,8 +28,8 @@ Minimum parser expectations:
 
 Primary target:
 
-- official export `.zip` provenance
-- extracted export directory support
+- official export provenance for files from an extracted archive
+- extracted export directory support in the parser
 - `conversations.json` historical import path
 
 Minimum parser expectations:
@@ -70,20 +56,18 @@ Required:
 Required:
 
 - replay public Codex rate-limit sample into the parser
-- replay at least one export-style `conversations.json` fixture once archived
+- replay the archived export-style `conversations.json` fixture
 - verify mixed-source labeling remains stable when local + imported sources coexist
 
 ### Integration Tests
 
-Required before the feature is called done:
+Required for changes to the import or reporting path:
 
 - import flow records metadata without pretending imported history is live
 - Codex-local parsed fields map to the correct source label and confidence tier
 - reporting surfaces can distinguish `Codex-local Imported` from `Export Imported`
 
-## Fixture Backlog
-
-### Ready Now
+## Available Fixtures
 
 - `docs/fixtures/openai/codex-rate-limits-shape.sample.json`
 - `docs/fixtures/openai/codex-rollout-rate-limits.redacted.jsonl`
@@ -91,12 +75,7 @@ Required before the feature is called done:
 - `docs/fixtures/openai/chatgpt-export-redacted/`
 - `docs/fixtures/openai/chatgpt-export-derived-fixture-note.md`
 
-### Needed Next
-
-- `.zip` archive handling coverage once the parser grows explicit compressed-export support
-- one safe redacted Codex usage-dashboard capture that confirms whether the consumer dashboard surface exposes additional usable fields beyond the local rollout and public rate-limit shapes
-
-### Explicitly Not Accepted As Fixtures
+## Disallowed Fixture Sources
 
 - undocumented `backend-api/*` payloads
 - intercepted bearer-token traffic
@@ -105,14 +84,14 @@ Required before the feature is called done:
 
 ## Parser Acceptance Checklist
 
-Before Lane 1 marks the Codex-local parsing slice done:
+For Codex-local parsing:
 
 - fixture source is documented
 - source is labeled as Codex-specific
 - parser rejects malformed required fields
 - parser output can carry `Imported` confidence without claiming broader OpenAI truth
 
-Before export-import is considered implementation-ready:
+For export import:
 
 - accepted input types match `docs/openai-export-import-contract.md`
 - parser rejects unknown layouts safely

@@ -17,7 +17,7 @@ For JiStats v1.0, OpenAI is intentionally split into:
 | `docs/fixtures/openai/codex-consumer-artifact-redaction-note.md` | Redaction contract | Commit-safe rules for any future Codex consumer artifact archive | Defines what a safe artifact may preserve, redact, and claim |
 | `docs/fixtures/openai/chatgpt-export-redacted/` | Redacted extracted-export fixture directory | Historical ChatGPT export import parser/storage coverage | Includes `conversations.json` plus the extracted-export marker siblings used for provenance checks |
 | `docs/fixtures/openai/chatgpt-export-derived-fixture-note.md` | Provenance/redaction note | Commit-safe rules for the extracted-export fixture package | Keeps historical-only labeling and redaction boundaries explicit |
-| `docs/fixtures/openai/subscription-augmentation-fixture-plan.md` | Coverage checklist | Fixture/test expectations for Codex-local parsing and ChatGPT export import | Keeps parser and reporting expectations pinned to the current local-first OpenAI path |
+| [Subscription augmentation fixture guide](subscription-augmentation-fixture-guide.md) | Coverage checklist | Fixture/test expectations for Codex-local parsing and ChatGPT export import | Keeps parser and reporting expectations pinned to the current local-first OpenAI path |
 | [OpenAI API-platform](api-platform/README.md) | Validation instructions | Optional API-platform authz/readiness | The live probe returned missing usage scope |
 | `docs/fixtures/openai/sample_openai_fixture.json` | Synthetic parser scaffold | `OpenAIAdapter::parseFixtureFile()` coverage and generic usage-event mapping | Test scaffold only; not evidence of a validated live OpenAI endpoint |
 

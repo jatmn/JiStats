@@ -34,6 +34,7 @@ Current repo-backed evidence as of `2026-04-21`:
 | --- | --- | --- | --- |
 | Docs accuracy | `Verified` | `docs/plan.md`, `docs/progress.md`, `README.md`, `docs/metric-glossary.md`, and the reporting spike now match the shipped Analysis workspace, four-provider opt-in model, and Kimi `/usages` quota path | Keep aligned only if later release-signoff work changes behavior |
 | Local build + automated tests | `Verified locally` | Debug app build, Debug test build, Release app build, the `build-w4` warning-gate app/test builds, the full `build-w4` suite (`4623` assertions across `443` test cases), and `ctest --test-dir build-w4 -C Debug --output-on-failure` all pass on `2026-04-21` | Re-check only if later release-signoff work changes code or test coverage |
+| Windows CI | `Open` | The latest archived [Windows CI run](https://github.com/jatmn/JiStats-public-prep/actions/runs/44961330523) on `e5230ef` built the test target, then failed the startup hydration timing assertion at 578 ms against a limit of 300 ms. The subsequent merge to main changed Markdown only and has no recorded CI result. | Investigate the startup timing failure and rerun the Windows quality gate before signoff |
 | Packaging / distribution baseline | `Verified locally` | Standard Release builds and the side-by-side `-upx` packaging path are already documented in `docs/progress.md`; the normal Release app build succeeded again on `2026-04-21`, and the current v1.0 claim is now explicitly portable Release binaries rather than an installer | Re-check only if the shipped artifact set changes or an installer is added later |
 | Taskbar shell interactions | `Verified locally` | `docs/taskbar-manual-validation.md` now includes the 2026-04-20 live display pass plus a 2026-04-21 scripted shell-signoff pass (`scripts/run_taskbar_shell_signoff.ps1`) covering repeated right-click dismiss/click-away recovery and Explorer restart recovery; focused `[taskbar]` tests reran cleanly at `230` assertions across `27` cases | Re-check only if taskbar shell interaction behavior changes again before release |
 | Security / credential handling | `Verified in repo` | MiniMax secrets are stored in Windows Credential Manager with only `secret_ref` metadata in SQLite, Kimi quota uses the provider-owned OAuth file under `~/.kimi/credentials/kimi-code.json`, provider/auth paths do not emit token-bearing log calls, and storage/query paths use bound parameters with the remaining dynamic table names constrained to internal helpers like `rollupTableName()` | Re-check only if credential-storage or provider logging behavior changes before release |
@@ -73,7 +74,7 @@ From plan.md section 14.4 (Milestone C criteria):
 | No duplicate import or reconciliation corruption in standard fixtures | `Verified in repo` | Import/reconciliation persistence and duplicate-safe local-provider behavior are covered by landed tests and Phase 5 closeout |
 | Mirror outputs include confidence tier and freshness metadata | `Verified in repo` | Current metric glossary, presenters, reporting, and provider-path wording all preserve confidence/freshness metadata |
 | Taskbar, tray, and dashboard states agree on provider status | `Verified in repo` | Shared provider pipeline is landed; remaining work is manual shell confirmation rather than a known state-model mismatch |
-| Local startup after prior sync state is reliable | `Verified locally` | Startup/recovery paths are heavily exercised in the current automated suite and passed again on `2026-04-21` |
+| Local startup after prior sync state is reliable | `Needs CI signoff` | Startup/recovery checks passed locally on `2026-04-21`. The Windows CI startup hydration timing failure above remains open. |
 | Downtime recovery and backfill behavior is trustworthy | `Verified in repo` | Recovery persistence, backfill checkpoints, gap labeling, and automated recovery coverage are landed; no open blocker is recorded |
 | Monitoring overhead is demonstrably low and policy-compliant | `Verified in repo` | `docs/progress.md` records the steady-state background sanity run and the low-resource implementation closeout |
 | Offline behavior is stable, non-intrusive, and self-recovering | `Verified in repo` | Offline notice retry/dismiss flows and recovery clearing are shipped and documented |
@@ -95,7 +96,7 @@ Phase 7 closeout note:
 ### Documentation
 
 - [x] `docs/plan.md` is accurate and reflects implemented behavior
-- [x] `docs/progress.md` shows all tasks complete
+- [x] [The work tracker](progress.md) records completed scope, open release work, blockers, and deferred items
 - [x] API capability matrix validated with real API responses
 - [x] User-facing docs (README, quick start, release-facing support docs) reflect the four-provider v1.0 UI and keep Claude local-first wording plus Kimi's bounded local-activity and validated `/usages` quota wording honest
 
@@ -272,7 +273,7 @@ When marking v1.0 as ready for release:
 
 - [ ] All code merged to main
 - [ ] All tests passing on CI
-- [ ] Version bumped to 1.0.0
+- [x] Version set to 1.0.0 in the app and manifest
 - [ ] CHANGELOG.md updated
 - [ ] Portable release bundle assembled and smoke-tested
 

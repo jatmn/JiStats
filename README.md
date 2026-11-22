@@ -58,13 +58,7 @@ Current UI/runtime highlights:
 - user-facing provider activation toggles applied before startup refresh work
 - exported reports and in-app labels that avoid leaking raw provider-surface ids for Claude/Kimi local evidence
 
-The repo is still in active implementation, and `docs/progress.md` remains the source of truth for what is finished, what is under review, and what is next.
-
-The main planning documents are:
-
-- `AGENTS.md`
-- `docs/plan.md`
-- `docs/progress.md`
+See the [project roadmap](docs/plan.md) for scope and architecture and the [work tracker](docs/progress.md) for what has landed, what is open, and what needs signoff.
 
 The current workspace branding assets are now wired into the project:
 
