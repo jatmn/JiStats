@@ -2269,6 +2269,91 @@ TEST_CASE("AppController persists dismissal when the quota check after catch-up 
     app.shutdown();
 }
 
+TEST_CASE("AppController keeps an offline dismissal across a provider handoff and restart", "[app][runtime][offline_notice]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
+    const std::time_t now = std::time(nullptr);
+    auto openai = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 25, 100, "interval", "openai_subscription_codex_local"),
+        std::shared_future<void>{}, 1, makeFailedQuotaResponse("network unreachable"));
+    auto miniMax = std::make_shared<ControlledQuotaProviderAdapter>(
+        "minimax", "MiniMax", makeFailedQuotaResponse("network unreachable"),
+        std::shared_future<void>{}, 1,
+        makeQuotaResponse(now, 120, 1000, "daily", "minimax_subscription_coding_plan"));
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(openai);
+    providerManager->addProvider(miniMax);
+    ScopedTrayTestHandler handler([](TrayController::TestOperation,
+                                     TrayStatus,
+                                     const std::string&,
+                                     std::string&) -> std::optional<bool> {
+        return true;
+    });
+
+    std::promise<void> reachedPublication;
+    auto publicationReached = reachedPublication.get_future();
+    AppController app;
+    std::promise<void> releasePublication;
+    auto publicationReleased = releasePublication.get_future().share();
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setDisableTaskbarForTesting(true);
+    app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
+        if (publicationReleased.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            reachedPublication.set_value();
+            publicationReleased.wait();
+        }
+    });
+    REQUIRE(app.init());
+    // The deferred startup refresh has resolved both quota responses. Hold it
+    // before it publishes the new provider set to the dashboard.
+    REQUIRE(publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const DashboardViewModel before = app.getDashboardViewModelForTesting();
+    REQUIRE(before.offlineNoticeVisible);
+    const auto* beforeOpenAI = findProviderStatus(before, "openai");
+    const auto* beforeMiniMax = findProviderStatus(before, "minimax");
+    REQUIRE(beforeOpenAI != nullptr);
+    REQUIRE(beforeMiniMax != nullptr);
+    CHECK(beforeOpenAI->state == ProviderState::Offline);
+    CHECK(beforeMiniMax->state == ProviderState::Live);
+
+    REQUIRE(app.clickDashboardOfflineDismissForTesting());
+    REQUIRE(waitForCondition([&app]() {
+        return !app.isDashboardOfflineNoticeVisibleForTesting();
+    }, std::chrono::seconds(5)));
+    const auto dismissed = app.getConnectivityStateForTesting("openai");
+    REQUIRE(dismissed.has_value());
+    CHECK(dismissed->status == "offline");
+    CHECK(dismissed->noticeDismissedAt > 0);
+
+    releasePublication.set_value();
+    app.refreshRuntimeForTesting();
+    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
+    const auto recovered = app.getConnectivityStateForTesting("openai");
+    const auto stillOffline = app.getConnectivityStateForTesting("minimax");
+    REQUIRE(recovered.has_value());
+    REQUIRE(stillOffline.has_value());
+    CHECK(recovered->status == "online");
+    CHECK(recovered->noticeDismissedAt == 0);
+    CHECK(stillOffline->status == "offline");
+    CHECK(stillOffline->noticeDismissedAt == dismissed->noticeDismissedAt);
+    app.shutdown();
+
+    AppController restarted;
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(providerManager);
+    restarted.setDisableTaskbarForTesting(true);
+    REQUIRE(restarted.init());
+    restarted.refreshRuntimeForTesting();
+    CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
+    CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
+    restarted.shutdown();
+}
+
 TEST_CASE("AppController surfaces stale provider runtime state for taskbar validation", "[app][runtime]") {
     TempTestDatabase dbPath;
     const std::time_t now = std::time(nullptr);

@@ -4,6 +4,7 @@
 
 #include <ctime>
 #ifdef JISTATS_ENABLE_TEST_HOOKS
+#include <functional>
 #include <future>
 #endif
 #include <memory>
@@ -93,6 +94,7 @@ public:
     std::string getDashboardStatusTextForTesting() const;
     DashboardHtmlExportResult exportHtmlReportForTesting(const std::string& outputPath);
     void refreshRuntimeForTesting();
+    void setBeforeRuntimePublicationForTesting(std::function<void()> callback);
     void applyDashboardPreferencesForTesting(const DashboardPreferences& preferences);
     void setMiniMaxCredentialStoreForTesting(std::shared_ptr<WindowsCredentialStore> store);
     void setMiniMaxValidationResponseForTesting(

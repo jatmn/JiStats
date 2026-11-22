@@ -3827,6 +3827,7 @@ public:
     bool taskbarTestModeForTesting = false;
     bool disableCodexTokenImportForTesting = false;
     std::shared_future<void> miniMaxValidationReleaseForTesting;
+    std::function<void()> beforeRuntimePublicationForTesting;
     std::optional<std::time_t> currentTimeForTesting;
 #endif
 
@@ -5797,13 +5798,12 @@ public:
         viewModel.offlineNoticeMessage = activeNotice->message;
     }
 
-    bool shouldSuppressOfflineNoticeFromStorage(
-        const DashboardViewModel& viewModel,
-        std::time_t now) {
+    std::time_t latestOfflineNoticeDismissal(const DashboardViewModel& viewModel) {
         if (!storageAvailable || !storageService.isOpen()) {
-            return false;
+            return 0;
         }
 
+        std::time_t dismissedAt = 0;
         for (const auto& provider : viewModel.providers) {
             if (provider.state != ProviderState::Offline) {
                 continue;
@@ -5818,16 +5818,12 @@ public:
 
             const auto connectivity =
                 storageService.getConnectivityState(*providerId, *runtimeAccountId);
-            if (!connectivity.has_value() || connectivity->noticeDismissedAt <= 0) {
-                continue;
-            }
-
-            if ((now - connectivity->noticeDismissedAt) <= kOfflineNoticeCooldownSeconds) {
-                return true;
+            if (connectivity.has_value() && connectivity->status == "offline") {
+                dismissedAt = std::max(dismissedAt, connectivity->noticeDismissedAt);
             }
         }
 
-        return false;
+        return dismissedAt;
     }
 
     void persistOfflineNoticeDismissal(const DashboardViewModel& viewModel, std::time_t now) {
@@ -5920,7 +5916,8 @@ public:
         const RuntimeStatusTransition transition =
             describeRuntimeStateTransition(lastRuntimeState, viewModel.runtimeState);
         if (transition.enteredOffline) {
-            if (shouldSuppressOfflineNoticeFromStorage(viewModel, now)) {
+            const std::time_t dismissedAt = latestOfflineNoticeDismissal(viewModel);
+            if (dismissedAt > 0 && (now - dismissedAt) <= kOfflineNoticeCooldownSeconds) {
                 notificationService.suppressUntilCleared(NoticeType::Offline);
             }
             notificationService.showNotice(buildOfflineNotice(viewModel, now));
@@ -6033,9 +6030,11 @@ public:
         }
     }
 
-    void persistProviderRefreshState(const DashboardViewModel& viewModel, std::time_t now) {
+    std::vector<PersistedConnectivityState> persistProviderRefreshState(
+        const DashboardViewModel& viewModel, std::time_t now) {
+        std::vector<PersistedConnectivityState> connectivityUpdates;
         if (!storageAvailable || !storageService.isOpen()) {
-            return;
+            return connectivityUpdates;
         }
 
         PersistedRuntimeState runtimeState;
@@ -6091,18 +6090,7 @@ public:
                 syncState.lastFailureCategory.clear();
             }
 
-            {
-                std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
-                if (provider.state == ProviderState::Offline) {
-                    const auto existing =
-                        storageService.getConnectivityState(*providerId, *runtimeAccountId);
-                    const bool wasOffline = existing.has_value() && existing->status == "offline";
-                    connectivity.nextRetryAt =
-                        now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
-                    connectivity.noticeDismissedAt = existing.has_value() ? existing->noticeDismissedAt : 0;
-                }
-                storageService.upsertConnectivityState(connectivity);
-            }
+            connectivityUpdates.push_back(std::move(connectivity));
             storageService.upsertSyncState(syncState);
         }
 
@@ -6116,6 +6104,38 @@ public:
         }
 
         storageService.upsertRuntimeState(runtimeState);
+        return connectivityUpdates;
+    }
+
+    void persistConnectivityForPublication(
+        std::vector<PersistedConnectivityState>& updates,
+        RuntimeState nextRuntimeState,
+        std::time_t now) {
+        if (updates.empty()) {
+            return;
+        }
+
+        // Read the app-wide dismissal before replacing the previous offline rows.
+        const bool stillOffline =
+            lastRuntimeState == RuntimeState::Offline && nextRuntimeState == RuntimeState::Offline;
+        const std::time_t carriedDismissal = stillOffline
+            ? latestOfflineNoticeDismissal(dashboardPresenter.getViewModel())
+            : 0;
+
+        for (auto& connectivity : updates) {
+            if (connectivity.status == "offline") {
+                const auto existing = storageService.getConnectivityState(
+                    connectivity.providerId, connectivity.accountId);
+                const bool wasOffline = existing.has_value() && existing->status == "offline";
+                connectivity.nextRetryAt =
+                    now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
+                if (nextRuntimeState == RuntimeState::Offline) {
+                    const std::time_t previousDismissal = existing.has_value() ? existing->noticeDismissedAt : 0;
+                    connectivity.noticeDismissedAt = std::max(carriedDismissal, previousDismissal);
+                }
+            }
+            storageService.upsertConnectivityState(connectivity);
+        }
     }
 
     bool executePendingCatchUp(
@@ -6332,7 +6352,8 @@ public:
     bool applyRecoveryPersistenceCycle(
         DashboardViewModel& viewModel,
         const DashboardPreferences& preferences,
-        std::time_t now) {
+        std::time_t now,
+        std::vector<PersistedConnectivityState>& connectivityUpdates) {
         bool executedCatchUp = false;
         if (viewModel.runtimeState != RuntimeState::Offline && hasPendingRecovery()) {
             executedCatchUp = executePendingCatchUp(now, viewModel, activeProviderManager());
@@ -6343,7 +6364,7 @@ public:
         }
 
         // Catch-up can replace the quota result used for the notice.
-        persistProviderRefreshState(viewModel, now);
+        connectivityUpdates = persistProviderRefreshState(viewModel, now);
         applyGapAnnotations(viewModel, now);
         if (viewModel.runtimeState != RuntimeState::Offline && hasPendingRecovery()) {
             promotePendingRecoveryState(viewModel);
@@ -6352,12 +6373,16 @@ public:
         return executedCatchUp;
     }
 
-    void applyRuntimeViewModel(const DashboardViewModel& viewModel, std::time_t now) {
+    void applyRuntimeViewModel(
+        const DashboardViewModel& viewModel,
+        std::time_t now,
+        std::vector<PersistedConnectivityState> connectivityUpdates = {}) {
         syncTrayRuntimeIndicator(viewModel);
 
         DashboardViewModel presentedViewModel = viewModel;
         {
             std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
+            persistConnectivityForPublication(connectivityUpdates, presentedViewModel.runtimeState, now);
             updateOfflineNotice(presentedViewModel, now);
             publishDashboardWithOfflineNotice(presentedViewModel);
         }
@@ -6613,13 +6638,19 @@ public:
         }
         DashboardViewModel viewModel = buildDashboardViewModel(now);
         viewModel.preferences = preferences;
-        applyRecoveryPersistenceCycle(viewModel, preferences, now);
+        std::vector<PersistedConnectivityState> connectivityUpdates;
+        applyRecoveryPersistenceCycle(viewModel, preferences, now, connectivityUpdates);
         applyPersistedActivitySummaries(viewModel, now);
         applyDashboardOperationalStatus(viewModel);
         if (shouldRefreshAnalysisSurface()) {
             applyAnalysisSurface(viewModel, now);
         }
-        applyRuntimeViewModel(viewModel, now);
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (beforeRuntimePublicationForTesting) {
+            beforeRuntimePublicationForTesting();
+        }
+#endif
+        applyRuntimeViewModel(viewModel, now, std::move(connectivityUpdates));
     }
 
     DashboardPreferences loadPreferences() const {
@@ -7000,6 +7031,7 @@ bool AppController::init(bool launchInBackground) {
         bool usedPersistedStartupHydration = false;
         bool executedStartupCatchUp = false;
         DashboardViewModel viewModel;
+        std::vector<PersistedConnectivityState> connectivityUpdates;
         if (const auto hydratedViewModel =
                 pImpl->buildPersistedStartupHydrationViewModel(now, loadedPreferences)) {
             viewModel = *hydratedViewModel;
@@ -7010,7 +7042,7 @@ bool AppController::init(bool launchInBackground) {
             viewModel = pImpl->buildDashboardViewModel(now);
             viewModel.preferences = loadedPreferences; // Use persisted preferences
             executedStartupCatchUp =
-                pImpl->applyRecoveryPersistenceCycle(viewModel, loadedPreferences, now);
+                pImpl->applyRecoveryPersistenceCycle(viewModel, loadedPreferences, now, connectivityUpdates);
         }
         viewModel.preferences = loadedPreferences; // Use persisted preferences
         if (usedPersistedStartupHydration) {
@@ -7022,7 +7054,7 @@ bool AppController::init(bool launchInBackground) {
         pImpl->applyPersistedActivitySummaries(viewModel, now);
         pImpl->applyDashboardOperationalStatus(viewModel);
         pImpl->applyAnalysisSurface(viewModel, now);
-        pImpl->applyRuntimeViewModel(viewModel, now);
+        pImpl->applyRuntimeViewModel(viewModel, now, std::move(connectivityUpdates));
         pImpl->reportingService.setDashboardDataProvider([this](DashboardViewModel& reportViewModel) {
             reportViewModel = pImpl->dashboardPresenter.getViewModel();
             return true;
@@ -7367,6 +7399,10 @@ DashboardHtmlExportResult AppController::exportHtmlReportForTesting(const std::s
 
 void AppController::refreshRuntimeForTesting() {
     pImpl->refreshProviderRuntimeState(pImpl->currentTime(), true, true);
+}
+
+void AppController::setBeforeRuntimePublicationForTesting(std::function<void()> callback) {
+    pImpl->beforeRuntimePublicationForTesting = std::move(callback);
 }
 
 void AppController::applyDashboardPreferencesForTesting(const DashboardPreferences& preferences) {
