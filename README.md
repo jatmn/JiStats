@@ -22,7 +22,7 @@ The helper stops running JiStats, MiniMax CLI, and test binaries before building
 
 - `JiStats.exe` is the desktop app. `JiStatsMiniMaxCli.exe` and `JiStatsTests.exe` are developer tools.
 - With `JISTATS_ENABLE_UPX=ON`, Release builds also produce `JiStats-upx.exe` using the bundled UPX 5.1.1. Use `-DJISTATS_ENABLE_UPX=OFF` at configure time to omit packed variants.
-- For a portable bundle, include `db_migrations/` and the license files described below. Follow the [release checklist](docs/release-checklist.md) for package smoke testing.
+- The portable executable embeds the SQLite baseline. Include the license files described below with the bundle. Follow the [release checklist](docs/release-checklist.md) for package smoke testing.
 
 ### Building on Linux
 

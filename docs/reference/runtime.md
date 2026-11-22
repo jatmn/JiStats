@@ -4,7 +4,7 @@
 
 ## Startup and background operation
 
-Launch with `--background` for tray-first startup. **Start with Windows** is opt-in. [StartupManager](../../src/platform/StartupManager.cpp) stores the executable path and optional `--background` flag under the current user's Windows Run registry key. The entry has no working-directory setting. Turning off the option removes the entry. If rewriting the background flag fails, JiStats keeps the existing entry and saves the effective background preference from it. See [migration discovery](storage.md#migration-behavior) for the impact on portable startup.
+Launch with `--background` for tray-first startup. **Start with Windows** is opt-in. [StartupManager](../../src/platform/StartupManager.cpp) stores the executable path and optional `--background` flag under the current user's Windows Run registry key. The entry has no working-directory setting. Turning off the option removes the entry. If rewriting the background flag fails, JiStats keeps the existing entry and saves the effective background preference from it. The [embedded SQLite baseline](storage.md#migration-behavior) works at sign-in regardless of the working directory.
 
 Hydrated startup restores preferences and cached quota before first paint. Keep provider discovery and slow imports off the first-paint path. Opening Settings triggers asynchronous discovery. Defer startup catch-up to cases that need it. Exiting from the menu stops the app. Closing the dashboard leaves background monitoring available.
 

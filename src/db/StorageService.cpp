@@ -453,6 +453,7 @@ public:
     sqlite3* db = nullptr;
     std::string dbPath;
     std::string lastError;
+    std::optional<int> rejectedSchemaVersion;
     bool inTransaction = false;
     
     static int callback(void*, int, char**, char**) {
@@ -469,6 +470,7 @@ StorageService::~StorageService() {
 }
 
 bool StorageService::init(const std::string& dbPath) {
+    pImpl->rejectedSchemaVersion.reset();
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     pImpl->dbPath = resolveDatabasePath(dbPath);
     
@@ -486,13 +488,13 @@ bool StorageService::init(const std::string& dbPath) {
     
     // Run migrations
     SchemaManager schemaManager(*this);
-    if (schemaManager.needsMigration()) {
-        if (!schemaManager.migrate()) {
-            pImpl->lastError = "Migration failed: " + schemaManager.getLastError();
-            return false;
-        }
+    if (!schemaManager.migrate()) {
+        pImpl->rejectedSchemaVersion = schemaManager.getRejectedVersion();
+        pImpl->lastError = "Migration failed: " + schemaManager.getLastError();
+        close();
+        return false;
     }
-    
+
     return true;
 #else
     pImpl->lastError = "SQLite not available - compile with JISTATS_USE_SYSTEM_SQLITE or JISTATS_HAS_SQLITE";
@@ -505,6 +507,7 @@ void StorageService::close() {
     if (pImpl->db) {
         sqlite3_close(pImpl->db);
         pImpl->db = nullptr;
+        pImpl->inTransaction = false;
     }
 #endif
 }
@@ -666,12 +669,12 @@ QueryResult StorageService::execute(const std::string& sql, const std::vector<st
     return result;
 }
 
-bool StorageService::beginTransaction() {
+bool StorageService::beginTransaction(TransactionMode mode) {
     if (pImpl->inTransaction) {
-        return true;
+        return mode == TransactionMode::Deferred;
     }
-    
-    auto result = execute("BEGIN TRANSACTION;");
+
+    auto result = execute(mode == TransactionMode::Immediate ? "BEGIN IMMEDIATE;" : "BEGIN TRANSACTION;");
     if (result.success()) {
         pImpl->inTransaction = true;
         return true;
@@ -707,6 +710,10 @@ bool StorageService::rollbackTransaction() {
 
 std::string StorageService::getLastError() const {
     return pImpl->lastError;
+}
+
+std::optional<int> StorageService::getRejectedSchemaVersion() const {
+    return pImpl->rejectedSchemaVersion;
 }
 
 std::string StorageService::getDbPath() const {

@@ -4,7 +4,7 @@ JiStats runs on Windows 11 from a portable folder. If you are building from sour
 
 ## Launch
 
-Keep the executable and `db_migrations/` in the portable folder and launch with that folder as the working directory so SQLite can load the migrations. Use one desktop binary, either `JiStats.exe` or the optional packed `JiStats-upx.exe`.
+Use one desktop binary, either `JiStats.exe` or the optional packed `JiStats-upx.exe`. The executable contains the SQLite baseline and can initialize it from any working directory.
 
 ```powershell
 .\JiStats.exe
@@ -12,7 +12,9 @@ Keep the executable and `db_migrations/` in the portable folder and launch with 
 .\JiStats.exe --background
 ```
 
-JiStats stores the database in `%LOCALAPPDATA%\JiStats\jistats.db`. Moving the executable does not move that data. Start JiStats from the portable folder for first launch and after replacing the executable and migrations. **Start with Windows** can launch JiStats at sign-in, but its registry entry does not set a working directory. If it launches outside the portable folder, [migration discovery](reference/storage.md#migration-behavior) can skip pending upgrades.
+JiStats stores the database in `%LOCALAPPDATA%\JiStats\jistats.db`. Moving the executable does not move that data. **Start with Windows** can launch JiStats at sign-in with the same embedded baseline. Existing version 12 databases reopen in place. See [supported database versions](reference/storage.md#migration-behavior) for how JiStats handles older files.
+
+If JiStats warns that it rejected a development database, exit JiStats. Move the database named in the warning and any `-wal`, `-shm`, or `-journal` files to a backup folder. Also move any legacy `jistats.db` and companion files beside the executable or in its working directory, since JiStats can copy them into the default location. Restart JiStats to create a fresh database.
 
 ## Enable providers
 

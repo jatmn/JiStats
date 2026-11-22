@@ -1260,6 +1260,28 @@ TEST_CASE("AppController honors launch-in-background startup mode", "[app][start
     app.shutdown();
 }
 
+TEST_CASE("AppController explains a rejected database during background startup", "[app][startup]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    REQUIRE(storage.execute("UPDATE schema_version SET version = 11;").success());
+    storage.close();
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    REQUIRE(app.init(true));
+
+    const auto warning = app.getStartupWarning();
+    CHECK(warning.find(dbPath.path()) != std::string::npos);
+    CHECK(warning.find("version 11") != std::string::npos);
+    CHECK(warning.find("persistence is disabled") != std::string::npos);
+    CHECK(warning.find("move this database") != std::string::npos);
+    app.shutdown();
+}
+
 TEST_CASE("AppController applies persisted startup preferences through StartupManager", "[app][startup]") {
     requireSqlite();
 

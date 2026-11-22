@@ -22,7 +22,8 @@ Always run these in at least one SQLite-enabled path:
 
 - `tests/test_schema_manager.cpp`
   - `SchemaManager migrates storage baseline tables and quota metadata when SQLite is available`
-  - `SchemaManager recovers migration 004 after partial apply when SQLite is available`
+  - `StorageService preserves version 12 database settings on reopen`
+  - `StorageService rejects databases older than the baseline`
 - `tests/test_storage_mirror_state.cpp`
   - `StorageService upserts and queries sync state when SQLite is available`
   - `StorageService upserts and queries mirror rules when SQLite is available`

@@ -2,6 +2,7 @@
 
 #include <string>
 #include <memory>
+#include <optional>
 
 namespace JiStats {
 
@@ -23,23 +24,23 @@ public:
     
     // Apply all pending migrations
     bool migrate();
-    
-    // Apply specific migration
-    bool migrateToVersion(int version);
-    
+
     // Get migration status
     std::string getStatus() const;
     
     // Get last error
     std::string getLastError() const;
-    
-private:
-    // Load migration from file
+    std::optional<int> getRejectedVersion() const;
+
+  private:
+    enum class BaselineResult { Ready, NeedsWrite, Failed };
+
+    BaselineResult runBaselineTransaction(int& current, bool writable);
+    BaselineResult prepareBaseline(int& current, bool writable);
+    BaselineResult reconcileBaseline(bool writable);
+    bool migrateToVersion(int version);
     std::string loadMigration(int version) const;
-    std::string buildRecoveryMigration(int version) const;
-    bool tableExists(const std::string& tableName) const;
-    bool columnExists(const std::string& tableName, const std::string& columnName) const;
-    
+
     StorageService& storage;
     class Impl;
     std::unique_ptr<Impl> pImpl;

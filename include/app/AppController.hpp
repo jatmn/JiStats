@@ -38,6 +38,9 @@ public:
     // Initialize the application
     bool init(bool launchInBackground = false);
 
+    // User-facing warning for a rejected database after initialization.
+    std::string getStartupWarning() const;
+
     // Run the GUI lifecycle until shutdown is requested
     int run();
 
