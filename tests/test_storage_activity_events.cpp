@@ -4,31 +4,14 @@
 #include <string>
 
 #include "db/StorageService.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::requireSqlite;
 
 namespace {
-
-class TempDbFile {
-public:
-    TempDbFile() {
-        path_ = std::filesystem::temp_directory_path() / "jistats_activity_events_test.db";
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string path() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 long long requireSingleId(const QueryResult& result) {
     REQUIRE(result.success());
@@ -78,13 +61,12 @@ PersistedUsageEvent makePersistedUsageEvent(int providerId, int accountId, std::
 } // namespace
 
 TEST_CASE("StorageService persists and queries activity events when SQLite is available", "[storage][activity]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const long long providerId = requireSingleId(
         storage.execute("SELECT id FROM providers WHERE provider_key = 'openai';"));
@@ -137,7 +119,11 @@ TEST_CASE("StorageService persists and queries activity events when SQLite is av
 }
 
 TEST_CASE("StorageService rejects invalid activity events before insert", "[storage][activity]") {
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
 
     PersistedActivityEvent event;
     event.providerId = 0;
@@ -146,16 +132,16 @@ TEST_CASE("StorageService rejects invalid activity events before insert", "[stor
     event.activity.startedAt = 1713416400;
 
     REQUIRE_FALSE(storage.insertActivityEvent(event));
+    CHECK(storage.getLastError() == "Activity event requires providerId and accountId");
 }
 
 TEST_CASE("StorageService skips duplicate activity events during repeated local imports", "[storage][activity]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const long long providerId = requireSingleId(
         storage.execute("SELECT id FROM providers WHERE provider_key = 'openai';"));
@@ -190,13 +176,12 @@ TEST_CASE("StorageService skips duplicate activity events during repeated local 
 }
 
 TEST_CASE("StorageService skips duplicate usage events during recovery/backfill inserts", "[storage][activity]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const long long providerId = requireSingleId(
         storage.execute("SELECT id FROM providers WHERE provider_key = 'openai';"));

@@ -13,8 +13,10 @@
 #include <vector>
 
 #include "providers/openai/OpenAIAdapter.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDirectory;
 
 namespace {
 
@@ -25,14 +27,8 @@ const std::string kCodexRedactedRolloutFixturePath =
 
 class TempFixtureFile {
 public:
-    explicit TempFixtureFile(const std::string& contents) {
-        static long long counter = 0;
-
-        const auto uniqueSuffix = std::to_string(static_cast<long long>(std::time(nullptr))) +
-            "_" + std::to_string(++counter);
-        path_ = (std::filesystem::temp_directory_path() /
-            ("jistats_openai_fixture_" + uniqueSuffix + ".json")).string();
-
+    explicit TempFixtureFile(const std::string& contents)
+        : path_((directory_.path() / "fixture.json").string()) {
         std::ofstream out(path_, std::ios::binary);
         if (!out.is_open()) {
             throw std::runtime_error("Failed to create temporary fixture file");
@@ -41,36 +37,19 @@ public:
         out << contents;
     }
 
-    ~TempFixtureFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
     const std::string& path() const {
         return path_;
     }
 
 private:
+    TempTestDirectory directory_{"jistats_openai_file"};
     std::string path_;
 };
 
 class TempFixtureDirectory {
 public:
-    TempFixtureDirectory() {
-        static long long counter = 0;
-        const auto uniqueSuffix = std::to_string(static_cast<long long>(std::time(nullptr))) +
-            "_" + std::to_string(++counter);
-        path_ = std::filesystem::temp_directory_path() / ("jistats_openai_fixture_dir_" + uniqueSuffix);
-        std::filesystem::create_directories(path_);
-    }
-
-    ~TempFixtureDirectory() {
-        std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
-    }
-
     std::filesystem::path makeFile(const std::filesystem::path& relativePath, const std::string& contents) const {
-        const std::filesystem::path filePath = path_ / relativePath;
+        const std::filesystem::path filePath = directory_.path() / relativePath;
         std::filesystem::create_directories(filePath.parent_path());
         std::ofstream out(filePath, std::ios::binary);
         if (!out.is_open()) {
@@ -82,11 +61,11 @@ public:
     }
 
     const std::filesystem::path& path() const {
-        return path_;
+        return directory_.path();
     }
 
 private:
-    std::filesystem::path path_;
+    TempTestDirectory directory_{"jistats_openai_dir"};
 };
 
 class ScopedEnvironmentVariable {

@@ -28,7 +28,7 @@ The repository includes an automatic [Windows SQLite workflow](../.github/workfl
 | Item | Value |
 | --- | --- |
 | Phase | Phases 0, 1, 2, 3, 4, 5, 6, and 7 are closed for the current v1.0 baseline |
-| Current Focus | v1.0 release signoff, including the Windows CI startup timing failure and the remaining quality, testing, migration, and release-day checks |
+| Current Focus | v1.0 release signoff, including Windows CI verification of the test cleanup and the remaining quality, migration, and release-day checks |
 | v1.0 Providers | OpenAI / Codex + MiniMax + Claude Code + Kimi Code |
 | Primary Goal | Provider quota mirroring |
 | Stack | Native `C++/C` |
@@ -47,7 +47,7 @@ Reviewed the four superseded plans and related Analysis and fixture plans agains
 
 ## 🚧 Active Work
 
-The [release checklist](release-checklist.md#evidence-backed-release-queue) is the active v1.0 queue. Use the Windows SQLite quality gate for automated build and test results.
+The [release checklist](release-checklist.md#evidence-backed-release-queue) is the active v1.0 queue. Use the Windows SQLite quality gate for automated build and test results. The test cleanup removes redundant cases, isolates temporary fixtures, and extends the controlled quota response test to use the shared SQLite fixture.
 
 ## ✅ Recently Completed
 
@@ -188,7 +188,7 @@ Guardrails:
 | `⏸️ DEFERRED` | Review Codex import durability | Storage follow-up | Assess database-level rollout deduplication and whether SQLite delta writes and thread checkpoints should share a transaction. Add targeted retry and counter-reset coverage if this work is picked up. |
 | `⏸️ DEFERRED` | Run a live Codex SQLite smoke pass | Windows validation | Launch with existing thread totals, check that first scan produces no new chart usage, generate new activity, and confirm OpenAI/HICAP model deltas and unchanged source data. Cover a WAL-only refresh where possible. |
 | `⏸️ DEFERRED` | Add a 5-hour Codex throughput window | `v1.x` refinement | The original throughput plan proposed 5-minute, 30-minute, and 5-hour windows. The dashboard and Analysis compute only the 5-minute and 30-minute rates. |
-| `⏸️ DEFERRED` | Extract shared test temp-db and polling helpers | Test cleanup | Review found repeated temp DB/path fixtures and polling helpers across presenter, controller, analysis, and storage tests. Leave until more test cleanup is underway; avoid broad churn during current release slice. |
+| `⏸️ DEFERRED` | Extract shared test polling helpers | Test cleanup | The suite now shares temporary database and directory fixtures. Presenter and controller polling helpers still use different timeouts. |
 | `⏸️ DEFERRED` | Extract shared GUI formatting/conversion helpers | UI cleanup | `DashboardPresenter`, `AnalysisPresenter`, and taskbar presenter repeat UTF-8/wide and number/time formatting helpers. Consolidate after chart/reporting surfaces stabilize. |
 
 ## 🐞 Known UI / Taskbar Bug Backlog

@@ -11,8 +11,12 @@
 #include "db/StorageService.hpp"
 #include "gui/DashboardPresenter.hpp"
 #include "reporting/AnalysisQueryEngine.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::requireSqlite;
 
 namespace {
 
@@ -32,29 +36,6 @@ std::time_t makeUtcTime(
     tm.tm_sec = second;
     return _mkgmtime(&tm);
 }
-
-class TempDbFile {
-public:
-    TempDbFile() {
-        static int counter = 0;
-        path_ = std::filesystem::temp_directory_path() /
-            ("jistats_analysis_query_engine_test_" + std::to_string(++counter) + ".db");
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string path() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 ProviderStatus makeProvider(
     const std::string& providerKey,
@@ -289,12 +270,11 @@ std::optional<AnalysisTrendPoint> findTrendPoint(
 } // namespace
 
 TEST_CASE("AnalysisQueryEngine builds rollup-backed daily summaries breakdowns and trend points from persisted usage scope", "[analysis][query_engine][analysis_query_engine]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
     const std::time_t openaiDayOne = makeUtcTime(2026, 4, 18, 8, 0, 0);
@@ -410,12 +390,11 @@ TEST_CASE("AnalysisQueryEngine builds rollup-backed daily summaries breakdowns a
 }
 
 TEST_CASE("AnalysisQueryEngine keeps Codex throughput separate from scoped usage summaries", "[analysis][query_engine][analysis_query_engine][codex]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
     seedUsageEvent(storage, "openai", "OpenAI", now - 240, 120, 12, "gpt-4.1");
@@ -459,12 +438,11 @@ TEST_CASE("AnalysisQueryEngine keeps Codex throughput separate from scoped usage
 }
 
 TEST_CASE("AnalysisQueryEngine limits Codex throughput chart history to the active thirty-minute window", "[analysis][query_engine][analysis_query_engine][codex]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
     seedCodexUsageEvent(storage, now - 3600, 100);
@@ -486,12 +464,11 @@ TEST_CASE("AnalysisQueryEngine limits Codex throughput chart history to the acti
 }
 
 TEST_CASE("AnalysisQueryEngine separates Codex calendar month totals from rolling thirty day totals", "[analysis][query_engine][analysis_query_engine][codex]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
     seedCodexUsageEvent(storage, now - (25 * 86400), 100, "codex://rollout/march");
@@ -517,12 +494,11 @@ TEST_CASE("AnalysisQueryEngine separates Codex calendar month totals from rollin
 }
 
 TEST_CASE("AnalysisQueryEngine computes Codex throughput within rollout session boundaries", "[analysis][query_engine][analysis_query_engine][codex]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
     seedCodexUsageEvent(storage, now - 120, 100, "codex://rollout/a");
@@ -547,12 +523,11 @@ TEST_CASE("AnalysisQueryEngine computes Codex throughput within rollout session 
 }
 
 TEST_CASE("AnalysisQueryEngine keeps Codex model usage buckets granular for recent deltas", "[analysis][query_engine][analysis_query_engine][codex]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
     seedCodexSqliteUsageEvent(storage, "openai", "gpt-5.5", now - 45 * 60, 100);
@@ -644,13 +619,12 @@ TEST_CASE("AnalysisQueryEngine falls back invalid custom preferences to the effe
 }
 
 TEST_CASE("AnalysisQueryEngine falls back missing current-quota windows to the effective this-month preset", "[analysis][query_engine][analysis_query_engine]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     AnalysisQueryEngine engine(storage);
     DashboardViewModel dashboard;
@@ -668,13 +642,12 @@ TEST_CASE("AnalysisQueryEngine falls back missing current-quota windows to the e
 }
 
 TEST_CASE("AnalysisQueryEngine combines persisted usage and local activity into shared provider and account breakdowns", "[analysis][query_engine][analysis_query_engine]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
     const std::time_t openaiDay = makeUtcTime(2026, 4, 18, 8, 0, 0);
@@ -766,13 +739,12 @@ TEST_CASE("AnalysisQueryEngine combines persisted usage and local activity into 
 }
 
 TEST_CASE("AnalysisQueryEngine builds hourly trend buckets from persisted rollups and raw edge usage for short windows", "[analysis][query_engine][analysis_query_engine]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 12, 34, 56);
     const std::time_t rolledHourOne = makeUtcTime(2026, 4, 20, 9, 5, 0);
@@ -827,13 +799,12 @@ TEST_CASE("AnalysisQueryEngine builds hourly trend buckets from persisted rollup
 }
 
 TEST_CASE("AnalysisQueryEngine surfaces persisted quota recovery and export status in scoped data quality notes", "[analysis][query_engine][analysis_query_engine]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 18, 0, 0);
     const int providerId = requireProviderId(storage, "minimax");
@@ -972,13 +943,12 @@ TEST_CASE("AnalysisQueryEngine surfaces persisted quota recovery and export stat
 }
 
 TEST_CASE("AnalysisQueryEngine builds reset-aware quota trend series from scoped quota snapshots", "[analysis][query_engine][analysis_query_engine]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 20, 0, 0);
     const int providerId = requireProviderId(storage, "openai");
@@ -1052,13 +1022,12 @@ TEST_CASE("AnalysisQueryEngine builds reset-aware quota trend series from scoped
 }
 
 TEST_CASE("AnalysisQueryEngine prefers daily quota rollups for long-range quota history", "[analysis][query_engine][analysis_query_engine]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 20, 0, 0);
     const int providerId = requireProviderId(storage, "openai");
@@ -1145,13 +1114,12 @@ TEST_CASE("AnalysisQueryEngine prefers daily quota rollups for long-range quota 
 }
 
 TEST_CASE("AnalysisQueryEngine resolves current quota window from the latest scoped quota snapshot", "[analysis][query_engine][analysis_query_engine]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 20, 20, 0, 0);
     const int providerId = requireProviderId(storage, "openai");
@@ -1232,13 +1200,12 @@ TEST_CASE("AnalysisQueryEngine resolves current quota window from the latest sco
 }
 
 TEST_CASE("AnalysisQueryEngine offers persisted scope options from quota snapshots and recovery checkpoints without dashboard provider rows", "[analysis][query_engine][analysis_query_engine]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const std::time_t now = makeUtcTime(2026, 4, 21, 12, 0, 0);
     const QueryResult minimaxInsert = storage.execute(

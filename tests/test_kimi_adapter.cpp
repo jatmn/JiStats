@@ -21,8 +21,13 @@
 #include "db/SchemaManager.hpp"
 #include "db/StorageService.hpp"
 #include "providers/kimi/KimiAdapter.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::requireSqlite;
+using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::TempTestDirectory;
 
 namespace {
 
@@ -30,21 +35,8 @@ const std::string kFixtureRoot = "docs/fixtures/kimi/synthetic_local_runtime";
 
 class TempFixtureDirectory {
 public:
-    TempFixtureDirectory() {
-        static long long counter = 0;
-        const auto uniqueSuffix = std::to_string(static_cast<long long>(std::time(nullptr))) +
-            "_" + std::to_string(++counter);
-        path_ = std::filesystem::temp_directory_path() / ("jistats_kimi_fixture_" + uniqueSuffix);
-        std::filesystem::create_directories(path_);
-    }
-
-    ~TempFixtureDirectory() {
-        std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
-    }
-
     std::filesystem::path makeFile(const std::filesystem::path& relativePath, const std::string& contents) const {
-        const std::filesystem::path filePath = path_ / relativePath;
+        const std::filesystem::path filePath = directory_.path() / relativePath;
         std::filesystem::create_directories(filePath.parent_path());
         std::ofstream output(filePath, std::ios::binary);
         if (!output.is_open()) {
@@ -56,35 +48,11 @@ public:
     }
 
     const std::filesystem::path& path() const {
-        return path_;
+        return directory_.path();
     }
 
 private:
-    std::filesystem::path path_;
-};
-
-class TempDbFile {
-public:
-    TempDbFile() {
-        static long long counter = 0;
-        const auto uniqueSuffix = std::to_string(static_cast<long long>(std::time(nullptr))) +
-            "_" + std::to_string(++counter);
-        path_ = std::filesystem::temp_directory_path() / ("jistats_kimi_test_" + uniqueSuffix + ".db");
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    const std::string string() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
+    TempTestDirectory directory_{"jistats_kimi_fixture"};
 };
 
 class ScopedEnvironmentVariable {
@@ -615,9 +583,11 @@ base_url = "https://api.kimi.com/coding/v1"
 }
 
 TEST_CASE("Kimi importLocalActivity persists approved local runtime snapshots", "[kimi][persistence]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
-    REQUIRE(storage.init(tempDb.string()));
+    REQUIRE(storage.init(tempDb.path()));
 
     SchemaManager schemaManager(storage);
     REQUIRE(schemaManager.migrate());
@@ -880,19 +850,8 @@ TEST_CASE("Kimi adapter resolves the effective root path from KIMI_HOME when no 
     TempFixtureDirectory fixture;
     fixture.makeFile("config.toml", "default_model = \"kimi-code/kimi-for-coding\"\n");
 
-    char* previousValue = nullptr;
-    std::size_t previousValueLength = 0;
-    const errno_t envResult = _dupenv_s(&previousValue, &previousValueLength, "KIMI_HOME");
-    const std::string previous = (envResult == 0 && previousValue != nullptr) ? previousValue : "";
-    _putenv_s("KIMI_HOME", fixture.path().string().c_str());
+    ScopedEnvironmentVariable kimiHome("KIMI_HOME", fixture.path().string());
 
     const std::string resolved = KimiAdapter::resolveEffectiveRootPathForTesting();
     CHECK(resolved == fixture.path().string());
-
-    if (previousValue != nullptr) {
-        _putenv_s("KIMI_HOME", previous.c_str());
-        free(previousValue);
-    } else {
-        _putenv_s("KIMI_HOME", "");
-    }
 }

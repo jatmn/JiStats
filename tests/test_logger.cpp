@@ -1,22 +1,16 @@
 #include <catch_amalgamated.hpp>
 #include "core/Logger.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
-
-TEST_CASE("Logger::isInitialized before init", "[logger]") {
-    // Logger may already be shut down from a previous test; ensure clean state
-    if (Logger::isInitialized()) {
-        Logger::shutdown();
-    }
-    REQUIRE_FALSE(Logger::isInitialized());
-}
 
 TEST_CASE("Logger::init and shutdown lifecycle", "[logger]") {
     if (Logger::isInitialized()) {
         Logger::shutdown();
     }
 
-    Logger::init("test_logs");
+    TestSupport::TempTestDirectory logDir("jistats_logs");
+    Logger::init(logDir.path().string());
     REQUIRE(Logger::isInitialized());
 
     Logger::shutdown();

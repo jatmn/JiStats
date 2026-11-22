@@ -2,8 +2,8 @@
 #include "providers/claude/ClaudeCodeLocalParser.hpp"
 #include "providers/claude/ClaudeCodeAdapter.hpp"
 #include "db/StorageService.hpp"
-#include "db/SchemaManager.hpp"
-#include <chrono>
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -11,37 +11,25 @@
 
 namespace JiStats {
 
+using TestSupport::requireSqlite;
+using TestSupport::TempTestDatabase;
+using TestSupport::TempTestDirectory;
+
 namespace {
 
 class TempFixtureFile {
 public:
-    explicit TempFixtureFile(const std::string& contents) {
-        const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-        path_ = (std::filesystem::temp_directory_path() / ("jistats_claude_fixture_" + suffix + ".json")).string();
+    explicit TempFixtureFile(const std::string& contents)
+        : path_((directory_.path() / "fixture.json").string()) {
         std::ofstream out(path_, std::ios::binary);
+        REQUIRE(out.is_open());
         out << contents;
+        REQUIRE(out.good());
     }
-    ~TempFixtureFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-    const std::string& path() const { return path_; }
-private:
-    std::string path_;
-};
 
-class TempDbFile {
-public:
-    TempDbFile() {
-        const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-        path_ = (std::filesystem::temp_directory_path() / ("jistats_claude_test_" + suffix + ".db")).string();
-    }
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
     const std::string& path() const { return path_; }
 private:
+    TempTestDirectory directory_{"jistats_claude_file"};
     std::string path_;
 };
 
@@ -267,12 +255,11 @@ TEST_CASE("Claude adapter provider key and display name", "[claude][adapter]") {
 }
 
 TEST_CASE("Claude importLocalActivity persists activity events", "[claude][persistence]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
-
-    SchemaManager schemaManager(storage);
-    REQUIRE(schemaManager.migrate());
 
     bool imported = ClaudeCodeLocalParser::importLocalActivity(
         storage,
@@ -280,10 +267,17 @@ TEST_CASE("Claude importLocalActivity persists activity events", "[claude][persi
         "docs/fixtures/claude/settings.redacted.json");
 
     REQUIRE(imported);
+    const auto result = storage.execute(
+        "SELECT COUNT(*) FROM activity_events WHERE provider_surface = 'claude_code_local_stats';");
+    REQUIRE(result.success());
+    REQUIRE(result.rowCount() == 1);
+    CHECK(result.getInt64(0, 0) == 3);
 }
 
 TEST_CASE("Claude importLocalActivity fails for missing file", "[claude][persistence]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
 

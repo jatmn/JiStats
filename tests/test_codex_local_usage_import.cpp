@@ -5,6 +5,7 @@
 
 #include "db/StorageService.hpp"
 #include "providers/openai/CodexLocalUsageImporter.hpp"
+#include "temp_test_directory.hpp"
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE)
 #include <sqlite3.h>
@@ -13,41 +14,18 @@
 #endif
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDatabase;
 
 namespace {
 
-class TempDbFile {
-public:
-    explicit TempDbFile(const std::string& prefix) {
-        path_ = std::filesystem::temp_directory_path() / (prefix + ".db");
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string path() const { return path_.string(); }
-
-private:
-    std::filesystem::path path_;
-};
-
-void execSql(sqlite3* db, const char* sql) {
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+void execSql(sqlite3* db, const char* sql) {
     char* err = nullptr;
     REQUIRE(sqlite3_exec(db, sql, nullptr, nullptr, &err) == SQLITE_OK);
     if (err) sqlite3_free(err);
-#else
-    (void)db;
-    (void)sql;
-#endif
 }
 
 void writeCodexStateDb(const std::string& path, long long tokens, long long newThreadTokens = -1) {
-#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     sqlite3* db = nullptr;
     REQUIRE(sqlite3_open(path.c_str(), &db) == SQLITE_OK);
     execSql(db,
@@ -78,11 +56,6 @@ void writeCodexStateDb(const std::string& path, long long tokens, long long newT
         sqlite3_finalize(stmt);
     }
     sqlite3_close(db);
-#else
-    (void)path;
-    (void)tokens;
-    (void)newThreadTokens;
-#endif
 }
 
 int countUsageEvents(StorageService& storage) {
@@ -99,14 +72,16 @@ long long totalUsageTokens(StorageService& storage) {
     return result.getInt64(0, 0);
 }
 
+#endif
+
 } // namespace
 
 TEST_CASE("CodexLocalUsageImporter baselines first scan then imports token deltas", "[codex][storage][import]") {
 #if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
     SKIP("SQLite unavailable");
 #else
-    TempDbFile appDb("jistats_codex_import_app");
-    TempDbFile sourceDb("jistats_codex_import_source");
+    TempTestDatabase appDb;
+    TempTestDatabase sourceDb;
     StorageService storage;
     REQUIRE(storage.init(appDb.path()));
 

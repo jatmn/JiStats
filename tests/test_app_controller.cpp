@@ -31,6 +31,8 @@
 #include "providers/openai/OpenAIExportImport.hpp"
 #include "taskbar/TaskbarPresenter.hpp"
 #include "runtime_test_support.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
 using namespace JiStats::TestSupport;
@@ -50,53 +52,6 @@ namespace {
 
 const std::filesystem::path kOpenAIExportFixturePath =
     std::filesystem::path("docs/fixtures/openai/chatgpt-export-redacted/conversations.json");
-
-class TempDbPath {
-public:
-    TempDbPath() {
-        static int counter = 0;
-        path_ = std::filesystem::temp_directory_path() /
-            ("jistats_app_startup_test_" + std::to_string(++counter) + ".db");
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbPath() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string string() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
-
-class TempDirPath {
-public:
-    explicit TempDirPath(const std::string& prefix) {
-        static int counter = 0;
-        path_ = std::filesystem::temp_directory_path() /
-            (prefix + "_" + std::to_string(++counter));
-        std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
-        std::filesystem::create_directories(path_, ec);
-    }
-
-    ~TempDirPath() {
-        std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
-    }
-
-    const std::filesystem::path& path() const {
-        return path_;
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 class ScopedEnvironmentVariable {
 public:
@@ -303,16 +258,6 @@ base_url = "https://api.kimi.com/coding/v1"
     "timed_out": false
   }
 })json");
-}
-
-bool sqliteAvailable() {
-    TempDbPath probePath;
-    StorageService storage;
-    const bool available = storage.init(probePath.string());
-    if (available) {
-        storage.close();
-    }
-    return available;
 }
 
 std::time_t utcDayStartForTest(std::time_t value) {
@@ -1114,18 +1059,16 @@ void seedPersistedQuotaSnapshot(
     storage.close();
 }
 
-class DelayedQuotaProviderAdapter final : public IProviderAdapter {
+class ControlledQuotaProviderAdapter final : public IProviderAdapter {
 public:
-    DelayedQuotaProviderAdapter(
+    ControlledQuotaProviderAdapter(
         std::string providerKey,
         std::string displayName,
         QuotaResponse quotaResponse,
-        std::chrono::milliseconds delay,
         std::shared_future<void> releaseQuota = {})
         : providerKey_(std::move(providerKey)),
           displayName_(std::move(displayName)),
           quotaResponse_(std::move(quotaResponse)),
-          delay_(delay),
           releaseQuota_(std::move(releaseQuota)) {}
 
     UsageResponse fetchUsage(std::time_t from, std::time_t to) override {
@@ -1136,7 +1079,6 @@ public:
 
     QuotaResponse fetchQuota() override {
         ++quotaFetchCount_;
-        std::this_thread::sleep_for(delay_);
         const bool released = !releaseQuota_.valid() ||
             releaseQuota_.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
         ++completedQuotaFetchCount_;
@@ -1182,7 +1124,6 @@ private:
     std::string providerKey_;
     std::string displayName_;
     QuotaResponse quotaResponse_;
-    std::chrono::milliseconds delay_{0};
     std::shared_future<void> releaseQuota_;
     bool enabled_ = true;
     std::atomic<int> quotaFetchCount_{0};
@@ -1271,7 +1212,9 @@ TEST_CASE("AppController cleans up logger state after forced startup failure", "
         Logger::shutdown();
     }
 
+    TempTestDatabase dbPath;
     AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
     app.setHeadlessForTesting(true);
     app.setForceDashboardInitFailureForTesting(true);
 
@@ -1286,7 +1229,9 @@ TEST_CASE("AppController cleans up logger state after forced startup failure", "
 TEST_CASE("AppController honors launch-in-background startup mode", "[app][startup]") {
     auto startupState = std::make_shared<FakeStartupHooksState>();
 
+    TempTestDatabase dbPath;
     AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
     app.setHeadlessForTesting(true);
     app.setStartupManagerTestHooks(makeStartupHooks(startupState));
     REQUIRE(app.init(true));
@@ -1297,19 +1242,16 @@ TEST_CASE("AppController honors launch-in-background startup mode", "[app][start
 }
 
 TEST_CASE("AppController applies persisted startup preferences through StartupManager", "[app][startup]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; startup preference persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), true, true);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), true, true);
 
     auto startupState = std::make_shared<FakeStartupHooksState>();
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setStartupManagerTestHooks(makeStartupHooks(startupState));
 
     REQUIRE(app.init());
@@ -1325,20 +1267,17 @@ TEST_CASE("AppController applies persisted startup preferences through StartupMa
 }
 
 TEST_CASE("AppController rewrites an enabled startup entry when persisted background mode changes", "[app][startup]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; startup preference persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), true, true);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), true, true);
 
     auto startupState = std::make_shared<FakeStartupHooksState>();
     startupState->registryValue = L"\"C:\\Program Files\\JiStats\\JiStats.exe\"";
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setStartupManagerTestHooks(makeStartupHooks(startupState));
 
     REQUIRE(app.init());
@@ -1355,13 +1294,10 @@ TEST_CASE("AppController rewrites an enabled startup entry when persisted backgr
 }
 
 TEST_CASE("AppController keeps registry startup background state when rewrite fails", "[app][startup]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; startup preference persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), true, true);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), true, true);
 
     auto startupState = std::make_shared<FakeStartupHooksState>();
     startupState->registryValue = L"\"C:\\Program Files\\JiStats\\JiStats.exe\"";
@@ -1370,7 +1306,7 @@ TEST_CASE("AppController keeps registry startup background state when rewrite fa
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setStartupManagerTestHooks(makeStartupHooks(startupState));
 
     REQUIRE(app.init());
@@ -1382,7 +1318,7 @@ TEST_CASE("AppController keeps registry startup background state when rewrite fa
     CHECK(viewModel.preferences.startupEnabled);
     CHECK_FALSE(viewModel.preferences.startupStartInBackground);
 
-    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.string());
+    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK(storedPreferences.startupEnabled);
     CHECK_FALSE(storedPreferences.startupStartInBackground);
 
@@ -1390,13 +1326,10 @@ TEST_CASE("AppController keeps registry startup background state when rewrite fa
 }
 
 TEST_CASE("AppController preserves requested startup enable preference when enable fails", "[app][startup]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; startup preference persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), true, true);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), true, true);
 
     auto startupState = std::make_shared<FakeStartupHooksState>();
     startupState->registryValue.clear();
@@ -1405,7 +1338,7 @@ TEST_CASE("AppController preserves requested startup enable preference when enab
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setStartupManagerTestHooks(makeStartupHooks(startupState));
 
     REQUIRE(app.init());
@@ -1417,7 +1350,7 @@ TEST_CASE("AppController preserves requested startup enable preference when enab
     CHECK(viewModel.preferences.startupEnabled);
     CHECK(viewModel.preferences.startupStartInBackground);
 
-    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.string());
+    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK(storedPreferences.startupEnabled);
     CHECK(storedPreferences.startupStartInBackground);
 
@@ -1425,13 +1358,10 @@ TEST_CASE("AppController preserves requested startup enable preference when enab
 }
 
 TEST_CASE("AppController preserves requested startup disable preference when disable fails", "[app][startup]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; startup preference persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false);
 
     auto startupState = std::make_shared<FakeStartupHooksState>();
     startupState->registryValue = L"\"C:\\Program Files\\JiStats\\JiStats.exe\"";
@@ -1440,7 +1370,7 @@ TEST_CASE("AppController preserves requested startup disable preference when dis
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setStartupManagerTestHooks(makeStartupHooks(startupState));
 
     REQUIRE(app.init());
@@ -1452,7 +1382,7 @@ TEST_CASE("AppController preserves requested startup disable preference when dis
     CHECK_FALSE(viewModel.preferences.startupEnabled);
     CHECK_FALSE(viewModel.preferences.startupStartInBackground);
 
-    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.string());
+    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK_FALSE(storedPreferences.startupEnabled);
     CHECK_FALSE(storedPreferences.startupStartInBackground);
 
@@ -1460,20 +1390,17 @@ TEST_CASE("AppController preserves requested startup disable preference when dis
 }
 
 TEST_CASE("AppController disables startup without a background rewrite when the Run entry is mismatched", "[app][startup]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; startup preference persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, true);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, true);
 
     auto startupState = std::make_shared<FakeStartupHooksState>();
     startupState->registryValue = L"\"C:\\Program Files\\JiStats\\JiStats.exe\"";
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setStartupManagerTestHooks(makeStartupHooks(startupState));
 
     REQUIRE(app.init());
@@ -1486,7 +1413,7 @@ TEST_CASE("AppController disables startup without a background rewrite when the 
     CHECK_FALSE(viewModel.preferences.startupEnabled);
     CHECK(viewModel.preferences.startupStartInBackground);
 
-    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.string());
+    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK_FALSE(storedPreferences.startupEnabled);
     CHECK(storedPreferences.startupStartInBackground);
 
@@ -1512,7 +1439,9 @@ TEST_CASE("AppController falls back to a visible dashboard when background tray 
         }
     });
 
+    TempTestDatabase dbPath;
     AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
     app.setDisableTaskbarForTesting(true);
     app.setProviderManagerForTesting(providerManager);
 
@@ -1531,7 +1460,9 @@ TEST_CASE("AppController tray show dashboard action does not toggle visibility o
         return true;
     });
 
+    TempTestDatabase dbPath;
     AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
     app.setDisableTaskbarForTesting(true);
     app.setProviderManagerForTesting(providerManager);
 
@@ -1556,7 +1487,9 @@ TEST_CASE("AppController dashboard shell menu opens settings help and about wind
         return true;
     });
 
+    TempTestDatabase dbPath;
     AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
     app.setDisableTaskbarForTesting(true);
     app.setProviderManagerForTesting(providerManager);
 
@@ -1581,12 +1514,9 @@ TEST_CASE("AppController dashboard shell menu opens settings help and about wind
 }
 
 TEST_CASE("AppController imports OpenAI export history from the dashboard shell", "[app][shell][openai]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; OpenAI export import cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     auto providerManager = std::make_shared<ProviderManager>();
     ScopedTrayTestHandler handler([](TrayController::TestOperation,
                                      TrayStatus,
@@ -1597,7 +1527,7 @@ TEST_CASE("AppController imports OpenAI export history from the dashboard shell"
 
     AppController app;
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setOpenAIImportPathForTesting(kOpenAIExportFixturePath.string());
 
@@ -1610,7 +1540,7 @@ TEST_CASE("AppController imports OpenAI export history from the dashboard shell"
     }));
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
 
     const QueryResult providerResult = storage.execute(
         "SELECT id FROM providers WHERE provider_key = ? LIMIT 1;",
@@ -1655,7 +1585,9 @@ TEST_CASE("AppController About dialog reflects the current about-content contrac
         return true;
     });
 
+    TempTestDatabase dbPath;
     AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
     app.setDisableTaskbarForTesting(true);
     app.setProviderManagerForTesting(providerManager);
 
@@ -1700,7 +1632,9 @@ TEST_CASE("AppController dashboard File Exit command requests shutdown with shel
         return true;
     });
 
+    TempTestDatabase dbPath;
     AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
     app.setDisableTaskbarForTesting(true);
     app.setProviderManagerForTesting(providerManager);
 
@@ -1738,7 +1672,7 @@ TEST_CASE("AppController dashboard File Exit command requests shutdown with shel
 }
 
 TEST_CASE("AppController saves MiniMax credentials from the settings shell and persists only metadata", "[app][shell][minimax]") {
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
     auto providerManager = std::make_shared<ProviderManager>();
@@ -1751,7 +1685,7 @@ TEST_CASE("AppController saves MiniMax credentials from the settings shell and p
 
     AppController app;
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
 
@@ -1786,7 +1720,7 @@ TEST_CASE("AppController saves MiniMax credentials from the settings shell and p
 
     if (sqliteAvailable()) {
         StorageService storage;
-        REQUIRE(storage.init(dbPath.string()));
+        REQUIRE(storage.init(dbPath.path()));
         const auto accountResult = storage.execute(
             "SELECT display_name FROM accounts WHERE account_key = ? LIMIT 1;",
             {"coding_plan.default"});
@@ -1808,7 +1742,7 @@ TEST_CASE("AppController saves MiniMax credentials from the settings shell and p
 }
 
 TEST_CASE("AppController updates an existing MiniMax credential profile from the settings shell", "[app][shell][minimax]") {
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
     auto providerManager = std::make_shared<ProviderManager>();
@@ -1821,7 +1755,7 @@ TEST_CASE("AppController updates an existing MiniMax credential profile from the
 
     AppController app;
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
     REQUIRE(app.init());
@@ -1858,7 +1792,7 @@ TEST_CASE("AppController updates an existing MiniMax credential profile from the
 
     if (sqliteAvailable()) {
         StorageService storage;
-        REQUIRE(storage.init(dbPath.string()));
+        REQUIRE(storage.init(dbPath.path()));
         const auto accountResult = storage.execute(
             "SELECT display_name FROM accounts WHERE account_key = ? LIMIT 1;",
             {"coding_plan.default"});
@@ -1872,7 +1806,7 @@ TEST_CASE("AppController updates an existing MiniMax credential profile from the
 }
 
 TEST_CASE("AppController surfaces MiniMax validation failures through the settings shell", "[app][shell][minimax]") {
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
     auto providerManager = std::make_shared<ProviderManager>();
@@ -1885,7 +1819,7 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
 
     AppController app;
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
     app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
@@ -1928,7 +1862,7 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
 }
 
 TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the masked secret field", "[app][shell][minimax]") {
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
     auto providerManager = std::make_shared<ProviderManager>();
@@ -1941,7 +1875,7 @@ TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the
 
     AppController app;
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
     app.setMiniMaxValidationResponseForTesting(true, 200, "{}", "");
@@ -1985,13 +1919,10 @@ TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the
 }
 
 TEST_CASE("AppController reports missing MiniMax secrets from hydrated metadata in the settings shell", "[app][shell][minimax]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; MiniMax settings persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedMiniMaxCredentialMetadata(dbPath.string(), "coding_plan", "Hydrated Coding Plan");
+    TempTestDatabase dbPath;
+    seedMiniMaxCredentialMetadata(dbPath.path(), "coding_plan", "Hydrated Coding Plan");
 
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
@@ -2005,7 +1936,7 @@ TEST_CASE("AppController reports missing MiniMax secrets from hydrated metadata 
 
     AppController app;
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
     REQUIRE(app.init());
@@ -2040,7 +1971,7 @@ TEST_CASE("AppController reports missing MiniMax secrets from hydrated metadata 
 }
 
 TEST_CASE("AppController testing MiniMax action helper returns the direct fallback result", "[app][shell][minimax]") {
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
     auto providerManager = std::make_shared<ProviderManager>();
@@ -2053,7 +1984,7 @@ TEST_CASE("AppController testing MiniMax action helper returns the direct fallba
 
     AppController app;
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
     REQUIRE(app.init());
@@ -2075,13 +2006,10 @@ TEST_CASE("AppController testing MiniMax action helper returns the direct fallba
 }
 
 TEST_CASE("AppController keeps dashboard, tray, taskbar, and offline notice in sync", "[app][runtime]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; offline runtime persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, true, true, false, false);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
     const std::time_t now = std::time(nullptr);
     auto liveProvider = makeCurrentQuotaProvider("openai", "OpenAI", 1305, 1500, now, "monthly");
     auto offlineProvider = makeOfflineQuotaProvider("minimax", "MiniMax");
@@ -2096,7 +2024,7 @@ TEST_CASE("AppController keeps dashboard, tray, taskbar, and offline notice in s
 
     AppController app;
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
@@ -2122,7 +2050,7 @@ TEST_CASE("AppController keeps dashboard, tray, taskbar, and offline notice in s
     CHECK(findTaskbarMetric(taskbarMetrics, "minimax") == nullptr);
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
 
     const int openaiProviderId = requireProviderId(storage, "openai");
     const int minimaxProviderId = requireProviderId(storage, "minimax");
@@ -2173,13 +2101,10 @@ TEST_CASE("AppController keeps dashboard, tray, taskbar, and offline notice in s
 }
 
 TEST_CASE("AppController dashboard dismiss and tray retry keep offline notice low-noise across recovery transitions", "[app][runtime][offline_notice]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; offline notice persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     auto provider = makeOfflineQuotaProvider("minimax", "MiniMax");
     auto providerManager = makeProviderManager({provider});
@@ -2193,7 +2118,7 @@ TEST_CASE("AppController dashboard dismiss and tray retry keep offline notice lo
 
     AppController app;
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
@@ -2252,7 +2177,7 @@ TEST_CASE("AppController dashboard dismiss and tray retry keep offline notice lo
 }
 
 TEST_CASE("AppController surfaces stale provider runtime state for taskbar validation", "[app][runtime]") {
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     const std::time_t now = std::time(nullptr);
     auto staleProvider = makeStaleQuotaProvider("openai", "OpenAI", 1305, 1500, now, "monthly");
     auto providerManager = makeProviderManager({staleProvider});
@@ -2266,7 +2191,7 @@ TEST_CASE("AppController surfaces stale provider runtime state for taskbar valid
 
     AppController app;
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
@@ -2306,19 +2231,16 @@ TEST_CASE("AppController surfaces stale provider runtime state for taskbar valid
 }
 
 TEST_CASE("AppController persists offline retry metadata and recovery markers for runtime refreshes", "[app][runtime][recovery]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; runtime recovery persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     auto offlineProvider = makeOfflineQuotaProvider("minimax", "MiniMax");
     auto providerManager = makeProviderManager({offlineProvider});
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
@@ -2344,16 +2266,13 @@ TEST_CASE("AppController persists offline retry metadata and recovery markers fo
 }
 
 TEST_CASE("AppController runs catch-up recovery and records runtime gap markers after a launch gap", "[app][runtime][recovery]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; runtime catch-up cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     seedRuntimeState(
-        dbPath.string(),
+        dbPath.path(),
         now - (3 * 3600),
         now - (3 * 3600));
 
@@ -2362,7 +2281,7 @@ TEST_CASE("AppController runs catch-up recovery and records runtime gap markers 
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
@@ -2411,7 +2330,7 @@ TEST_CASE("AppController runs catch-up recovery and records runtime gap markers 
     CHECK(syncState->lastFailureCategory.empty());
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
     const int openaiProviderId = requireProviderId(storage, "openai");
     const int openaiRuntimeAccountId =
         requireAccountId(storage, openaiProviderId, "openai.runtime_status");
@@ -2451,16 +2370,13 @@ TEST_CASE("AppController runs catch-up recovery and records runtime gap markers 
 }
 
 TEST_CASE("AppController persists imported recovery backfill checkpoints per provider", "[app][runtime][recovery]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; recovery backfill persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     seedRuntimeState(
-        dbPath.string(),
+        dbPath.path(),
         now - (3 * 3600),
         now - (3 * 3600));
 
@@ -2470,7 +2386,7 @@ TEST_CASE("AppController persists imported recovery backfill checkpoints per pro
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
@@ -2481,7 +2397,7 @@ TEST_CASE("AppController persists imported recovery backfill checkpoints per pro
     }, std::chrono::milliseconds(1500)));
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
     const int openaiProviderId = requireProviderId(storage, "openai");
     const int openaiRuntimeAccountId =
         requireAccountId(storage, openaiProviderId, "openai.runtime_status");
@@ -2513,20 +2429,17 @@ TEST_CASE("AppController persists imported recovery backfill checkpoints per pro
 }
 
 TEST_CASE("AppController persists no-mismatch recovery summaries when provider backfill matches local evidence", "[app][runtime][recovery]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; recovery reconciliation summaries cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     seedRuntimeState(
-        dbPath.string(),
+        dbPath.path(),
         now - (3 * 3600),
         now - (3 * 3600));
     seedRuntimeUsageEvent(
-        dbPath.string(),
+        dbPath.path(),
         "openai",
         "OpenAI",
         now - 1800,
@@ -2539,7 +2452,7 @@ TEST_CASE("AppController persists no-mismatch recovery summaries when provider b
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
@@ -2550,7 +2463,7 @@ TEST_CASE("AppController persists no-mismatch recovery summaries when provider b
     }, std::chrono::milliseconds(1500)));
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
     const int openaiProviderId = requireProviderId(storage, "openai");
     const int openaiRuntimeAccountId =
         requireAccountId(storage, openaiProviderId, "openai.runtime_status");
@@ -2577,20 +2490,17 @@ TEST_CASE("AppController persists no-mismatch recovery summaries when provider b
 }
 
 TEST_CASE("AppController persists mismatch recovery summaries when provider backfill differs from local evidence", "[app][runtime][recovery]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; recovery mismatch summaries cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     seedRuntimeState(
-        dbPath.string(),
+        dbPath.path(),
         now - (3 * 3600),
         now - (3 * 3600));
     seedRuntimeUsageEvent(
-        dbPath.string(),
+        dbPath.path(),
         "openai",
         "OpenAI",
         now - 1800,
@@ -2603,7 +2513,7 @@ TEST_CASE("AppController persists mismatch recovery summaries when provider back
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
@@ -2614,7 +2524,7 @@ TEST_CASE("AppController persists mismatch recovery summaries when provider back
     }, std::chrono::milliseconds(1500)));
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
     const int openaiProviderId = requireProviderId(storage, "openai");
     const int openaiRuntimeAccountId =
         requireAccountId(storage, openaiProviderId, "openai.runtime_status");
@@ -2641,16 +2551,13 @@ TEST_CASE("AppController persists mismatch recovery summaries when provider back
 }
 
 TEST_CASE("AppController persists failed recovery backfill checkpoints and leaves the gap marked unknown", "[app][runtime][recovery]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; recovery backfill failure persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     seedRuntimeState(
-        dbPath.string(),
+        dbPath.path(),
         now - (3 * 3600),
         now - (3 * 3600));
 
@@ -2663,13 +2570,13 @@ TEST_CASE("AppController persists failed recovery backfill checkpoints and leave
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
     const int openaiProviderId = requireProviderId(storage, "openai");
     const int openaiRuntimeAccountId =
         requireAccountId(storage, openaiProviderId, "openai.runtime_status");
@@ -2700,10 +2607,7 @@ TEST_CASE("AppController persists failed recovery backfill checkpoints and leave
 }
 
 TEST_CASE("AppController handles long-gap mixed provider recovery outcomes without duplicating imported backfill on repeat runs", "[app][runtime][recovery]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; long-gap mixed recovery cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
     const std::time_t providerNow = std::time(nullptr);
     const auto makeMixedOutcomeProviderManager = [](std::time_t now) {
@@ -2728,16 +2632,16 @@ TEST_CASE("AppController handles long-gap mixed provider recovery outcomes witho
         return makeProviderManager({openaiProvider, minimaxProvider, kimiProvider});
     };
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, true, true, false, true);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true, false, true);
     const std::time_t recoveryStart = std::time(nullptr) - (5 * 24 * 3600);
     seedRuntimeState(
-        dbPath.string(),
+        dbPath.path(),
         recoveryStart,
         recoveryStart);
     {
         StorageService storage;
-        REQUIRE(storage.init(dbPath.string()));
+        REQUIRE(storage.init(dbPath.path()));
         (void)ensureRuntimeAccountId(storage, "kimi", "Kimi Code");
         storage.close();
     }
@@ -2745,7 +2649,7 @@ TEST_CASE("AppController handles long-gap mixed provider recovery outcomes witho
     {
         AppController app;
         app.setHeadlessForTesting(true);
-        app.setDatabasePathForTesting(dbPath.string());
+        app.setDatabasePathForTesting(dbPath.path());
         app.setProviderManagerForTesting(makeMixedOutcomeProviderManager(providerNow));
 
         REQUIRE(app.init());
@@ -2756,7 +2660,7 @@ TEST_CASE("AppController handles long-gap mixed provider recovery outcomes witho
         }, std::chrono::milliseconds(1500)));
 
         StorageService storage;
-        REQUIRE(storage.init(dbPath.string()));
+        REQUIRE(storage.init(dbPath.path()));
 
         const int openaiProviderId = requireProviderId(storage, "openai");
         const int openaiRuntimeAccountId =
@@ -2798,14 +2702,14 @@ TEST_CASE("AppController handles long-gap mixed provider recovery outcomes witho
     }
 
     seedRuntimeState(
-        dbPath.string(),
+        dbPath.path(),
         recoveryStart,
         recoveryStart);
 
     {
         AppController repeatedApp;
         repeatedApp.setHeadlessForTesting(true);
-        repeatedApp.setDatabasePathForTesting(dbPath.string());
+        repeatedApp.setDatabasePathForTesting(dbPath.path());
         repeatedApp.setProviderManagerForTesting(makeMixedOutcomeProviderManager(providerNow));
 
         REQUIRE(repeatedApp.init());
@@ -2816,7 +2720,7 @@ TEST_CASE("AppController handles long-gap mixed provider recovery outcomes witho
         }, std::chrono::milliseconds(1500)));
 
         StorageService storage;
-        REQUIRE(storage.init(dbPath.string()));
+        REQUIRE(storage.init(dbPath.path()));
         const int openaiProviderId = requireProviderId(storage, "openai");
         const int openaiRuntimeAccountId =
             requireAccountId(storage, openaiProviderId, "openai.runtime_status");
@@ -2867,9 +2771,9 @@ TEST_CASE("AppController handles long-gap mixed provider recovery outcomes witho
 
 TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout snapshot changes",
           "[app][runtime][openai][codex]") {
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
-    TempDirPath userProfileRoot("jistats_codex_refresh");
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
+    TempTestDirectory userProfileRoot("jistats_codex_refresh");
     const auto rolloutPath =
         userProfileRoot.path() / ".codex" / "sessions" / "2026" / "04" / "19" / "rollout-live.jsonl";
     const std::time_t now = std::time(nullptr);
@@ -2892,7 +2796,7 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
     AppController app;
     app.setHeadlessForTesting(true);
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setOpenAICodexRefreshPollIntervalForTesting(25);
 
@@ -2921,15 +2825,15 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
 }
 
 TEST_CASE("AppController applies taskbar overlay preference toggles without leaving stale taskbar metrics", "[app][runtime]") {
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     auto liveProvider = makeCurrentQuotaProvider("openai", "OpenAI", 1305, 1500, now, "monthly");
     auto providerManager = makeProviderManager({liveProvider});
 
     AppController app;
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
@@ -2969,7 +2873,9 @@ TEST_CASE("AppController labels Codex-local quota rows without generic API wordi
         "openai_subscription_codex_local");
     auto providerManager = makeProviderManager({codexProvider});
 
+    TempTestDatabase dbPath;
     AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
     app.setHeadlessForTesting(true);
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
@@ -2996,7 +2902,9 @@ TEST_CASE("AppController keeps OpenAI API-platform imported quota rows distinct 
         "openai_api_import");
     auto providerManager = makeProviderManager({apiImportProvider});
 
+    TempTestDatabase dbPath;
     AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
     app.setHeadlessForTesting(true);
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
@@ -3012,8 +2920,8 @@ TEST_CASE("AppController keeps OpenAI API-platform imported quota rows distinct 
 }
 
 TEST_CASE("AppController suppresses Kimi local-only quota snapshots and relies on activity surfaces instead", "[app][runtime][kimi]") {
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     QuotaResponse kimiQuota = makeQuotaResponse(
         now,
@@ -3030,7 +2938,7 @@ TEST_CASE("AppController suppresses Kimi local-only quota snapshots and relies o
     AppController app;
     app.setHeadlessForTesting(true);
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -3048,8 +2956,8 @@ TEST_CASE("AppController suppresses Kimi local-only quota snapshots and relies o
 }
 
 TEST_CASE("AppController surfaces Kimi provider-exact quota windows as remaining-first taskbar metrics", "[app][runtime][kimi]") {
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
 
     QuotaResponse kimiQuota = makeQuotaResponse(
@@ -3069,7 +2977,7 @@ TEST_CASE("AppController surfaces Kimi provider-exact quota windows as remaining
     AppController app;
     app.setHeadlessForTesting(true);
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -3105,8 +3013,10 @@ TEST_CASE("AppController surfaces Kimi provider-exact quota windows as remaining
 }
 
 TEST_CASE("AppController throttles direct quota APIs per API surface with adaptive polling windows", "[app][runtime][polling]") {
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, false, true, false, true);
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, true, false, true);
 
     const std::time_t baseNow = std::time(nullptr);
     auto minimaxProvider = makeCurrentQuotaProvider(
@@ -3138,7 +3048,7 @@ TEST_CASE("AppController throttles direct quota APIs per API surface with adapti
     AppController app;
     app.setHeadlessForTesting(true);
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -3191,8 +3101,10 @@ TEST_CASE("AppController throttles direct quota APIs per API surface with adapti
 }
 
 TEST_CASE("AppController local-provider watcher does not drag MiniMax direct API quota fetches onto the local refresh cadence", "[app][runtime][polling]") {
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, false, true, false, true);
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, true, false, true);
 
     const std::time_t now = std::time(nullptr);
     auto minimaxProvider = makeCurrentQuotaProvider(
@@ -3210,7 +3122,7 @@ TEST_CASE("AppController local-provider watcher does not drag MiniMax direct API
     AppController app;
     app.setHeadlessForTesting(true);
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setLocalProviderRefreshPollIntervalForTesting(50);
     REQUIRE(app.init());
@@ -3225,10 +3137,12 @@ TEST_CASE("AppController local-provider watcher does not drag MiniMax direct API
 }
 
 TEST_CASE("AppController local-provider watcher stays idle until Claude or Kimi local artifacts actually change", "[app][runtime][polling]") {
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, false, false, false, true);
-    TempDirPath homeRoot("jistats_kimi_quiet_watch_home");
-    TempDirPath emptyUserRoot("jistats_kimi_quiet_watch_empty_user");
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, false, false, true);
+    TempTestDirectory homeRoot("jistats_kimi_quiet_watch_home");
+    TempTestDirectory emptyUserRoot("jistats_kimi_quiet_watch_empty_user");
     writeInstalledButIdleKimiFixture(homeRoot.path());
 
     ScopedEnvironmentVariable kimiHome("KIMI_HOME", homeRoot.path().string());
@@ -3249,7 +3163,7 @@ TEST_CASE("AppController local-provider watcher stays idle until Claude or Kimi 
     AppController app;
     app.setHeadlessForTesting(true);
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setLocalProviderRefreshPollIntervalForTesting(50);
     REQUIRE(app.init());
@@ -3284,10 +3198,10 @@ TEST_CASE("AppController background watchers switch to a dormant interval when t
 #endif
 
 TEST_CASE("AppController imports Kimi local runtime snapshots into persisted runtime summaries", "[app][runtime][kimi]") {
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
-    TempDirPath homeRoot("jistats_kimi_home");
-    TempDirPath emptyUserRoot("jistats_kimi_empty_user");
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
+    TempTestDirectory homeRoot("jistats_kimi_home");
+    TempTestDirectory emptyUserRoot("jistats_kimi_empty_user");
     const std::time_t now = std::time(nullptr);
     writeRecentKimiFixture(homeRoot.path(), now);
 
@@ -3297,7 +3211,7 @@ TEST_CASE("AppController imports Kimi local runtime snapshots into persisted run
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     REQUIRE(app.init());
 
     const auto persisted = app.getPersistedActivitiesForTesting(
@@ -3328,10 +3242,12 @@ TEST_CASE("AppController imports Kimi local runtime snapshots into persisted run
 }
 
 TEST_CASE("AppController detects installed Kimi without surfacing a false offline state when no runtime snapshots exist", "[app][runtime][kimi]") {
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, false, false, false, true);
-    TempDirPath homeRoot("jistats_kimi_idle_home");
-    TempDirPath emptyUserRoot("jistats_kimi_idle_empty_user");
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, false, false, true);
+    TempTestDirectory homeRoot("jistats_kimi_idle_home");
+    TempTestDirectory emptyUserRoot("jistats_kimi_idle_empty_user");
     writeInstalledButIdleKimiFixture(homeRoot.path());
 
     ScopedEnvironmentVariable kimiHome("KIMI_HOME", homeRoot.path().string());
@@ -3340,7 +3256,7 @@ TEST_CASE("AppController detects installed Kimi without surfacing a false offlin
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     REQUIRE(app.init());
 
     const DashboardViewModel viewModel = app.getDashboardViewModelForTesting();
@@ -3355,10 +3271,12 @@ TEST_CASE("AppController detects installed Kimi without surfacing a false offlin
 }
 
 TEST_CASE("AppController enabling Kimi after startup imports nested local runtime activity and shows live Kimi data", "[app][runtime][kimi]") {
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, false, false, false, false);
-    TempDirPath homeRoot("jistats_kimi_nested_home");
-    TempDirPath emptyUserRoot("jistats_kimi_nested_empty_user");
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, false, false, false);
+    TempTestDirectory homeRoot("jistats_kimi_nested_home");
+    TempTestDirectory emptyUserRoot("jistats_kimi_nested_empty_user");
     const std::time_t now = std::time(nullptr);
     writeNestedRecentKimiFixture(homeRoot.path(), now);
 
@@ -3369,7 +3287,7 @@ TEST_CASE("AppController enabling Kimi after startup imports nested local runtim
     AppController app;
     app.setHeadlessForTesting(true);
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     auto providerManager = std::make_shared<ProviderManager>();
     providerManager->addProvider(std::make_shared<KimiAdapter>(homeRoot.path().string()));
     app.setProviderManagerForTesting(providerManager);
@@ -3402,10 +3320,12 @@ TEST_CASE("AppController enabling Kimi after startup imports nested local runtim
 }
 
 TEST_CASE("AppController local-provider watcher refreshes Kimi activity after local files change", "[app][runtime][kimi]") {
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, false, false, false, true);
-    TempDirPath homeRoot("jistats_kimi_watch_home");
-    TempDirPath emptyUserRoot("jistats_kimi_watch_empty_user");
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, false, false, true);
+    TempTestDirectory homeRoot("jistats_kimi_watch_home");
+    TempTestDirectory emptyUserRoot("jistats_kimi_watch_empty_user");
     writeInstalledButIdleKimiFixture(homeRoot.path());
 
     ScopedEnvironmentVariable kimiHome("KIMI_HOME", homeRoot.path().string());
@@ -3415,7 +3335,7 @@ TEST_CASE("AppController local-provider watcher refreshes Kimi activity after lo
     AppController app;
     app.setHeadlessForTesting(true);
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setLocalProviderRefreshPollIntervalForTesting(50);
     auto providerManager = std::make_shared<ProviderManager>();
     providerManager->addProvider(std::make_shared<KimiAdapter>(homeRoot.path().string()));
@@ -3448,8 +3368,8 @@ TEST_CASE("AppController local-provider watcher refreshes Kimi activity after lo
 }
 
 TEST_CASE("AppController normalizes quota fields and dashboard summaries to remaining semantics", "[app][runtime]") {
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     auto openaiProvider = makeCurrentQuotaProvider(
         "openai",
@@ -3471,7 +3391,7 @@ TEST_CASE("AppController normalizes quota fields and dashboard summaries to rema
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -3516,16 +3436,13 @@ TEST_CASE("AppController normalizes quota fields and dashboard summaries to rema
 }
 
 TEST_CASE("AppController startup hydration shows persisted quota state while live refresh is blocked", "[app][runtime]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; persisted startup hydration cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, true, false, false, false);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false);
     const std::time_t snapshotTime = std::time(nullptr) - 300;
     seedPersistedQuotaSnapshot(
-        dbPath.string(),
+        dbPath.path(),
         "openai",
         "acct-openai-startup",
         "OpenAI Startup Account",
@@ -3539,24 +3456,23 @@ TEST_CASE("AppController startup hydration shows persisted quota state while liv
 
     AppController app;
     std::promise<void> releaseQuota;
-    auto delayedProvider = std::make_shared<DelayedQuotaProviderAdapter>(
+    auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
         "openai",
         "OpenAI",
         makeQuotaResponse(std::time(nullptr), 25, 100, "interval", "openai_subscription_codex_local"),
-        std::chrono::milliseconds(0),
         releaseQuota.get_future().share());
     auto providerManager = std::make_shared<ProviderManager>();
-    providerManager->addProvider(delayedProvider);
+    providerManager->addProvider(provider);
 
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
-    REQUIRE(waitForCondition([&delayedProvider]() {
-        return delayedProvider->getQuotaFetchCount() > 0;
+    REQUIRE(waitForCondition([&provider]() {
+        return provider->getQuotaFetchCount() > 0;
     }, std::chrono::seconds(5)));
-    REQUIRE(delayedProvider->getCompletedQuotaFetchCount() == 0);
+    REQUIRE(provider->getCompletedQuotaFetchCount() == 0);
 
     const DashboardViewModel hydratedViewModel = app.getDashboardViewModelForTesting();
     REQUIRE(hydratedViewModel.providers.size() == 1);
@@ -3585,22 +3501,19 @@ TEST_CASE("AppController startup hydration shows persisted quota state while liv
     REQUIRE(refreshedOpenAI->quotas.size() == 1);
     CHECK(refreshedOpenAI->quotas.front().used == 25);
     CHECK(refreshedOpenAI->quotas.front().remaining == 75);
-    CHECK(delayedProvider->getCompletedQuotaFetchCount() >= 1);
+    CHECK(provider->getCompletedQuotaFetchCount() >= 1);
 
     app.shutdown();
 }
 
-TEST_CASE("AppController hydrated direct-api startup does not force an immediate refresh", "[app][runtime]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; persisted startup hydration cannot be exercised here.");
-        return;
-    }
+TEST_CASE("AppController uses persisted MiniMax quota at startup until an explicit refresh", "[app][runtime]") {
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, false, true, false, false);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, true, false, false);
     const std::time_t snapshotTime = std::time(nullptr) - 180;
     seedPersistedQuotaSnapshot(
-        dbPath.string(),
+        dbPath.path(),
         "minimax",
         "acct-minimax-startup",
         "MiniMax Startup Account",
@@ -3619,21 +3532,17 @@ TEST_CASE("AppController hydrated direct-api startup does not force an immediate
         "interval",
         "minimax_subscription_coding_plan");
     liveQuota.remaining = 850;
-    auto delayedProvider = std::make_shared<DelayedQuotaProviderAdapter>(
-        "minimax",
-        "MiniMax",
-        liveQuota,
-        std::chrono::milliseconds(400));
+    auto provider = std::make_shared<ControlledQuotaProviderAdapter>("minimax", "MiniMax", liveQuota);
     auto providerManager = std::make_shared<ProviderManager>();
-    providerManager->addProvider(delayedProvider);
+    providerManager->addProvider(provider);
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
-    CHECK(delayedProvider->getQuotaFetchCount() == 0);
+    CHECK(provider->getQuotaFetchCount() == 0);
 
     const DashboardViewModel hydratedViewModel = app.getDashboardViewModelForTesting();
     REQUIRE(hydratedViewModel.providers.size() == 1);
@@ -3642,7 +3551,7 @@ TEST_CASE("AppController hydrated direct-api startup does not force an immediate
     CHECK(hydratedViewModel.providers.front().quotas.front().remaining == 580);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
-    CHECK(delayedProvider->getQuotaFetchCount() == 0);
+    CHECK(provider->getQuotaFetchCount() == 0);
 
     app.refreshRuntimeForTesting();
     REQUIRE(waitForCondition([&app]() {
@@ -3657,16 +3566,13 @@ TEST_CASE("AppController hydrated direct-api startup does not force an immediate
 }
 
 TEST_CASE("AppController defers provider discovery until Settings opens after hydrated startup", "[app][shell][startup]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; persisted startup hydration cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, true, false, true, false);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, false, true, false);
     const std::time_t snapshotTime = std::time(nullptr) - 180;
     seedPersistedQuotaSnapshot(
-        dbPath.string(),
+        dbPath.path(),
         "openai",
         "acct-openai-startup",
         "OpenAI Startup Account",
@@ -3694,7 +3600,7 @@ TEST_CASE("AppController defers provider discovery until Settings opens after hy
 
     AppController app;
     app.setDisableTaskbarForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
     REQUIRE(app.init());
@@ -3712,18 +3618,15 @@ TEST_CASE("AppController defers provider discovery until Settings opens after hy
 }
 
 TEST_CASE("AppController uses quantified usage rollups for dashboard fallback and tray tooltip", "[app][runtime][rollups]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; rollup-backed metric consumers cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     const std::time_t rollupFrom = now - (6 * 60 * 60);
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
 
     const auto openaiIds = seedUsageProviderAccount(
         storage,
@@ -3792,7 +3695,7 @@ TEST_CASE("AppController uses quantified usage rollups for dashboard fallback an
 
     AppController app;
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
 
     REQUIRE(app.init());
@@ -3827,18 +3730,15 @@ TEST_CASE("AppController uses quantified usage rollups for dashboard fallback an
 }
 
 TEST_CASE("AppController keeps raw quantified usage for providers missing hourly rollups", "[app][runtime][rollups]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; partial rollup fallback cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     const std::time_t rollupFrom = now - (6 * 60 * 60);
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
 
     const auto openaiIds = seedUsageProviderAccount(
         storage,
@@ -3878,7 +3778,7 @@ TEST_CASE("AppController keeps raw quantified usage for providers missing hourly
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
 
     REQUIRE(app.init());
@@ -3892,18 +3792,15 @@ TEST_CASE("AppController keeps raw quantified usage for providers missing hourly
 }
 
 TEST_CASE("AppController counts providers from hourly rollups after raw usage retention", "[app][runtime][rollups]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; rollup-only provider counts cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     const std::time_t rollupFrom = now - (6 * 60 * 60);
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
 
     const auto openaiIds = seedUsageProviderAccount(
         storage,
@@ -3950,7 +3847,7 @@ TEST_CASE("AppController counts providers from hourly rollups after raw usage re
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
 
     REQUIRE(app.init());
@@ -3964,17 +3861,14 @@ TEST_CASE("AppController counts providers from hourly rollups after raw usage re
 }
 
 TEST_CASE("AppController keeps taskbar overlay on subscription quota when Codex local usage exists", "[app][runtime][taskbar][codex]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; taskbar quota scoping cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
     const auto openaiIds = seedUsageProviderAccount(
         storage,
         "openai",
@@ -4005,7 +3899,7 @@ TEST_CASE("AppController keeps taskbar overlay on subscription quota when Codex 
     AppController app;
     app.setHeadlessForTesting(true);
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(makeProviderManager({openaiProvider}));
     REQUIRE(app.init());
 
@@ -4022,8 +3916,8 @@ TEST_CASE("AppController keeps taskbar overlay on subscription quota when Codex 
 }
 
 TEST_CASE("AppController prefers explicit MiniMax remaining values without regressing OpenAI summaries or taskbar metrics", "[app][runtime]") {
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
 
     QuotaResponse openaiQuota =
@@ -4044,7 +3938,7 @@ TEST_CASE("AppController prefers explicit MiniMax remaining values without regre
     AppController app;
     app.setHeadlessForTesting(true);
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -4100,7 +3994,9 @@ TEST_CASE("AppController prefers explicit MiniMax remaining values without regre
 }
 
 TEST_CASE("AppController defaults all shipped provider tracking to disabled on a fresh install", "[app][runtime]") {
-    TempDbPath dbPath;
+    requireSqlite();
+
+    TempTestDatabase dbPath;
     const std::time_t now = std::time(nullptr);
     auto openaiProvider = makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now);
     auto minimaxProvider = makeCurrentQuotaProvider(
@@ -4117,7 +4013,7 @@ TEST_CASE("AppController defaults all shipped provider tracking to disabled on a
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -4128,7 +4024,7 @@ TEST_CASE("AppController defaults all shipped provider tracking to disabled on a
     CHECK_FALSE(viewModel.preferences.kimiCodeEnabled);
     CHECK(viewModel.providers.empty());
 
-    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.string());
+    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK_FALSE(storedPreferences.openaiSubscriptionTrackingEnabled);
     CHECK_FALSE(storedPreferences.miniMaxSubscriptionTrackingEnabled);
     CHECK_FALSE(storedPreferences.claudeCodeEnabled);
@@ -4138,13 +4034,10 @@ TEST_CASE("AppController defaults all shipped provider tracking to disabled on a
 }
 
 TEST_CASE("AppController rehydrates persisted provider tracking preferences", "[app][runtime]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; OpenAI preference persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, false, true);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, true);
 
     const std::time_t now = std::time(nullptr);
     auto openaiProvider = makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now);
@@ -4160,7 +4053,7 @@ TEST_CASE("AppController rehydrates persisted provider tracking preferences", "[
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -4171,7 +4064,7 @@ TEST_CASE("AppController rehydrates persisted provider tracking preferences", "[
     CHECK(viewModel.providers.front().providerKey == "minimax");
     CHECK(openaiProvider->getQuotaFetchCount() == 0);
 
-    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.string());
+    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK_FALSE(storedPreferences.openaiSubscriptionTrackingEnabled);
     CHECK(storedPreferences.miniMaxSubscriptionTrackingEnabled);
 
@@ -4179,8 +4072,10 @@ TEST_CASE("AppController rehydrates persisted provider tracking preferences", "[
 }
 
 TEST_CASE("AppController toggles OpenAI subscription tracking at runtime", "[app][runtime]") {
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, true, true);
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true);
     const std::time_t now = std::time(nullptr);
     auto openaiProvider = makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now);
     auto minimaxProvider = makeCurrentQuotaProvider(
@@ -4195,7 +4090,7 @@ TEST_CASE("AppController toggles OpenAI subscription tracking at runtime", "[app
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -4224,13 +4119,10 @@ TEST_CASE("AppController toggles OpenAI subscription tracking at runtime", "[app
 }
 
 TEST_CASE("AppController persists and rehydrates the last selected provider scope", "[app][runtime][selection]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; provider selection persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedAllProviderTrackingEnabled(dbPath.string());
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
     auto openaiProvider = makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now);
     auto minimaxProvider = makeCurrentQuotaProvider(
@@ -4245,7 +4137,7 @@ TEST_CASE("AppController persists and rehydrates the last selected provider scop
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -4259,7 +4151,7 @@ TEST_CASE("AppController persists and rehydrates the last selected provider scop
     REQUIRE(selectedSummary.has_value());
     CHECK(findUsageSummary(app.getDashboardUsageProgressSummariesForTesting(), "OpenAI Subscription") == std::nullopt);
 
-    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.string());
+    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK(storedPreferences.lastSelectedProviderId == "minimax");
     CHECK(storedPreferences.lastSelectedAccountId == "minimax.runtime_status");
 
@@ -4267,7 +4159,7 @@ TEST_CASE("AppController persists and rehydrates the last selected provider scop
 
     AppController rehydratedApp;
     rehydratedApp.setHeadlessForTesting(true);
-    rehydratedApp.setDatabasePathForTesting(dbPath.string());
+    rehydratedApp.setDatabasePathForTesting(dbPath.path());
     rehydratedApp.setProviderManagerForTesting(providerManager);
     REQUIRE(rehydratedApp.init());
 
@@ -4282,13 +4174,10 @@ TEST_CASE("AppController persists and rehydrates the last selected provider scop
 }
 
 TEST_CASE("AppController persists and rehydrates analysis scope preferences", "[app][analysis][preferences]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; analysis preference persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, true, true, false, false);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
     const std::time_t now = std::time(nullptr);
     auto openaiProvider = makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now);
     auto minimaxProvider = makeCurrentQuotaProvider(
@@ -4303,7 +4192,7 @@ TEST_CASE("AppController persists and rehydrates analysis scope preferences", "[
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -4315,7 +4204,7 @@ TEST_CASE("AppController persists and rehydrates analysis scope preferences", "[
     preferences.analysisCustomRangeEndUtc = now - (2 * 24 * 3600);
     app.applyDashboardPreferencesForTesting(preferences);
 
-    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.string());
+    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK(storedPreferences.analysisSelectedProviderId == "openai");
     CHECK(storedPreferences.analysisSelectedAccountId == "openai.runtime_status");
     CHECK(storedPreferences.analysisDateRangePreset == AnalysisDateRangePreset::Custom);
@@ -4326,7 +4215,7 @@ TEST_CASE("AppController persists and rehydrates analysis scope preferences", "[
 
     AppController rehydratedApp;
     rehydratedApp.setHeadlessForTesting(true);
-    rehydratedApp.setDatabasePathForTesting(dbPath.string());
+    rehydratedApp.setDatabasePathForTesting(dbPath.path());
     rehydratedApp.setProviderManagerForTesting(providerManager);
     REQUIRE(rehydratedApp.init());
 
@@ -4341,23 +4230,20 @@ TEST_CASE("AppController persists and rehydrates analysis scope preferences", "[
 }
 
 TEST_CASE("AppController builds analysis daily summaries breakdowns and gap messaging from persisted usage", "[app][analysis]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; analysis history cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     const std::time_t now = std::time(nullptr);
     const std::time_t openaiDayOne = now - (2 * 24 * 3600);
     const std::time_t openaiDayTwo = now - (1 * 24 * 3600);
 
-    seedRuntimeUsageEvent(dbPath.string(), "openai", "OpenAI", openaiDayOne, 240, 18, "gpt-4.1");
-    seedRuntimeUsageEvent(dbPath.string(), "openai", "OpenAI", openaiDayTwo, 180, 14, "gpt-4.1");
-    seedRuntimeUsageEvent(dbPath.string(), "minimax", "MiniMax", openaiDayTwo, 120, 9, "minimax-m1");
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", openaiDayOne, 240, 18, "gpt-4.1");
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", openaiDayTwo, 180, 14, "gpt-4.1");
+    seedRuntimeUsageEvent(dbPath.path(), "minimax", "MiniMax", openaiDayTwo, 120, 9, "minimax-m1");
 
     {
         StorageService storage;
-        REQUIRE(storage.init(dbPath.string()));
+        REQUIRE(storage.init(dbPath.path()));
         const auto openaiProviderId = loadProviderId(storage, "openai");
         const auto openaiAccountId = loadRuntimeAccountId(storage, "openai");
         const auto minimaxProviderId = loadProviderId(storage, "minimax");
@@ -4404,7 +4290,7 @@ TEST_CASE("AppController builds analysis daily summaries breakdowns and gap mess
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -4467,20 +4353,17 @@ TEST_CASE("AppController builds analysis daily summaries breakdowns and gap mess
 }
 
 TEST_CASE("AppController builds analysis history and provenance messaging from persisted local activity", "[app][analysis]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; analysis history cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, false, false, true, false);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, false, true, false);
     const std::time_t now = std::time(nullptr);
     const std::time_t dayOne = utcDayStartForTest(now) - (2 * 24 * 3600) + 3600;
     const std::time_t dayTwo = utcDayStartForTest(now) - (1 * 24 * 3600) + 7200;
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     REQUIRE(app.init());
 
     ActivityEvent firstEvent;
@@ -4580,22 +4463,19 @@ TEST_CASE("AppController builds analysis history and provenance messaging from p
 }
 
 TEST_CASE("AppController analysis scope combines persisted usage and local activity providers into shared summaries", "[app][analysis]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; analysis history cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, true, false, true, false);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, false, true, false);
     const std::time_t now = std::time(nullptr);
     const std::time_t openaiDay = utcDayStartForTest(now) - (2 * 24 * 3600) + 3600;
     const std::time_t claudeDay = utcDayStartForTest(now) - (1 * 24 * 3600) + 5400;
 
-    seedRuntimeUsageEvent(dbPath.string(), "openai", "OpenAI", openaiDay, 240, 18, "gpt-4.1");
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", openaiDay, 240, 18, "gpt-4.1");
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     REQUIRE(app.init());
 
     ActivityEvent claudeEvent;
@@ -4692,21 +4572,18 @@ TEST_CASE("AppController analysis scope combines persisted usage and local activ
 }
 
 TEST_CASE("AppController manual HTML export uses the current analysis scope", "[app][analysis][reporting]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; analysis-scoped manual export cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    seedStartupPreferences(dbPath.string(), false, false, true, true, false, false);
-    TempDirPath exportDir("jistats_analysis_manual_export");
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
+    TempTestDirectory exportDir("jistats_analysis_manual_export");
     const std::time_t now = std::time(nullptr);
     const std::time_t openaiOldDay = now - (3 * 24 * 3600);
     const std::time_t openaiScopedDay = now - (1 * 24 * 3600);
 
-    seedRuntimeUsageEvent(dbPath.string(), "openai", "OpenAI", openaiOldDay, 240, 18, "gpt-4.1");
-    seedRuntimeUsageEvent(dbPath.string(), "openai", "OpenAI", openaiScopedDay, 180, 14, "gpt-4.1");
-    seedRuntimeUsageEvent(dbPath.string(), "minimax", "MiniMax", openaiScopedDay, 500, 40, "minimax-m1");
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", openaiOldDay, 240, 18, "gpt-4.1");
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", openaiScopedDay, 180, 14, "gpt-4.1");
+    seedRuntimeUsageEvent(dbPath.path(), "minimax", "MiniMax", openaiScopedDay, 500, 40, "minimax-m1");
 
     auto openaiProvider = makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now);
     auto minimaxProvider = makeCurrentQuotaProvider(
@@ -4721,7 +4598,7 @@ TEST_CASE("AppController manual HTML export uses the current analysis scope", "[
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -4749,7 +4626,7 @@ TEST_CASE("AppController manual HTML export uses the current analysis scope", "[
 
     {
         StorageService storage;
-        REQUIRE(storage.init(dbPath.string()));
+        REQUIRE(storage.init(dbPath.path()));
         const auto exportRun = storage.getLatestExportRun("manual_html");
         REQUIRE(exportRun.has_value());
         CHECK(exportRun->success);
@@ -4765,17 +4642,14 @@ TEST_CASE("AppController manual HTML export uses the current analysis scope", "[
 }
 
 TEST_CASE("AppController writes a scheduled HTML report when the export seam is enabled", "[app][reporting][scheduled]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; scheduled export persistence cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    TempDirPath exportDir("jistats_scheduled_export");
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_scheduled_export");
     const std::time_t now = std::time(nullptr);
 
     seedStartupPreferences(
-        dbPath.string(),
+        dbPath.path(),
         false,
         false,
         true,
@@ -4788,7 +4662,7 @@ TEST_CASE("AppController writes a scheduled HTML report when the export seam is 
         "openai",
         "openai.runtime_status");
     seedRuntimeUsageEvent(
-        dbPath.string(),
+        dbPath.path(),
         "openai",
         "OpenAI",
         now - 1800,
@@ -4809,7 +4683,7 @@ TEST_CASE("AppController writes a scheduled HTML report when the export seam is 
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setScheduledExportPollIntervalForTesting(50);
     REQUIRE(app.init());
@@ -4837,7 +4711,7 @@ TEST_CASE("AppController writes a scheduled HTML report when the export seam is 
     CHECK(reportBody.find("Current Quota Mirror Snapshots") != std::string::npos);
     CHECK(reportBody.find("gpt-4.1") != std::string::npos);
 
-    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.string());
+    const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK(storedPreferences.scheduledExportEnabled);
     CHECK(storedPreferences.scheduledExportPath == exportDir.path().string());
 
@@ -4852,7 +4726,7 @@ TEST_CASE("AppController writes a scheduled HTML report when the export seam is 
 
     {
         StorageService storage;
-        REQUIRE(storage.init(dbPath.string()));
+        REQUIRE(storage.init(dbPath.path()));
         const auto exportRun = storage.getLatestExportRun("scheduled_html");
         REQUIRE(exportRun.has_value());
         CHECK(exportRun->success);
@@ -4867,17 +4741,14 @@ TEST_CASE("AppController writes a scheduled HTML report when the export seam is 
 }
 
 TEST_CASE("AppController scheduled HTML export uses retained daily rollups after raw usage retention", "[app][reporting][scheduled]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; rollup-backed scheduled export cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    TempDirPath exportDir("jistats_scheduled_export_rollups");
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_scheduled_export_rollups");
     const std::time_t now = std::time(nullptr);
 
     seedStartupPreferences(
-        dbPath.string(),
+        dbPath.path(),
         false,
         false,
         true,
@@ -4890,7 +4761,7 @@ TEST_CASE("AppController scheduled HTML export uses retained daily rollups after
         "openai",
         "openai.runtime_status");
     seedRuntimeUsageEvent(
-        dbPath.string(),
+        dbPath.path(),
         "openai",
         "OpenAI",
         now - 1800,
@@ -4900,7 +4771,7 @@ TEST_CASE("AppController scheduled HTML export uses retained daily rollups after
 
     {
         StorageService storage;
-        REQUIRE(storage.init(dbPath.string()));
+        REQUIRE(storage.init(dbPath.path()));
         const auto providerId = loadProviderId(storage, "openai");
         const auto accountId = loadRuntimeAccountId(storage, "openai");
         REQUIRE(providerId.has_value());
@@ -4920,7 +4791,7 @@ TEST_CASE("AppController scheduled HTML export uses retained daily rollups after
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setScheduledExportPollIntervalForTesting(50);
     REQUIRE(app.init());
@@ -4946,17 +4817,14 @@ TEST_CASE("AppController scheduled HTML export uses retained daily rollups after
 }
 
 TEST_CASE("AppController surfaces recovery and scheduled export status in the dashboard view model", "[app][runtime][status]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; dashboard operational status cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
-    TempDirPath exportDir("jistats_dashboard_status");
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_dashboard_status");
     const std::time_t now = std::time(nullptr);
 
     seedStartupPreferences(
-        dbPath.string(),
+        dbPath.path(),
         false,
         false,
         true,
@@ -4969,11 +4837,11 @@ TEST_CASE("AppController surfaces recovery and scheduled export status in the da
         "openai",
         "openai.runtime_status");
     seedRuntimeState(
-        dbPath.string(),
+        dbPath.path(),
         now - (3 * 3600),
         now - (3 * 3600));
     seedRuntimeUsageEvent(
-        dbPath.string(),
+        dbPath.path(),
         "openai",
         "OpenAI",
         now - 1800,
@@ -4986,7 +4854,7 @@ TEST_CASE("AppController surfaces recovery and scheduled export status in the da
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setScheduledExportPollIntervalForTesting(50);
     REQUIRE(app.init());
@@ -5006,7 +4874,7 @@ TEST_CASE("AppController surfaces recovery and scheduled export status in the da
 
     {
         StorageService storage;
-        REQUIRE(storage.init(dbPath.string()));
+        REQUIRE(storage.init(dbPath.path()));
 
         const auto openaiProviderId = loadProviderId(storage, "openai");
         const auto openaiAccountId = loadRuntimeAccountId(storage, "openai");
@@ -5042,7 +4910,9 @@ TEST_CASE("AppController tray exit requests shutdown without hanging the run loo
         return true;
     });
 
+    TempTestDatabase dbPath;
     AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
     app.setDisableTaskbarForTesting(true);
     app.setProviderManagerForTesting(providerManager);
 
@@ -5070,19 +4940,16 @@ TEST_CASE("AppController tray exit requests shutdown without hanging the run loo
 }
 
 TEST_CASE("AppController runs retention pass during lifecycle without regressing rollup-backed summaries", "[app][retention]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; retention pass cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     const std::time_t now = std::time(nullptr);
     constexpr std::time_t kSecondsPerDay = 24 * 3600;
     const std::time_t oldEventTime = now - (120 * kSecondsPerDay);
     const std::time_t recentEventTime = now - (2 * kSecondsPerDay);
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
 
     const auto openaiIds = seedUsageProviderAccount(
         storage,
@@ -5144,14 +5011,14 @@ TEST_CASE("AppController runs retention pass during lifecycle without regressing
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
     app.setRetentionPollIntervalForTesting(50);
     REQUIRE(app.init());
 
     REQUIRE(waitForCondition([&dbPath]() {
         StorageService check;
-        if (!check.init(dbPath.string())) {
+        if (!check.init(dbPath.path())) {
             return false;
         }
         SettingsService settings(check);
@@ -5162,7 +5029,7 @@ TEST_CASE("AppController runs retention pass during lifecycle without regressing
 
     {
         StorageService verify;
-        REQUIRE(verify.init(dbPath.string()));
+        REQUIRE(verify.init(dbPath.path()));
 
         auto oldEvents = verify.execute(
             "SELECT COUNT(*) FROM usage_events WHERE event_time_utc < ?;",
@@ -5203,17 +5070,14 @@ TEST_CASE("AppController runs retention pass during lifecycle without regressing
 }
 
 TEST_CASE("AppController retention pass preserves recovery metadata", "[app][retention]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; retention metadata test cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     const std::time_t now = std::time(nullptr);
     constexpr std::time_t kSecondsPerDay = 24 * 3600;
 
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
 
     const auto openaiIds = seedUsageProviderAccount(
         storage,
@@ -5248,14 +5112,14 @@ TEST_CASE("AppController retention pass preserves recovery metadata", "[app][ret
 
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
     app.setRetentionPollIntervalForTesting(50);
     REQUIRE(app.init());
 
     REQUIRE(waitForCondition([&dbPath]() {
         StorageService check;
-        if (!check.init(dbPath.string())) {
+        if (!check.init(dbPath.path())) {
             return false;
         }
         SettingsService settings(check);
@@ -5272,7 +5136,7 @@ TEST_CASE("AppController retention pass preserves recovery metadata", "[app][ret
 
     {
         StorageService verify;
-        REQUIRE(verify.init(dbPath.string()));
+        REQUIRE(verify.init(dbPath.path()));
 
         auto oldEvents = verify.execute(
             "SELECT COUNT(*) FROM usage_events WHERE event_time_utc < ?;",
