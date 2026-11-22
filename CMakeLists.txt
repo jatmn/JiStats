@@ -1,7 +1,7 @@
 # JiStats - AI Usage Tracker
 # CMake project configuration
 
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.20)
 project(JiStats VERSION 1.0.0 LANGUAGES C CXX)
 
 include(CTest)

@@ -11,7 +11,7 @@ JiStats is a local-first Windows 11 desktop app for monitoring AI provider quota
 
 ## Build and packaging
 
-The build and test commands below use CMake 3.20 or newer.
+The build requires CMake 3.20 or newer.
 
 ### Building on Linux
 
