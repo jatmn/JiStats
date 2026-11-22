@@ -75,19 +75,19 @@ if(POLICY CMP0135)
 endif()
 
 FetchContent_Declare(sqlite
-    URL https://www.sqlite.org/2026/sqlite-amalgamation-3530000.zip
-    URL_HASH SHA256=bf3733d7c71b3ab0f6fd8a9ea0052ad87fa037d94333e14ce09878ba3492c3b0
+    URL https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip
+    URL_HASH SHA256=0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
 )
 # SOURCE_SUBDIR points at a directory without a CMakeLists.txt so only the
 # headers and amalgamation are used, not the upstream build.
 FetchContent_Declare(spdlog
-    URL https://github.com/gabime/spdlog/archive/refs/tags/v1.15.1.tar.gz
-    URL_HASH SHA256=25c843860f039a1600f232c6eb9e01e6627f7d030a2ae5e232bdd3c9205d26cc
+    URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
+    URL_HASH SHA256=d8862955c6d74e5846b3f580b1605d2428b11d97a410d86e2fb13e857cd3a744
     SOURCE_SUBDIR include
 )
 FetchContent_Declare(catch2
-    URL https://github.com/catchorg/Catch2/archive/refs/tags/v3.7.1.tar.gz
-    URL_HASH SHA256=c991b247a1a0d7bb9c39aa35faf0fe9e19764213f28ffba3109388e62ee0269c
+    URL https://github.com/catchorg/Catch2/archive/refs/tags/v3.16.1.tar.gz
+    URL_HASH SHA256=d16bd1b8b2364918bd472cb216394acb93bde6784890df0d91bccfb3f28d777d
     SOURCE_SUBDIR extras
 )
 
