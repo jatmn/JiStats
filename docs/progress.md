@@ -18,7 +18,7 @@ Verify that [Pullfrog automatic reviews](../CONTRIBUTING.md#pullfrog) run on an 
 
 Update the tracker when work changes state. At handoff, record what changed, the revision, the verification commands and results, and any blocker or next step. Keep dated release evidence in the release checklist. Record new decisions with their rationale and link to the current contract.
 
-- Updated [CI build detection](validation/testing.md#windows-commands) to skip native builds for documentation-only changes while retaining integrated Windows coverage for other protected-branch pushes. Verified the workflow with `actionlint -color` and exercised its Bash filter against local Git histories for documentation, mixed changes, fixture data, and missing revisions. The hosted PR run exercises both builds for the workflow change.
+- Updated [CI build detection](validation/testing.md#windows-commands) to skip native builds for documentation-only PRs and reuse Windows validation for documentation-only pushes with a successful previous push on the same branch. Verified the workflow with `actionlint -color` and exercised its Bash filter against local Git histories and prior push results, including failure, cancellation, and missing proof. The hosted PR run exercises both builds for the workflow change.
 
 ## Current decisions
 

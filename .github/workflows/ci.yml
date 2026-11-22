@@ -21,6 +21,9 @@ jobs:
     name: Detect build changes
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     outputs:
       build: ${{ steps.filter.outputs.build }}
     steps:
@@ -39,6 +42,7 @@ jobs:
         env:
           CHECKOUT_OUTCOME: ${{ steps.tested-revision.outcome }}
           PUSH_BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
         run: |
           set -euo pipefail
           build=true
@@ -88,8 +92,22 @@ jobs:
           else
             reason="could not determine the changed files for the tested revision"
           fi
+          if [ "$build" = false ] && [ "$GITHUB_EVENT_NAME" = push ]; then
+            # The previous push must have passed on this branch. Its success
+            # either comes from Windows or carries forward an earlier pass.
+            if ! previous_run=$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f event=push -f branch="$GITHUB_REF_NAME" -f head_sha="$PUSH_BEFORE" \
+              --jq '.workflow_runs | max_by(.run_number) | select(.status == "completed" and .conclusion == "success") | .html_url') ||
+              [ -z "$previous_run" ]; then
+              build=true
+              reason="no successful CI run for the previous branch tip"
+            fi
+          fi
           if [ "$build" = true ]; then
             message="Build and tests required ($reason)."
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then
+            message="Documentation-only push; reusing Windows validation from $previous_run."
           else
             message="No build or test inputs changed; skipping the Windows and Linux builds."
           fi
