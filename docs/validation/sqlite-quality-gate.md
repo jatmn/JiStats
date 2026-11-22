@@ -4,7 +4,7 @@
 
 JiStats storage and migration tests are written to use real SQLite when it is available.
 
-That matters because several storage/schema tests currently return early with a checked `SQLite not available` result when SQLite support is not compiled in. A passing default test run is therefore not enough evidence for storage changes by itself.
+The [shared test helper](../../tests/sqlite_test_support.hpp) marks SQLite-dependent cases as skipped when SQLite support is absent. Confirm the relevant cases ran against an opened database when validating storage changes.
 
 ## Minimum Gate
 
@@ -50,7 +50,7 @@ Capture enough evidence that the next engineer can tell the run used real SQLite
 Good evidence examples:
 
 - a configure command showing `-DJISTATS_USE_SYSTEM_SQLITE=ON`
-- a `CMakeCache.txt` entry showing SQLite support enabled
+- a compile command containing `-DJISTATS_HAS_SQLITE=1` for a bundled SQLite build
 - `ctest` output for the targeted storage/schema tests
 
 Bad evidence examples:
@@ -60,11 +60,11 @@ Bad evidence examples:
 
 ## Linux validation
 
-The [portable test build](../../README.md#building-on-linux) enables bundled SQLite and runs the required schema, storage and rollup cases directly on Linux. PR CI runs the remaining controller and provider integration cases on Windows using the cross-built executable.
+The [portable test build](../../README.md#building-on-linux) enables bundled SQLite and runs the required schema, storage and rollup cases directly on Linux. The suite also covers both historical version 12 layouts and overlapping opens during repair. For build-affecting PRs, CI runs the remaining controller and provider integration cases on Windows using the cross-built executable.
 
 ## Windows validation
 
-Follow the [UCRT64 commands](../../README.md#building-on-windows) locally, or dispatch [CI](../../.github/workflows/ci.yml) to build on Linux and run the full test executable on Windows. Both use bundled SQLite. Record the commands and outcome in the handoff.
+Follow the [UCRT64 commands](../../README.md#building-on-windows) locally, or dispatch [CI](../../.github/workflows/ci.yml) to build on Linux and run the full test executable on Windows. Both use bundled SQLite. An initialized Windows developer shell can also run [the SQLite quality gate script](../../scripts/run_sqlite_quality_gate.ps1), which configures a bundled-SQLite test build and runs CTest. Record the commands and outcome in the handoff.
 
 ## Exit Rule
 

@@ -23,7 +23,7 @@ Unlike the rate-limit sample, this artifact is intentionally **consumer-surface 
 
 The preferred consumer artifact to archive next is:
 
-- **Codex Settings -> Usage Dashboard**
+- **Usage & Billing** in the Codex app
 
 Reason:
 
@@ -33,7 +33,7 @@ Reason:
 
 Reference:
 
-- [Using Credits for Flexible Usage in ChatGPT (Free/Go/Plus/Pro) & Sora](https://help.openai.com/articles/12642688)
+- [Using Credits for Flexible Usage in ChatGPT (Personal plans)](https://help.openai.com/en/articles/12642688-using-credits-for-flexible-usage-in-chatgpt-personal-plans)
 
 ## Required Redaction Rules
 
@@ -52,7 +52,7 @@ Before a real artifact is committed, the following must be removed or replaced:
 
 These are the fields JiStats actually cares about for evidence and planning:
 
-- surface name, such as `Usage Dashboard`
+- surface name, such as `Usage & Billing`
 - whether the surface is clearly Codex-specific
 - presence of a credits balance field
 - presence of recent-usage summaries
@@ -69,7 +69,7 @@ When a safe real capture is archived later, it should be normalized into a text 
 {
   "artifact_type": "codex_usage_dashboard_redacted",
   "capture_date_utc": "YYYY-MM-DD",
-  "surface_label": "Codex Settings > Usage Dashboard",
+  "surface_label": "Codex > Usage & Billing",
   "account_scope": "[redacted]",
   "workspace_scope": "[redacted-or-none]",
   "shows_credits_balance": true,

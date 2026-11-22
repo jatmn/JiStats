@@ -23,7 +23,7 @@ Use the [UCRT64 build instructions](../../README.md#building-on-windows) to run 
 
 For build-affecting pull requests to `main` or `release/**`, Linux runs the portable tests and cross-compiles all three Windows executables. A hosted Windows runner downloads that run's `JiStatsTests.exe` and executes the full suite from the checkout root. The required `CI passed` check includes both jobs. CI compares the PR test merge commit with its base parent. Documentation and certain repository metadata can skip the builds. Test payloads still trigger them, including Markdown inside the Kimi synthetic runtime and ChatGPT export payload directories.
 
-Protected-branch pushes compare the previous and new tips. Documentation-only pushes can reuse a successful CI run on the previous tip of the same branch. A failed, pending or missing predecessor run, or an unreadable diff, triggers the Linux build and full Windows suite. Dispatch [CI](../../.github/workflows/ci.yml) to run both jobs on a selected branch.
+Protected-branch pushes compare the previous and new tips. Documentation-only pushes can reuse a successful CI run on the previous tip of the same branch. A failed, pending or missing predecessor run, or an unreadable diff, triggers the Linux build and full Windows suite. Dispatch [CI](../../.github/workflows/ci.yml) to run both jobs on a selected branch regardless of the diff. Enable **Run eight additional offline notice passes to diagnose restart stalls** when investigating offline restart timing. CI retains the cross-built test executable for 30 days so a Windows job retry can reuse it.
 
 ## Pull request lint
 
@@ -41,9 +41,9 @@ For full-tree formatting and static analysis on Windows, install `mingw-w64-ucrt
 
 ## CodeQL scanning
 
-The [CodeQL workflow](../../.github/workflows/codeql.yml) scans C/C++, JavaScript/TypeScript, and GitHub Actions on same-repository pull requests and pushes for `main` and `release/**`. It skips the analysis jobs when the tested diff contains only Markdown documentation. Markdown inside the synthetic Kimi runtime and redacted ChatGPT export payloads still triggers scans. CodeQL also scans weekly, on manual dispatch, and when a diff cannot be verified.
+The [repository CodeQL workflow](../../.github/workflows/codeql.yml) scans C/C++, JavaScript/TypeScript, and GitHub Actions on same-repository pull requests and pushes for `main` and `release/**`. It skips the analysis jobs when the tested diff contains only Markdown documentation. Markdown inside the synthetic Kimi runtime and redacted ChatGPT export payloads still triggers scans. The workflow also scans weekly, on manual dispatch, and when a diff cannot be verified.
 
-During the transition, the Actions repository variable `CODEQL_UPLOAD_DISABLED=true` lets the new workflow finish its analyses while GitHub-managed default setup publishes results. After the workflow lands on `main`:
+The repository workflow is active on `main`. GitHub-managed default setup still publishes results and can scan docs-only changes. During the cutover, `CODEQL_UPLOAD_DISABLED=true` lets the repository workflow run its analyses with uploads disabled. To finish the cutover:
 
 1. Disable GitHub-managed default setup in **Settings → Advanced Security → CodeQL analysis**. See [GitHub's setup transition instructions](https://docs.github.com/en/code-security/reference/code-scanning/troubleshoot-analysis-errors/results-different-than-expected).
 2. Delete `CODEQL_UPLOAD_DISABLED` under **Settings → Secrets and variables → Actions → Variables** so the repository workflow publishes results.
