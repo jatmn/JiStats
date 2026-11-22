@@ -3761,6 +3761,8 @@ public:
 
     struct ProviderConnectivityUpdates {
         std::vector<StagedConnectivity> rows;
+        // Includes providers whose connectivity cannot be stored.
+        bool anyOfflineProvider = false;
         bool providerApiConfirmedRecovery = false;
     };
 
@@ -6055,16 +6057,18 @@ public:
             return connectivityUpdates;
         }
 
+        connectivityUpdates.anyOfflineProvider =
+            std::any_of(viewModel.providers.begin(), viewModel.providers.end(), [](const auto& provider) {
+                return provider.state == ProviderState::Offline;
+            });
         // Only quota fetched from a provider API in this refresh confirms that
         // connectivity returned. Local reads and cached responses do not.
         connectivityUpdates.providerApiConfirmedRecovery =
+            !connectivityUpdates.anyOfflineProvider &&
             std::any_of(viewModel.providers.begin(), viewModel.providers.end(), [&refresh](const auto& provider) {
                 return (provider.state == ProviderState::Live || provider.state == ProviderState::Stale) &&
                     refresh.providerApiKeys.count(provider.providerKey) != 0 &&
                     !provider.quotas.empty();
-            }) &&
-            std::none_of(viewModel.providers.begin(), viewModel.providers.end(), [](const auto& provider) {
-                return provider.state == ProviderState::Offline;
             });
 
         PersistedRuntimeState runtimeState;
@@ -6169,7 +6173,8 @@ public:
                 } else if (existing.has_value()) {
                     // A local result can end only its own provider's outage.
                     // Omitted providers keep the dismissal until they recover.
-                    const bool recoveredOwnOutage = row.fetchedRecovery && existing->status == "offline";
+                    const bool recoveredOwnOutage = !updates.anyOfflineProvider &&
+                        row.fetchedRecovery && existing->status == "offline";
                     connectivity.noticeDismissedAt = recoveredOwnOutage ? 0 : existing->noticeDismissedAt;
                 }
             }

@@ -112,7 +112,7 @@ From `docs/sqlite-schema.md` (app_settings seed data):
 
 **Rule**: After dismissing an offline notice, don't show another for 60 minutes unless state changes (e.g., offline → online → offline again).
 
-The app clears a saved dismissal for every provider, including providers omitted from the refresh, only when a provider quota API returns usable quota in the current refresh and no provider reports Offline. A provider that was offline and returns a result in the current refresh clears only its own saved dismissal, so a provider that is omitted and still offline keeps the notice dismissed. Local reads by other providers, such as the Claude Code stats cache or an unchanged Codex rollout, preserve the saved dismissal, as do cached quota, empty refreshes, and sample-only results.
+The app clears a saved dismissal for every provider, including providers omitted from the refresh, only when a provider quota API returns usable quota in the current refresh and no provider reports Offline. When no provider reports Offline, a provider that was offline and returns a result in the current refresh clears only its own saved dismissal, so a provider that is omitted and still offline keeps the notice dismissed. Local reads by other providers, such as the Claude Code stats cache or an unchanged Codex rollout, preserve the saved dismissal, as do cached quota, empty refreshes, and sample-only results.
 
 ## Offline UI Behavior
 

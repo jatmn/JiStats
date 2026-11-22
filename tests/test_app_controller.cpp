@@ -2373,6 +2373,80 @@ TEST_CASE("AppController keeps an offline dismissal across a provider handoff an
     restarted.shutdown();
 }
 
+TEST_CASE("AppController keeps an offline dismissal when the newly offline provider has no saved row", "[app][runtime][offline_notice]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false);
+    const std::time_t now = std::time(nullptr);
+    auto openai = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 25, 100, "interval", "openai_subscription_codex_local"),
+        std::shared_future<void>{}, 1, makeFailedQuotaResponse("network unreachable"));
+    // No providers row exists for this key, so its connectivity cannot be saved.
+    auto unregistered = std::make_shared<ControlledQuotaProviderAdapter>(
+        "unregistered_provider", "Unregistered", makeFailedQuotaResponse("network unreachable"),
+        std::shared_future<void>{}, 1,
+        makeQuotaResponse(now, 120, 1000, "daily", "unregistered_quota"));
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(openai);
+    providerManager->addProvider(unregistered);
+    ScopedTrayTestHandler handler([](TrayController::TestOperation,
+                                     TrayStatus,
+                                     const std::string&,
+                                     std::string&) -> std::optional<bool> {
+        return true;
+    });
+
+    std::promise<void> reachedPublication;
+    auto publicationReached = reachedPublication.get_future();
+    AppController app;
+    std::promise<void> releasePublication;
+    auto publicationReleased = releasePublication.get_future().share();
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setDisableTaskbarForTesting(true);
+    app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
+        if (publicationReleased.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            reachedPublication.set_value();
+            publicationReleased.wait();
+        }
+    });
+    REQUIRE(app.init());
+    // Hold the deferred refresh in which OpenAI recovers and the unregistered provider goes offline.
+    REQUIRE(publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
+    REQUIRE(app.clickDashboardOfflineDismissForTesting());
+    REQUIRE(waitForCondition([&app]() {
+        return !app.isDashboardOfflineNoticeVisibleForTesting();
+    }, std::chrono::seconds(5)));
+    const auto dismissed = app.getConnectivityStateForTesting("openai");
+    REQUIRE(dismissed.has_value());
+    REQUIRE(dismissed->status == "offline");
+    REQUIRE(dismissed->noticeDismissedAt > 0);
+
+    releasePublication.set_value();
+    app.refreshRuntimeForTesting();
+    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
+    CHECK_FALSE(app.getConnectivityStateForTesting("unregistered_provider").has_value());
+    const auto recovered = app.getConnectivityStateForTesting("openai");
+    REQUIRE(recovered.has_value());
+    CHECK(recovered->status == "online");
+    CHECK(recovered->noticeDismissedAt == dismissed->noticeDismissedAt);
+    app.shutdown();
+
+    AppController restarted;
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(providerManager);
+    restarted.setDisableTaskbarForTesting(true);
+    REQUIRE(restarted.init());
+    restarted.refreshRuntimeForTesting();
+    CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
+    CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
+    restarted.shutdown();
+}
+
 TEST_CASE("AppController keeps an omitted provider's dismissal when a local provider recovers after restart", "[app][runtime][offline_notice]") {
     requireSqlite();
 
