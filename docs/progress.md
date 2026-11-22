@@ -53,6 +53,8 @@ The [release checklist](release-checklist.md#evidence-backed-release-queue) is t
 
 Pullfrog automatic reviews are pending deployment of the [workflow](../.github/workflows/pullfrog.yml) to the default branch. Verify an owner-authored draft and a subsequent push after deployment.
 
+- Dependency audit removed the dormant Dear ImGui build path and trimmed the spdlog snapshot to its headers and license. Verify the cleanup with the Windows Debug build and test suite.
+
 ## ✅ Recently Completed
 
 Keep this section focused on the most recent release-shaping work. Older milestone detail now lives in `docs/plan.md`, the phase-specific docs, and git history.

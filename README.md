@@ -132,20 +132,19 @@ MSVC remains the reference toolchain, and the tests and SQLite quality gate run 
 
 ## 📦 Third-Party Components
 
-JiStats currently uses or includes the following third-party components:
+JiStats keeps its default dependency sources in the checkout. To select an installed SQLite, configure with `-DJISTATS_USE_SYSTEM_SQLITE=ON`.
 
 | Component | Upstream | Location | Purpose | License |
 | --- | --- | --- | --- | --- |
 | SQLite amalgamation | https://www.sqlite.org/ | `third_party/sqlite/` | bundled local storage engine | SQLite upstream terms |
 | Catch2 amalgamation | https://github.com/catchorg/Catch2 | `third_party/catch2/` | test framework used by `JiStatsTests.exe` | Catch2 upstream terms |
-| spdlog | https://github.com/gabime/spdlog | `third_party/spdlog/` | logging support | MIT |
+| spdlog | https://github.com/gabime/spdlog | `third_party/spdlog/include/` | header-only logging | MIT |
 | bundled `fmt` inside spdlog | https://github.com/fmtlib/fmt | `third_party/spdlog/include/spdlog/fmt/bundled/` | formatting support used through spdlog | MIT |
 | UPX | https://github.com/upx/upx | `tools/upx/` | optional release-size reduction tool for `-upx` variants | GPL v2 or later with the UPX special exception |
 
 Notes:
 
 - `tools/upx/` is a build/distribution tool path, not a runtime dependency of the app.
-- `third_party/imgui/` is still optional and is not treated as an active bundled dependency unless its upstream source and license texts are actually populated in the repo.
 - See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for the current notice file and redistribution notes.
 
 ## 🤖 Vibecoded By
