@@ -24,6 +24,8 @@ Update the tracker when work changes state. At handoff, record what changed, the
 
 - Removed the AI credits section from the [README](../README.md) in [PR #17](https://github.com/jatmn/JiStats/pull/17). The `python3 -` command in the PR description verified 12 local links and anchors. `git diff --check 3bee5a1` passed.
 
+- Added [repository-managed CodeQL scanning](validation/testing.md#codeql-scanning) after [GitHub's managed scan](https://github.com/jatmn/JiStats/actions/runs/45060965031) ran on docs-only PR #17 (`e18eb23`). The local Git replay skipped analysis for the PR and its merge push (`252209f`) and retained analysis for code, workflows, and fixture payloads. Follow the verification guide's setup transition after the workflow lands on `main`.
+
 ## Current decisions
 
 | Decision | Where it applies |
