@@ -48,7 +48,7 @@ enum class DataConfidenceLevel {
 /**
  * HtmlExporter generates HTML reports from dashboard data.
  * 
- * Per docs/plan.md section 13:
+ * Per docs/reference/reporting.md:
  * - Reports are export-only (not for live viewing)
  * - Include generation timestamp
  * - Data source attribution
@@ -93,7 +93,7 @@ public:
     
     /**
      * Generate HTML content as a string with report metadata.
-     * Includes freshness and backfill labeling per docs/plan.md section 13.1.
+     * Includes freshness and backfill labeling per docs/reference/reporting.md.
      */
     std::string generateHtml(const DashboardViewModel& viewModel,
                              const ReportMetadata& metadata,

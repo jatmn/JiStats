@@ -4,6 +4,7 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 
 ## Working agreement
 
+- Start at the [documentation index](docs/README.md) for current guides and technical references.
 - Keep project planning in [the roadmap](docs/plan.md) and [the work tracker](docs/progress.md), and use the tracker for current work and handoffs. Update the tracker when work changes state and update the relevant technical docs when behavior or decisions change.
 - Check the implementation and its tests when documentation disagrees with the code. Keep changes focused and fit new work into the existing design.
 - Use the [capability matrix](docs/capability-matrix.md) for provider evidence and the [release checklist](docs/release-checklist.md) for release signoff.
@@ -21,7 +22,7 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 - Use the `JiStats` namespace and keep the mirrored [include/](include/) and [src/](src/) layout aligned. Follow surrounding C++ conventions and established PIMPL usage in classes that use it. Prefer native APIs and keep dependencies small.
 - Keep provider-specific behavior under [src/providers/](src/providers/) and shared models provider-agnostic. AppController coordinates lifecycle and runtime state. MirrorEngine reconciles quota, while analytics and reporting produce derived summaries.
 - Route database writes through StorageService and place numbered SQL migrations in [db_migrations/](db_migrations/). Keep blocking network and database work off the UI thread. Dashboard, tray, and taskbar code should consume derived views.
-- Preserve startup responsiveness, offline recovery, and quota provenance. Keep the taskbar overlay scoped to subscription quota. Use [the TrafficMonitor research note](docs/trafficmonitor-research.md) for taskbar reference.
+- Preserve startup responsiveness, offline recovery, and quota provenance. Keep the taskbar overlay scoped to subscription quota. Use [the TrafficMonitor research note](docs/reference/trafficmonitor-research.md) for taskbar reference.
 
 ## Build and verify
 
@@ -40,6 +41,6 @@ cmake -S . -B build-mingw -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw
 cmake --build build-mingw
 ~~~
 
-- Use [docs/test-strategy.md](docs/test-strategy.md) to choose verification for the change and record what ran and any blockers in the handoff.
-- For storage, schema, or SQLite persistence changes, run the [SQLite-enabled quality gate](docs/sqlite-storage-quality-gate.md). Run [scripts/run_sqlite_quality_gate.ps1](scripts/run_sqlite_quality_gate.ps1) locally or dispatch the [Windows CI workflow](.github/workflows/ci.yml).
-- Use the [manual taskbar checks](docs/taskbar-manual-validation.md) when changing Windows shell behavior.
+- Use the [verification guide](docs/validation/testing.md) to choose verification for the change and record what ran and any blockers in the handoff.
+- For storage, schema, or SQLite persistence changes, run the [SQLite-enabled quality gate](docs/validation/sqlite-quality-gate.md). Run [scripts/run_sqlite_quality_gate.ps1](scripts/run_sqlite_quality_gate.ps1) locally or dispatch the [Windows CI workflow](.github/workflows/ci.yml).
+- Use the [manual taskbar checks](docs/validation/desktop.md#taskbar-checks) when changing Windows shell behavior.

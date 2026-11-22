@@ -1,25 +1,10 @@
 # Claude And Kimi Local Redaction Contract
 
-> **Status**: `P7.5` complete
-> **Date**: 2026-04-20
-> **Purpose**: Define the shared allowlist, denylist, and fixture-redaction rules for Phase 7 Claude Code and Kimi Code local parser and fixture work
-> **Scope**: Cross-provider parser and fixture boundaries for the bounded v1.0 Claude/Kimi implementation; this document defines what may be parsed or archived safely, not whether a value becomes provider-exact truth
-
-## Outcome
-
-`P7.5` is satisfied by a shared local-ingestion redaction contract.
-
-This contract exists so Phase 7 Claude/Kimi parser work stays disciplined before implementation expands into richer local artifacts.
-
-The goal is simple:
-
-- permit narrowly scoped local metadata and aggregate counters
-- prohibit raw transcript, tool, credential, and account-secret ingestion
-- make fixture-archive rules explicit before any future sample is committed
+Use this contract for Claude and Kimi local activity ingestion and fixture work. It permits bounded metadata and aggregate counters. Keep raw transcripts, tool payloads, and credentials outside this path.
 
 ## Shared Principles
 
-All Phase 7 Claude/Kimi local parser or fixture work must follow these rules:
+All Claude/Kimi local parser and fixture work must follow these rules:
 
 1. Prefer aggregate artifacts over transcript artifacts.
 2. Prefer field-level allowlists over file-level trust.
@@ -128,8 +113,6 @@ These categories are denied by default for both providers:
 
 ## Claude Appendix
 
-This appendix is conservative and versioned from `docs/claude-local-surface-spike.md`.
-
 ### Approved Inputs
 
 - `~/.claude/stats-cache.json`
@@ -171,7 +154,7 @@ Default rule:
 
 ## Kimi Appendix
 
-This appendix is conservative and versioned from `docs/kimi-local-parser-spike.md`.
+The [Kimi quota adapter](claude-kimi.md#kimi-code) uses a separate OAuth path. Credential files remain excluded from local activity parsing and fixtures. Session-relative entries below also apply to supported nested session directories.
 
 ### Approved Inputs
 
@@ -211,9 +194,9 @@ This appendix is conservative and versioned from `docs/kimi-local-parser-spike.m
 
 Before any Claude or Kimi local parser grows beyond the boundaries above, update:
 
-1. the relevant provider spike doc
+1. the [provider reference](claude-kimi.md)
 2. this shared contract
-3. `docs/progress.md`
+3. the [work tracker](../progress.md)
 
 Do not widen parser or fixture work first and document the boundary later.
 
@@ -221,11 +204,7 @@ Do not widen parser or fixture work first and document the boundary later.
 
 This redaction contract does not decide whether a value is `Exact`, `HighConfidence`, `Estimated`, `LocalExact`, `Imported`, or `Unknown`.
 
-That policy lives in:
-
-- `docs/mirror-accuracy-policy.md`
-- `docs/low-cost-monitoring-policy.md`
-- `docs/metric-glossary.md`
+See [quota, freshness, and confidence](../reference/presentation.md#quota-freshness-and-confidence) for evidence labels and [runtime policy](../reference/runtime.md#monitoring-cost) for monitoring cost.
 
 This contract decides only:
 
@@ -235,7 +214,5 @@ This contract decides only:
 
 ## Related Files
 
-- `docs/claude-local-surface-spike.md`
-- `docs/kimi-local-parser-spike.md`
-- `docs/phase7-claude-kimi-feasibility.md`
-- `docs/fixtures/README.md`
+- [Fixture inventory](../fixtures/README.md)
+- [Original feasibility research](https://github.com/jatmn/JiStats-public-prep/blob/fd934179646f130fe346a20fb1ca7d82162902f6/docs/phase7-claude-kimi-feasibility.md)

@@ -41,9 +41,7 @@ For JiStats v1.0, OpenAI is intentionally split into:
 
 ## Related References
 
-- Capability framing: `docs/capability-matrix.md`
-- OpenAI mirror target: `docs/openai-mirror-spec.md`
-- Runtime/source labels: `docs/openai-runtime-source-label-contract.md`
-- Export/import contract: `docs/openai-export-import-contract.md`
-- API-platform contract: `docs/openai-api-platform-validation-contract.md`
+- [Provider support](../../capability-matrix.md)
+- [OpenAI and Codex reference](../../providers/openai.md)
+- [API-platform validation](../../providers/openai-api-platform.md)
 - Parser coverage: `tests/openai_fixture_tests.cpp`

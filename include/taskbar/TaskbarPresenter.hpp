@@ -23,7 +23,7 @@ enum class TaskbarPressureBand {
     Red
 };
 
-// Taskbar metrics structure (per docs/taskbar-metrics.md)
+// Taskbar metrics structure (per docs/reference/presentation.md)
 struct TaskbarMetrics {
     std::string providerKey;
     std::string providerDisplayName;

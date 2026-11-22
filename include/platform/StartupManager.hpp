@@ -11,7 +11,7 @@ namespace JiStats {
  * Uses registry-based startup (HKCU\Software\Microsoft\Windows\CurrentVersion\Run).
  * Opt-in by default - user must explicitly enable startup behavior.
  * 
- * Per docs/plan.md section 10.4:
+ * Per docs/reference/runtime.md:
  * - Opt-in (disabled by default)
  * - --background flag support for minimized startup
  * - Registry-based for reliability

@@ -96,7 +96,6 @@ That extracted-directory boundary also matches the currently shipped parser/stor
 
 ## Related Files
 
-- `docs/openai-export-import-contract.md`
-- `docs/openai-export-import-implementation-handoff.md`
+- [ChatGPT export import](../../providers/openai.md#import-chatgpt-history)
 - `docs/fixtures/openai/README.md`
 - `docs/fixtures/openai/chatgpt-export-redacted/`

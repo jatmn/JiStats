@@ -93,7 +93,7 @@ Before a Codex-local parsing change is complete:
 
 Before an export-import change is complete:
 
-- accepted input types match `docs/openai-export-import-contract.md`
+- accepted input types match [the ChatGPT export import contract](../../providers/openai.md#import-chatgpt-history)
 - parser rejects unknown layouts safely
 - imported history remains historical-only in reporting and UX labels
 - gap/freshness semantics stay explicit after import
@@ -112,4 +112,4 @@ The following user-visible distinctions must remain testable:
 - `docs/fixtures/openai/README.md`
 - `docs/fixtures/openai/subscription-surface-notes.md`
 - `docs/fixtures/openai/codex-consumer-artifact-redaction-note.md`
-- `docs/openai-export-import-contract.md`
+- [the ChatGPT export import contract](../../providers/openai.md#import-chatgpt-history)
