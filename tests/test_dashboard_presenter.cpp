@@ -13,6 +13,7 @@
 #include <thread>
 
 #include <windows.h>
+#include <commctrl.h>
 
 #include "gui/AnalysisPresenter.hpp"
 #include "gui/DashboardPresenter.hpp"
@@ -902,7 +903,8 @@ TEST_CASE("DashboardPresenter scrolls to the final chart after a native resize",
     presenter.shutdown();
 }
 
-TEST_CASE("DashboardPresenter opens a dedicated Analysis window from the Analysis tab and populates it", "[dashboard_presenter][analysis]") {
+TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the dedicated Analysis window",
+          "[dashboard_presenter][analysis]") {
     DashboardPresenter presenter;
     AnalysisPresenter analysisPresenter;
 
@@ -936,17 +938,41 @@ TEST_CASE("DashboardPresenter opens a dedicated Analysis window from the Analysi
 
     presenter.updateViewModel(model);
 
-    REQUIRE(presenter.selectMainTabForTesting(2));
-    REQUIRE(waitForCondition([&presenter]() {
-        return presenter.isAnalysisWindowOpenForTesting();
-    }, std::chrono::milliseconds(4000)));
+    presenter.setVisible(true);
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    REQUIRE(dashboard != nullptr);
+    const HWND tabs = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
+    const HWND viewport = FindWindowExW(dashboard, nullptr, L"JiStatsDashboardViewport", nullptr);
+    REQUIRE(tabs != nullptr);
+    REQUIRE(viewport != nullptr);
+    const HWND providers = FindWindowExW(viewport, nullptr, WC_LISTVIEWW, nullptr);
+    REQUIRE(providers != nullptr);
+
+    RECT overviewTab{};
+    REQUIRE(TabCtrl_GetItemRect(tabs, 0, &overviewTab));
+    const LPARAM center =
+        MAKELPARAM((overviewTab.left + overviewTab.right) / 2, (overviewTab.top + overviewTab.bottom) / 2);
+    SendMessageW(tabs, WM_LBUTTONDOWN, MK_LBUTTON, center);
+    SendMessageW(tabs, WM_LBUTTONUP, 0, center);
+    GUITHREADINFO input{};
+    input.cbSize = sizeof(input);
+    REQUIRE(GetGUIThreadInfo(GetWindowThreadProcessId(tabs, nullptr), &input));
+    REQUIRE(input.hwndFocus == tabs);
+
+    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
+    REQUIRE(waitForCondition([&]() { return TabCtrl_GetCurSel(tabs) == 1 && IsWindowVisible(providers); }));
+    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_LEFT, 0));
+    REQUIRE(waitForCondition([&]() { return TabCtrl_GetCurSel(tabs) == 0 && !IsWindowVisible(providers); }));
+    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
+    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
+    REQUIRE(
+        waitForCondition([&]() { return TabCtrl_GetCurSel(tabs) == 2 && presenter.isAnalysisWindowOpenForTesting(); },
+                         std::chrono::milliseconds(4000)));
     REQUIRE(waitForCondition([&presenter]() {
         return presenter.getAnalysisScopeLabelForTesting() == "Active filters: OpenAI / openai.primary / Last 7 Days";
     }, std::chrono::milliseconds(4000)));
 
-    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
     const HWND analysis = FindWindowW(L"JiStatsAnalysisWindow", nullptr);
-    REQUIRE(dashboard != nullptr);
     REQUIRE(analysis != nullptr);
     CHECK(GetWindow(analysis, GW_OWNER) == dashboard);
     const auto analysisRect = presenter.getAnalysisWindowRectForTesting();

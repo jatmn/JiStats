@@ -1433,6 +1433,27 @@ public:
         return rect;
     }
 
+    void fitInitialDashboardBounds(HWND hwnd) {
+        RECT bounds{};
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        if (!GetWindowRect(hwnd, &bounds) ||
+            !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            return;
+        }
+
+        const RECT original = bounds;
+        const LONG minWidth = scaledPixels(kMinWidth, hwnd);
+        const LONG minHeight = scaledPixels(kMinHeight, hwnd);
+        bounds.right = bounds.left + std::max(bounds.right - bounds.left, minWidth);
+        bounds.bottom = bounds.top + std::max(bounds.bottom - bounds.top, minHeight);
+        clampRectToWorkArea(bounds, monitor.rcWork);
+        if (!EqualRect(&bounds, &original)) {
+            SetWindowPos(hwnd, nullptr, bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
     std::optional<RECT> loadSavedAnalysisWindowRect() {
         if (!ensurePlacementStorage()) {
             return std::nullopt;
@@ -2032,6 +2053,14 @@ public:
             SetForegroundWindow(hwnd);
         }
         syncAnalysisLauncherState(copyViewModel());
+    }
+
+    void activateMainPage(int index) {
+        selectedMainTab = index;
+        if (selectedMainTab == 2) {
+            openAnalysisWindow(true);
+        }
+        syncViewModelToControls();
     }
 
     void syncMainTabVisibility(const DashboardViewModel& model) {
@@ -5392,6 +5421,7 @@ public:
         switch (msg) {
         case WM_CREATE:
             window = hwnd;
+            fitInitialDashboardBounds(hwnd);
             nextDashboardChartRefreshTick = GetTickCount64() + kDashboardChartRefreshIntervalMs;
             ensureFonts();
             refreshDashboardColors();
@@ -5529,11 +5559,7 @@ public:
                 }
                 if (header != nullptr && header->hwndFrom == mainTab &&
                     header->code == TCN_SELCHANGE) {
-                    selectedMainTab = std::max(0, TabCtrl_GetCurSel(mainTab));
-                    if (selectedMainTab == 2) {
-                        openAnalysisWindow(true);
-                    }
-                    syncViewModelToControls();
+                    activateMainPage(std::max(0, TabCtrl_GetCurSel(mainTab)));
                     return 0;
                 }
                 if (header != nullptr && header->hwndFrom == providerList &&
@@ -5623,16 +5649,12 @@ public:
         case WM_JISTATS_OPEN_ANALYSIS_WINDOW:
             openAnalysisWindow(true);
             return 0;
-        case WM_JISTATS_TEST_SELECT_MAIN_TAB:
-            selectedMainTab = std::max(0, static_cast<int>(wParam));
-            if (mainTab != nullptr) {
-                TabCtrl_SetCurSel(mainTab, selectedMainTab);
-            }
-            if (selectedMainTab == 2) {
-                openAnalysisWindow(true);
-            }
-            syncViewModelToControls();
+        case WM_JISTATS_TEST_SELECT_MAIN_TAB: {
+            const int index = std::clamp(static_cast<int>(wParam), 0, TabCtrl_GetItemCount(mainTab) - 1);
+            TabCtrl_SetCurSel(mainTab, index);
+            activateMainPage(index);
             return 0;
+        }
         case WM_JISTATS_OPENAI_IMPORT_COMPLETE:
             handleOpenAIImportCompletion(reinterpret_cast<DashboardOpenAIImportResult*>(lParam));
             return 0;
@@ -6377,6 +6399,49 @@ public:
         return dashboardColor(colors[index % std::size(colors)], COLOR_WINDOWTEXT);
     }
 
+    void drawModelMarker(HDC dc, POINT center, size_t series, int size = 5) {
+        const int saved = SaveDC(dc);
+        const COLORREF color = modelSeriesColor(series);
+        SelectObject(dc, GetStockObject(DC_PEN));
+        SelectObject(dc, GetStockObject(DC_BRUSH));
+        SetDCPenColor(dc, color);
+        SetDCBrushColor(dc, dashboardHighContrast ? GetSysColor(COLOR_WINDOW) : color);
+
+        const LONG radius = scaledPixels(size);
+        const LONG x = center.x;
+        const LONG y = center.y;
+        switch (series % 6) {
+            case 0:
+                Ellipse(dc, x - radius, y - radius, x + radius + 1, y + radius + 1);
+                break;
+            case 1:
+                Rectangle(dc, x - radius, y - radius, x + radius + 1, y + radius + 1);
+                break;
+            case 2: {
+                const POINT triangle[] = {{x, y - radius}, {x + radius, y + radius}, {x - radius, y + radius}};
+                Polygon(dc, triangle, static_cast<int>(std::size(triangle)));
+                break;
+            }
+            case 3: {
+                const POINT diamond[] = {{x, y - radius}, {x + radius, y}, {x, y + radius}, {x - radius, y}};
+                Polygon(dc, diamond, static_cast<int>(std::size(diamond)));
+                break;
+            }
+            case 4: {
+                const POINT triangle[] = {{x - radius, y - radius}, {x + radius, y - radius}, {x, y + radius}};
+                Polygon(dc, triangle, static_cast<int>(std::size(triangle)));
+                break;
+            }
+            case 5:
+                MoveToEx(dc, x - radius, y, nullptr);
+                LineTo(dc, x + radius + 1, y);
+                MoveToEx(dc, x, y - radius, nullptr);
+                LineTo(dc, x, y + radius + 1);
+                break;
+        }
+        RestoreDC(dc, saved);
+    }
+
     void drawModelUsageSummary(const DRAWITEMSTRUCT& draw) {
         HDC dc = draw.hDC;
         const int saved = SaveDC(dc);
@@ -6392,9 +6457,7 @@ public:
             if (index == 0) {
                 DrawTextW(dc, lines[index].c_str(), -1, &line, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             } else {
-                const int markerTop = line.top + scaledPixels(5);
-                RECT marker{line.left, markerTop, line.left + scaledPixels(8), markerTop + scaledPixels(8)};
-                fillDashboardRect(dc, marker, modelSeriesColor(index - 1));
+                drawModelMarker(dc, {line.left + scaledPixels(5), line.top + scaledPixels(8)}, index - 1);
                 line.left += scaledPixels(15);
                 SetTextColor(dc, dashboardColor(RGB(27, 40, 61), COLOR_WINDOWTEXT));
                 DrawTextW(dc, lines[index].c_str(), -1, &line, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -6494,6 +6557,8 @@ public:
         DrawTextW(dc, L"Tokens per 5-minute bucket", -1, &units, DT_SINGLELINE | DT_NOPREFIX);
         drawChartTimeLabels(dc, rect, plot.bounds, plot.first, plot.last);
 
+        std::vector<std::pair<POINT, size_t>> markers;
+        const int markerSpacing = scaledPixels(32);
         for (size_t index = 0; index < chart.series.size(); ++index) {
             const auto& series = chart.series[index];
             std::vector<POINT> points;
@@ -6501,7 +6566,21 @@ public:
             for (const auto& point : series.points) {
                 points.push_back(plot.position(point.bucketStartUtc, point.totalTokens));
             }
-            drawChartSeries(dc, points, modelSeriesColor(index));
+            if (points.size() > 1) {
+                drawChartSeries(dc, points, modelSeriesColor(index));
+            }
+            if (points.size() == 1 || dashboardHighContrast) {
+                LONG nextMarkerX = plot.bounds.left;
+                for (const auto& point : points) {
+                    if (point.x >= nextMarkerX) {
+                        markers.emplace_back(point, index);
+                        nextMarkerX = point.x + markerSpacing;
+                    }
+                }
+            }
+        }
+        for (const auto& [point, index] : markers) {
+            drawModelMarker(dc, point, index);
         }
 
         if (hoverSeries >= 0 && static_cast<size_t>(hoverSeries) < chart.series.size()) {
@@ -6509,7 +6588,7 @@ public:
             if (hoverPoint >= 0 && static_cast<size_t>(hoverPoint) < series.points.size()) {
                 const auto& value = series.points[static_cast<size_t>(hoverPoint)];
                 const POINT point = plot.position(value.bucketStartUtc, value.totalTokens);
-                drawChartSeries(dc, {point}, modelSeriesColor(static_cast<size_t>(hoverSeries)));
+                drawModelMarker(dc, point, static_cast<size_t>(hoverSeries), 7);
                 std::wostringstream tooltip;
                 tooltip << utf8ToWide(series.modelKey.empty() ? "unknown" : series.modelKey) << L"\n"
                         << L"Tokens: " << utf8ToWide(formatNumber(value.totalTokens)) << L"\n"
@@ -6677,6 +6756,18 @@ public:
         MSG msg{};
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
             if (msg.hwnd == hwnd || IsChild(hwnd, msg.hwnd)) {
+                if (msg.hwnd == mainTab && msg.message == WM_KEYDOWN &&
+                    (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT)) {
+                    // Button-style tabs move only focus by default. Move the focus and selection together.
+                    const int direction = msg.wParam == VK_RIGHT ? 1 : -1;
+                    const int index = selectedMainTab + direction;
+                    if (index >= 0 && index < TabCtrl_GetItemCount(mainTab)) {
+                        TabCtrl_SetCurSel(mainTab, index);
+                        TabCtrl_SetCurFocus(mainTab, index);
+                        activateMainPage(index);
+                    }
+                    continue;
+                }
                 if (msg.message == WM_KEYDOWN && selectedMainTab == 0 &&
                     (msg.wParam == VK_PRIOR || msg.wParam == VK_NEXT)) {
                     scrollOverview(msg.wParam == VK_PRIOR ? SB_PAGEUP : SB_PAGEDOWN);
