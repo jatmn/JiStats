@@ -288,7 +288,8 @@ public:
     
     // Get last error message
     std::string getLastError() const;
-    
+    std::optional<int> getRejectedSchemaVersion() const;
+
     // Get database path
     std::string getDbPath() const;
 

@@ -4,9 +4,16 @@
 #include "db/StorageService.hpp"
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
+#include <string_view>
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
+
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+#include <sqlite3.h>
+#endif
 
 using namespace JiStats;
 using JiStats::TestSupport::TempTestDatabase;
@@ -79,6 +86,30 @@ bool indexExists(StorageService& storage, const std::string& indexName) {
         {indexName});
     return result.success() && result.rowCount() == 1;
 }
+
+std::string readDatabaseFile(const TempTestDatabase& db) {
+    std::ifstream input(db.path(), std::ios::binary);
+    REQUIRE(input.is_open());
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+bool denySchemaVersionRead = false;
+
+int installSchemaVersionReadFailure(sqlite3* db, char**, const sqlite3_api_routines*) {
+    return sqlite3_set_authorizer(
+        db,
+        [](void*, int action, const char* table, const char* column, const char*, const char*) {
+            if (denySchemaVersionRead && action == SQLITE_READ && table && column &&
+                std::string_view(table) == "schema_version" && std::string_view(column) == "version") {
+                denySchemaVersionRead = false;
+                return SQLITE_DENY;
+            }
+            return SQLITE_OK;
+        },
+        nullptr);
+}
+#endif
 
 } // namespace
 
@@ -196,11 +227,10 @@ TEST_CASE("StorageService preserves version 12 database settings on reopen", "[s
     REQUIRE(storage.init(tempDb.path()));
 
     SettingsService settings(storage);
-    REQUIRE(storage.execute(
-        "INSERT INTO schema_version (version, description) VALUES (11, 'Previous schema');").success());
     REQUIRE(settings.setBool("ui.taskbar_overlay_enabled", false));
     REQUIRE(settings.setString("ui.last_selected_provider_id", "minimax"));
     storage.close();
+    const auto before = readDatabaseFile(tempDb);
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
@@ -208,10 +238,126 @@ TEST_CASE("StorageService preserves version 12 database settings on reopen", "[s
     CHECK_FALSE(manager.needsMigration());
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 2);
-    CHECK(versions.getInt(0, 0) == 11);
+    REQUIRE(versions.rowCount() == 1);
+    CHECK(versions.getInt(0, 0) == 12);
     CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
     CHECK(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
+    storage.close();
+    CHECK((readDatabaseFile(tempDb) == before));
+}
+
+TEST_CASE("StorageService reconciles either historical version 12 schema in place", "[schema][migration]") {
+    requireSqlite();
+
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    SettingsService settings(storage);
+    REQUIRE(settings.setString("ui.last_selected_provider_id", "minimax"));
+    REQUIRE(
+        storage
+            .execute("INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier) "
+                     "VALUES (8, 1, 'test', 'Test', 'account', 'test');"
+                     "INSERT INTO usage_rollups_hourly "
+                     "(provider_id, account_id, rollup_period_start_utc, request_count, local_request_count) "
+                     "VALUES (1, 8, '2026-01-01T00:00:00Z', 7, 7);")
+            .success());
+
+    // Remove only the schema and seed effects that the old loader could skip at 010.
+    bool hadAnalysisMigration = false;
+    SECTION("Only the analysis migration ran") {
+        hadAnalysisMigration = true;
+        REQUIRE(storage.execute("DELETE FROM providers WHERE provider_key = 'kimi';").success());
+    }
+    SECTION("Only the Kimi migration ran") {
+        REQUIRE(storage.execute("DROP TABLE recovery_checkpoints; DROP TABLE export_runs;").success());
+        for (const std::string table : {"usage_rollups_hourly", "usage_rollups_daily"}) {
+            for (const char* column : {"local_request_count", "imported_request_count", "api_request_count",
+                                       "unknown_request_count", "backfilled_request_count"}) {
+                REQUIRE(storage.execute("ALTER TABLE " + table + " DROP COLUMN " + column + ";").success());
+            }
+        }
+        REQUIRE(storage.execute("UPDATE providers SET enabled = 0 WHERE provider_key = 'kimi';").success());
+    }
+    REQUIRE(
+        storage.execute("INSERT INTO schema_version (version, description) VALUES (10, 'Historical migration 010');")
+            .success());
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
+    const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
+    REQUIRE(versions.rowCount() == 2);
+    CHECK(versions.getInt(0, 0) == 10);
+    CHECK(versions.getInt(1, 0) == 12);
+    const auto kimi = storage.execute("SELECT enabled FROM providers WHERE provider_key = 'kimi';");
+    REQUIRE(kimi.rowCount() == 1);
+    CHECK(kimi.getBool(0, 0) == hadAnalysisMigration);
+    for (const std::string table : {"usage_rollups_hourly", "usage_rollups_daily"}) {
+        const auto columns = storage.execute(
+            "SELECT local_request_count, imported_request_count, api_request_count, unknown_request_count, "
+            "backfilled_request_count FROM " +
+            table + " LIMIT 0;");
+        CHECK(columns.success());
+    }
+    constexpr std::time_t rollupStart = 1767225600; // 2026-01-01T00:00:00Z
+    const auto rollups = storage.getUsageRollups(UsageRollupResolution::Hourly, 1, 8, rollupStart, rollupStart);
+    REQUIRE(rollups.size() == 1);
+    CHECK(rollups.front().requestCount == 7);
+    CHECK(rollups.front().localRequestCount == (hadAnalysisMigration ? 7 : 0));
+    CHECK(indexExists(storage, "idx_recovery_checkpoints_provider_account_kind_attempt"));
+    CHECK(indexExists(storage, "idx_export_runs_kind_requested"));
+
+    PersistedRecoveryCheckpoint checkpoint;
+    checkpoint.providerId = 1;
+    checkpoint.accountId = 8;
+    checkpoint.syncKind = "runtime_backfill";
+    checkpoint.recoveryStart = 100;
+    checkpoint.recoveryEnd = 200;
+    checkpoint.attemptAt = 300;
+    checkpoint.outcome = "success";
+    REQUIRE(storage.insertRecoveryCheckpoint(checkpoint));
+    CHECK(storage.getLatestRecoveryCheckpoint(1, 8, checkpoint.syncKind).has_value());
+
+    PersistedExportRun exportRun;
+    exportRun.runKind = "manual";
+    exportRun.format = "html";
+    exportRun.requestedAt = 300;
+    REQUIRE(storage.insertExportRun(exportRun));
+    CHECK(storage.getLatestExportRun(exportRun.runKind).has_value());
+    storage.close();
+
+    const auto repaired = readDatabaseFile(tempDb);
+    REQUIRE(storage.init(tempDb.path()));
+    storage.close();
+    CHECK((readDatabaseFile(tempDb) == repaired));
+}
+
+TEST_CASE("StorageService does not bootstrap after a failed version read", "[schema][migration]") {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage.execute("UPDATE schema_version SET version = 11;").success());
+    storage.close();
+    const auto before = readDatabaseFile(tempDb);
+
+    const auto extension = reinterpret_cast<void (*)()>(installSchemaVersionReadFailure);
+    REQUIRE(sqlite3_auto_extension(extension) == SQLITE_OK);
+    denySchemaVersionRead = true;
+    const bool opened = storage.init(tempDb.path());
+    sqlite3_cancel_auto_extension(extension);
+
+    CHECK_FALSE(denySchemaVersionRead);
+    REQUIRE_FALSE(opened);
+    CHECK_FALSE(storage.isOpen());
+    CHECK_FALSE(storage.getRejectedSchemaVersion().has_value());
+    CHECK(storage.getLastError().find("Cannot read schema version") != std::string::npos);
+    CHECK((readDatabaseFile(tempDb) == before));
+#else
+    requireSqlite();
+#endif
 }
 
 TEST_CASE("StorageService rejects databases older than the baseline", "[schema][migration]") {
@@ -224,10 +370,14 @@ TEST_CASE("StorageService rejects databases older than the baseline", "[schema][
 
     REQUIRE(storage.execute("UPDATE schema_version SET version = 11;").success());
     storage.close();
+    const auto before = readDatabaseFile(tempDb);
 
     REQUIRE_FALSE(storage.init(tempDb.path()));
     CHECK_FALSE(storage.isOpen());
-    CHECK(storage.getLastError().find("Database schema version 11 predates the supported baseline") != std::string::npos);
+    CHECK(storage.getRejectedSchemaVersion() == 11);
+    CHECK(storage.getLastError().find("Database schema version 11 predates the supported baseline") !=
+          std::string::npos);
+    CHECK((readDatabaseFile(tempDb) == before));
 }
 
 TEST_CASE("StorageService redirects the default database to LOCALAPPDATA",

@@ -1,8 +1,19 @@
 #pragma once
 
+#include <string_view>
+
 namespace JiStats {
 
 inline constexpr char kBaselineSchemaSql[] =
     R"jistats_sql(@JISTATS_BASELINE_SQL@)jistats_sql";
+
+// Use the same DDL for fresh and historical version 12 databases.
+inline constexpr std::string_view kBaselineSchema(kBaselineSchemaSql);
+inline constexpr auto kRecoveryAndExportStart = kBaselineSchema.find("-- Recovery and export metadata");
+inline constexpr auto kRecoveryAndExportEnd = kBaselineSchema.find("-- Daily quota snapshot rollups");
+static_assert(kRecoveryAndExportStart < kRecoveryAndExportEnd &&
+              kRecoveryAndExportEnd != std::string_view::npos);
+inline constexpr auto kRecoveryAndExportSql = kBaselineSchema.substr(
+    kRecoveryAndExportStart, kRecoveryAndExportEnd - kRecoveryAndExportStart);
 
 } // namespace JiStats

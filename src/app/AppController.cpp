@@ -6988,6 +6988,21 @@ AppController::~AppController() {
     shutdown();
 }
 
+std::string AppController::getStartupWarning() const {
+    const auto version = pImpl->storageService.getRejectedSchemaVersion();
+    if (!version) {
+        return {};
+    }
+
+    return "JiStats could not use this database because it uses development schema version " +
+           std::to_string(*version) + ".\n\n" + pImpl->storageService.getDbPath() +
+           "\n\nDatabase persistence is disabled. JiStats will not save settings or activity to the database."
+           "\n\nTo start fresh, exit JiStats and move this database and any companion files "
+           "(-wal, -shm, or -journal) to a backup folder. If there is also a legacy jistats.db "
+           "beside JiStats.exe or in its working directory, move that file and its companion files as well. "
+           "Restart JiStats to create a fresh database.";
+}
+
 bool AppController::init(bool launchInBackground) {
     if (pImpl->initialized) {
         return true;

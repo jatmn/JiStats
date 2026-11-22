@@ -2,6 +2,7 @@
 
 #include <string>
 #include <memory>
+#include <optional>
 
 namespace JiStats {
 
@@ -23,17 +24,20 @@ public:
     
     // Apply all pending migrations
     bool migrate();
-    
+
     // Get migration status
     std::string getStatus() const;
     
     // Get last error
     std::string getLastError() const;
-    
-private:
+    std::optional<int> getRejectedVersion() const;
+
+  private:
+    bool prepareBaseline(int& current);
+    bool reconcileBaseline();
     bool migrateToVersion(int version);
     std::string loadMigration(int version) const;
-    
+
     StorageService& storage;
     class Impl;
     std::unique_ptr<Impl> pImpl;

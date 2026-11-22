@@ -73,20 +73,24 @@ std::string wideToUtf8(const wchar_t* value, size_t length) {
     return utf8Value;
 }
 
-int showStartupError(const std::string& message) {
-    MessageBoxW(
-        nullptr,
-        utf8ToWide(message).c_str(),
-        L"JiStats",
-        MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
-    return 1;
+void showStartupMessage(const std::string& message, bool warning) {
+    MessageBoxW(nullptr, utf8ToWide(message).c_str(), L"JiStats",
+                MB_OK | (warning ? MB_ICONWARNING : MB_ICONERROR) | MB_SETFOREGROUND);
 }
 #else
-int showStartupError(const std::string& message) {
-    JISTATS_LOG_ERROR(JiStats::LogCategory::Startup, message);
-    return 1;
+void showStartupMessage(const std::string& message, bool warning) {
+    if (warning) {
+        JISTATS_LOG_WARN(JiStats::LogCategory::Startup, message);
+    } else {
+        JISTATS_LOG_ERROR(JiStats::LogCategory::Startup, message);
+    }
 }
 #endif
+
+int showStartupError(const std::string& message) {
+    showStartupMessage(message, false);
+    return 1;
+}
 
 bool isBackgroundArgument(const std::string& arg) {
     return arg == "--background" || arg == "-background";
@@ -285,6 +289,9 @@ int runApplication(const CommandLineOptions& options) {
 
     if (!app.init(options.launchInBackground)) {
         return showStartupError("JiStats failed to initialize the dashboard.");
+    }
+    if (const auto warning = app.getStartupWarning(); !warning.empty()) {
+        showStartupMessage(warning, true);
     }
 
     return app.run();

@@ -12,7 +12,7 @@ Follow the [release queue](release-checklist.md#evidence-backed-release-queue) a
 
 [PR #5](https://github.com/jatmn/JiStats/pull/5) removed the dormant Dear ImGui build path and trimmed spdlog to its headers and license. Verify the cleanup with the Windows Debug build and test suite.
 
-SQLite baseline consolidation is in progress. New databases start at schema version 12, and existing version 12 databases reopen in place. Follow the [release queue](release-checklist.md#evidence-backed-release-queue) for Windows checks.
+SQLite baseline consolidation is in progress. New databases start at schema version 12. JiStats repairs artifacts missing from either historical migration `010` on reopen and warns before running with persistence disabled when it rejects versions 1 through 11. Follow the [release queue](release-checklist.md#evidence-backed-release-queue) for Windows checks.
 
 Verify that [Pullfrog automatic reviews](../CONTRIBUTING.md#pullfrog) run on an owner-authored draft and a subsequent push.
 

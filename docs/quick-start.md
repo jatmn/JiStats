@@ -12,7 +12,9 @@ Use one desktop binary, either `JiStats.exe` or the optional packed `JiStats-upx
 .\JiStats.exe --background
 ```
 
-JiStats stores the database in `%LOCALAPPDATA%\JiStats\jistats.db`. Moving the executable does not move that data. **Start with Windows** can launch JiStats at sign-in with the same embedded baseline. See [supported database versions](reference/storage.md#migration-behavior) before upgrading a development build.
+JiStats stores the database in `%LOCALAPPDATA%\JiStats\jistats.db`. Moving the executable does not move that data. **Start with Windows** can launch JiStats at sign-in with the same embedded baseline. Existing version 12 databases reopen in place. See [supported database versions](reference/storage.md#migration-behavior) for how JiStats handles older files.
+
+If JiStats warns that it rejected a development database, exit JiStats. Move the database named in the warning and any `-wal`, `-shm`, or `-journal` files to a backup folder. Also move any legacy `jistats.db` and companion files beside the executable or in its working directory, since JiStats can copy them into the default location. Restart JiStats to create a fresh database.
 
 ## Enable providers
 

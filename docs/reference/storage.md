@@ -21,6 +21,8 @@ The runtime retention job prunes `usage_events` and `gap_markers` after 90 days,
 
 The portable executable embeds the [version 12 SQLite baseline](../../db_migrations/012_baseline_schema.sql). [SchemaManager](../../src/db/SchemaManager.cpp) initializes it in one transaction, including when the app starts outside the portable folder. The baseline seeds OpenAI, MiniMax, Claude Code, Kimi Code, and HICAP, the default settings, and the singleton runtime-state row. Settings control which integrations the app enables.
 
-Existing version 12 databases reopen in place. JiStats rejects development databases at versions 1 through 11. Preserve the original database before setting up a fresh one.
+Existing version 12 databases reopen in place. The historical loader applied only one of the two migrations numbered `010`. On startup JiStats adds missing rollup provenance columns, recovery or export tables and indexes, or the Kimi provider row in a single transaction. It preserves existing data, settings, and schema history. If the schema version cannot be read, startup stops migration before applying schema changes.
+
+JiStats rejects development databases at versions 1 through 11 without modifying them. The desktop warning gives the database path and explains that persistence is disabled. Follow the [backup and restart instructions](../quick-start.md#launch) to start fresh.
 
 Use `013` for the next numbered SQL migration in [`db_migrations/`](../../db_migrations/). The loader discovers later files relative to the working directory. Advance `schema_version` in the same transaction as the schema change. When a release includes a later migration, verify its discovery during actual [packaged startup and sign-in](../validation/desktop.md#dashboard-and-background-checks).
