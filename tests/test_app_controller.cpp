@@ -2369,6 +2369,93 @@ TEST_CASE("AppController keeps an offline dismissal across a provider handoff an
     restarted.shutdown();
 }
 
+TEST_CASE("AppController clears saved offline dismissal on live recovery after restart", "[app][runtime][offline_notice]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
+    auto openai = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeFailedQuotaResponse("network unreachable"));
+    auto miniMax = makeOfflineQuotaProvider("minimax", "MiniMax");
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(openai);
+    providerManager->addProvider(miniMax);
+    ScopedTrayTestHandler handler([](TrayController::TestOperation,
+                                     TrayStatus,
+                                     const std::string&,
+                                     std::string&) -> std::optional<bool> {
+        return true;
+    });
+
+    AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setDisableTaskbarForTesting(true);
+    REQUIRE(app.init());
+    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
+    REQUIRE(app.clickDashboardOfflineDismissForTesting());
+    REQUIRE(waitForCondition([&app]() {
+        return !app.isDashboardOfflineNoticeVisibleForTesting();
+    }, std::chrono::seconds(5)));
+
+    auto preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.miniMaxSubscriptionTrackingEnabled = false;
+    app.applyDashboardPreferencesForTesting(preferences);
+    REQUIRE(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    const auto dismissed = app.getConnectivityStateForTesting("minimax");
+    REQUIRE(dismissed.has_value());
+    REQUIRE(dismissed->noticeDismissedAt > 0);
+    app.shutdown();
+
+    const std::time_t now = std::time(nullptr);
+    seedPersistedQuotaSnapshot(
+        dbPath.path(), "openai", "acct-openai-cached", "OpenAI Cached Account",
+        "openai_subscription", "OpenAI Subscription", "interval", now - 60, 60, 100, 40);
+    openai->setQuotaResponse(
+        makeQuotaResponse(now, 25, 100, "interval", "openai_subscription_codex_local"));
+
+    std::promise<void> reachedPublication;
+    auto publicationReached = reachedPublication.get_future();
+    AppController restarted;
+    std::promise<void> releasePublication;
+    auto publicationReleased = releasePublication.get_future().share();
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(providerManager);
+    restarted.setDisableTaskbarForTesting(true);
+    restarted.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
+        if (publicationReleased.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            reachedPublication.set_value();
+            publicationReleased.wait();
+        }
+    });
+    REQUIRE(restarted.init());
+    REQUIRE(publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const DashboardViewModel cached = restarted.getDashboardViewModelForTesting();
+    CHECK(cached.runtimeState != RuntimeState::Offline);
+    const auto* cachedOpenAI = findProviderStatus(cached, "openai");
+    REQUIRE(cachedOpenAI != nullptr);
+    REQUIRE_FALSE(cachedOpenAI->quotas.empty());
+    CHECK(cachedOpenAI->quotas.front().used == 60);
+    const auto beforeRecovery = restarted.getConnectivityStateForTesting("minimax");
+    REQUIRE(beforeRecovery.has_value());
+    CHECK(beforeRecovery->noticeDismissedAt == dismissed->noticeDismissedAt);
+
+    releasePublication.set_value();
+    restarted.refreshRuntimeForTesting();
+    REQUIRE(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Current);
+    const auto afterRecovery = restarted.getConnectivityStateForTesting("minimax");
+    REQUIRE(afterRecovery.has_value());
+    CHECK(afterRecovery->noticeDismissedAt == 0);
+
+    preferences = restarted.getDashboardViewModelForTesting().preferences;
+    preferences.miniMaxSubscriptionTrackingEnabled = true;
+    restarted.applyDashboardPreferencesForTesting(preferences);
+    CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK(restarted.isDashboardOfflineNoticeVisibleForTesting());
+    CHECK(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
+    restarted.shutdown();
+}
+
 TEST_CASE("AppController surfaces stale provider runtime state for taskbar validation", "[app][runtime]") {
     TempTestDatabase dbPath;
     const std::time_t now = std::time(nullptr);

@@ -5922,17 +5922,6 @@ public:
             }
             notificationService.showNotice(buildOfflineNotice(viewModel, now));
         } else if (transition.exitedOffline) {
-            // The episode also ends for providers omitted from the new dashboard.
-            if (storageAvailable && storageService.isOpen()) {
-                const auto result = storageService.execute(
-                    "UPDATE connectivity_state SET notice_dismissed_at_utc = NULL, "
-                    "updated_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
-                    "WHERE notice_dismissed_at_utc IS NOT NULL AND account_id IN ("
-                    "SELECT id FROM accounts WHERE scope_type = 'runtime');");
-                if (!result.success()) {
-                    JISTATS_LOG_WARN(LogCategory::Db, "Failed to clear the saved offline notice dismissal");
-                }
-            }
             notificationService.clearNotice(NoticeType::Offline);
         } else if (viewModel.runtimeState == RuntimeState::Offline &&
                    lastRuntimeState == RuntimeState::Offline) {
@@ -6122,7 +6111,7 @@ public:
         std::vector<PersistedConnectivityState>& updates,
         RuntimeState nextRuntimeState,
         std::time_t now) {
-        if (updates.empty()) {
+        if (!storageAvailable || !storageService.isOpen()) {
             return;
         }
 
@@ -6146,6 +6135,18 @@ public:
                 }
             }
             storageService.upsertConnectivityState(connectivity);
+        }
+
+        // A live result ends the saved episode even after a restart and for omitted providers.
+        if (nextRuntimeState != RuntimeState::Offline) {
+            const auto result = storageService.execute(
+                "UPDATE connectivity_state SET notice_dismissed_at_utc = NULL, "
+                "updated_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                "WHERE notice_dismissed_at_utc IS NOT NULL AND account_id IN ("
+                "SELECT id FROM accounts WHERE scope_type = 'runtime');");
+            if (!result.success()) {
+                JISTATS_LOG_WARN(LogCategory::Db, "Failed to clear the saved offline notice dismissal");
+            }
         }
     }
 
@@ -6387,13 +6388,16 @@ public:
     void applyRuntimeViewModel(
         const DashboardViewModel& viewModel,
         std::time_t now,
-        std::vector<PersistedConnectivityState> connectivityUpdates = {}) {
+        std::optional<std::vector<PersistedConnectivityState>> connectivityUpdates = std::nullopt) {
         syncTrayRuntimeIndicator(viewModel);
 
         DashboardViewModel presentedViewModel = viewModel;
         {
             std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
-            persistConnectivityForPublication(connectivityUpdates, presentedViewModel.runtimeState, now);
+            // Display-only publications have no live connectivity result.
+            if (connectivityUpdates.has_value()) {
+                persistConnectivityForPublication(*connectivityUpdates, presentedViewModel.runtimeState, now);
+            }
             updateOfflineNotice(presentedViewModel, now);
             publishDashboardWithOfflineNotice(presentedViewModel);
         }
@@ -7042,7 +7046,7 @@ bool AppController::init(bool launchInBackground) {
         bool usedPersistedStartupHydration = false;
         bool executedStartupCatchUp = false;
         DashboardViewModel viewModel;
-        std::vector<PersistedConnectivityState> connectivityUpdates;
+        std::optional<std::vector<PersistedConnectivityState>> connectivityUpdates;
         if (const auto hydratedViewModel =
                 pImpl->buildPersistedStartupHydrationViewModel(now, loadedPreferences)) {
             viewModel = *hydratedViewModel;
@@ -7053,7 +7057,7 @@ bool AppController::init(bool launchInBackground) {
             viewModel = pImpl->buildDashboardViewModel(now);
             viewModel.preferences = loadedPreferences; // Use persisted preferences
             executedStartupCatchUp =
-                pImpl->applyRecoveryPersistenceCycle(viewModel, loadedPreferences, now, connectivityUpdates);
+                pImpl->applyRecoveryPersistenceCycle(viewModel, loadedPreferences, now, connectivityUpdates.emplace());
         }
         viewModel.preferences = loadedPreferences; // Use persisted preferences
         if (usedPersistedStartupHydration) {
