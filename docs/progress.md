@@ -14,6 +14,17 @@ Follow the [release queue](release-checklist.md#evidence-backed-release-queue) a
 
 Verify that [Pullfrog automatic reviews](../CONTRIBUTING.md#pullfrog) run on an owner-authored draft and a subsequent push.
 
+## Handoffs
+
+Update the tracker when work changes state. At handoff, record what changed, the revision, the verification commands and results, and any blocker or next step. Keep dated release evidence in the release checklist. Record new decisions with their rationale and link to the current contract.
+
+## Current decisions
+
+| Decision | Where it applies |
+| --- | --- |
+| Codex SQLite is an opt-in local usage-attribution source. Rollouts supply Codex quota. | [OpenAI sources and privacy](providers/openai.md#sources-and-boundaries) |
+| The v1.0 release uses a portable bundle. | [Portable launch and upgrade](quick-start.md#launch) |
+
 ## Recently completed
 
 - Organized the documentation around the [index](README.md) and consolidated duplicate provider, runtime, and UI contracts.

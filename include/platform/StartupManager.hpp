@@ -7,10 +7,10 @@ namespace JiStats {
 
 /**
  * StartupManager handles Windows run-on-startup behavior.
- * 
+ *
  * Uses registry-based startup (HKCU\Software\Microsoft\Windows\CurrentVersion\Run).
  * Opt-in by default - user must explicitly enable startup behavior.
- * 
+ *
  * Per docs/reference/runtime.md:
  * - Opt-in (disabled by default)
  * - --background flag support for minimized startup

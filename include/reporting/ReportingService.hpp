@@ -149,10 +149,10 @@ struct ReportResult {
 
 /**
  * ReportingService handles report generation per docs/reference/reporting.md.
- * 
+ *
  * Reports are export artifacts (not live viewing).
  * HTML is the primary v1.0 format.
- * 
+ *
  * Per docs/reference/reporting.md:
  * - Reports include generation timestamp
  * - Data source attribution (provider, API, local)

@@ -12,7 +12,7 @@ Keep the executable and `db_migrations/` in the portable folder and launch with 
 .\JiStats.exe --background
 ```
 
-JiStats stores the database in `%LOCALAPPDATA%\JiStats\jistats.db`. Moving the executable does not move that data. Enable **Start with Windows** in Settings if you want tray-first startup at sign-in.
+JiStats stores the database in `%LOCALAPPDATA%\JiStats\jistats.db`. Moving the executable does not move that data. Start JiStats from the portable folder for first launch and after replacing the executable and migrations. **Start with Windows** can launch JiStats at sign-in, but its registry entry does not set a working directory. If it launches outside the portable folder, [migration discovery](reference/storage.md#migration-behavior) can skip pending upgrades.
 
 ## Enable providers
 

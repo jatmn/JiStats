@@ -15,7 +15,7 @@ MiniMax is opt-in and mirrors two subscription surfaces. In **File → Settings 
 - Keep Settings and unrelated app controls responsive while validation runs. Show progress and then the result for the selected surface.
 - Reopening Settings after save or validation should show the stored profile and a masked secret field. Revalidation should use the stored credential when the user has entered no replacement.
 - Keep missing, saved, validating, validated, failed, and temporarily unavailable states distinct. Wrong-surface and rejected-key results should stay distinguishable from network failures and endpoint unavailability.
-- Cover add, replace, revalidate, and remove. Verify both successful and failed validation, unavailable responses, and secret deletion when removing a stored credential. The [adapter tests](../../tests/test_minimax_adapter.cpp) and [controller tests](../../tests/test_app_controller.cpp) cover the provider and settings seams.
+- Verify adding, replacing, and revalidating a stored credential, including both successful and failed validation and unavailable responses. The [adapter tests](../../tests/test_minimax_adapter.cpp) and [controller tests](../../tests/test_app_controller.cpp) cover the provider and settings paths. Settings currently has no action for removing a stored credential.
 
 ## PAYG
 

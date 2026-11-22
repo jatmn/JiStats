@@ -1,13 +1,13 @@
 # Provider support
 
-All four integrations start disabled. Enable the providers you use in **File → Settings**.
+All four integrations start disabled. Enable the providers you use in **File → Settings**. Each toggle controls only its own integration.
 
 | Integration | Quota in the app | Activity and history | Setup |
 | --- | --- | --- | --- |
 | [OpenAI / Codex](providers/openai.md) | Codex rate-limit windows from local rollouts when present | Local observation, Codex rollout throughput, model attribution from local SQLite, and historical ChatGPT export import | Enable OpenAI and use Codex locally. Import an extracted ChatGPT export when you want historical activity. |
-| [MiniMax](providers/minimax.md) | Provider-reported Coding Plan and Token Plan remains | Quota snapshots collected by JiStats | Add and validate the key for the selected subscription surface. |
+| [MiniMax](providers/minimax.md) | Provider-reported remaining quota for Coding Plan and Token Plan | Quota snapshots collected by JiStats | Add and validate the key for the selected subscription surface. |
 | [Claude Code](providers/claude-kimi.md#claude-code) | Local aggregates support activity summaries. Provider-exact quota is unavailable. | Approved local stats and settings | Enable Claude Code with a local stats cache available. |
-| [Kimi Code](providers/claude-kimi.md#kimi-code) | Provider-reported subscription percentages when usable OAuth is available | Approved local runtime and activity metadata | Enable Kimi Code. The Kimi client owns its OAuth credential file. |
+| [Kimi Code](providers/claude-kimi.md#kimi-code) | Provider-reported subscription percentages when usable OAuth is available | Approved local runtime and activity metadata | Enable Kimi Code. JiStats reads the Kimi client's OAuth credential file and writes rotated credentials back when refreshing them. |
 
 Codex rollout pressure applies to the Codex window recorded in the source. General ChatGPT subscription quota is unknown. ChatGPT exports enrich historical activity. OpenAI organization usage and cost are a [separate advanced path](providers/openai-api-platform.md). MiniMax PAYG per-request usage was validated separately. Aggregate PAYG history and runtime integration remain deferred.
 

@@ -388,7 +388,7 @@ std::string HtmlExporter::generateHtml(const DashboardViewModel& viewModel,
     html << "            <div class=\"subtitle\">AI Provider Usage Tracking Report</div>\n";
     html << "            <div class=\"timestamp\">Generated: " << timestampStr << "</div>\n";
     html << "        </div>\n";
-    
+
     // Report metadata card (per docs/reference/reporting.md)
     html << "        <div class=\"card\">\n";
     html << "            <h2>Report Data Quality</h2>\n";

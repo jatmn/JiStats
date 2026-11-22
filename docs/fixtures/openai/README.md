@@ -11,10 +11,10 @@ For JiStats v1.0, OpenAI is intentionally split into:
 
 | Path | Type | What It Supports | Notes |
 | --- | --- | --- | --- |
-| `docs/fixtures/openai/subscription-surface-notes.md` | Evidence note | Honest inventory of official OpenAI subscription-visible surfaces and the no-scraping conclusion | Records account/export/Codex usage surfaces and the current subscription-first baseline |
+| [Subscription surface notes](subscription-surface-notes.md) | Evidence note | Inventory of official OpenAI subscription-visible surfaces and the no-scraping conclusion | Records account/export/Codex usage surfaces and the current subscription-first baseline |
 | `docs/fixtures/openai/codex-rate-limits-shape.sample.json` | Public doc-derived sample | Reference shape for Codex-linked rate-limit parsing | Not a live user capture |
 | `docs/fixtures/openai/codex-rollout-rate-limits.redacted.jsonl` | Synthetic local rollout example | Real-shape parser coverage for Codex-local `token_count` / `rate_limits` ingestion | Conversation and session content removed; preserves only the fields needed for parser/runtime validation |
-| `docs/fixtures/openai/codex-consumer-artifact-redaction-note.md` | Redaction contract | Commit-safe rules for any future Codex consumer artifact archive | Defines what a safe artifact may preserve, redact, and claim |
+| [Codex consumer artifact redaction note](codex-consumer-artifact-redaction-note.md) | Redaction contract | Commit-safe rules for any future Codex consumer artifact archive | Defines what a safe artifact may preserve, redact, and claim |
 | `docs/fixtures/openai/chatgpt-export-redacted/` | Redacted extracted-export fixture directory | Historical ChatGPT export import parser/storage coverage | Includes `conversations.json` plus the extracted-export marker siblings used for provenance checks |
 | `docs/fixtures/openai/chatgpt-export-derived-fixture-note.md` | Provenance/redaction note | Commit-safe rules for the extracted-export fixture package | Keeps historical-only labeling and redaction boundaries explicit |
 | [Subscription augmentation fixture guide](subscription-augmentation-fixture-guide.md) | Coverage checklist | Fixture/test expectations for Codex-local parsing and ChatGPT export import | Keeps parser and reporting expectations pinned to the current local-first OpenAI path |
