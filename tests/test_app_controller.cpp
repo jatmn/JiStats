@@ -1120,11 +1120,13 @@ public:
         std::string providerKey,
         std::string displayName,
         QuotaResponse quotaResponse,
-        std::chrono::milliseconds delay)
+        std::chrono::milliseconds delay,
+        std::shared_future<void> releaseQuota = {})
         : providerKey_(std::move(providerKey)),
           displayName_(std::move(displayName)),
           quotaResponse_(std::move(quotaResponse)),
-          delay_(delay) {}
+          delay_(delay),
+          releaseQuota_(std::move(releaseQuota)) {}
 
     UsageResponse fetchUsage(std::time_t from, std::time_t to) override {
         (void)from;
@@ -1135,6 +1137,12 @@ public:
     QuotaResponse fetchQuota() override {
         ++quotaFetchCount_;
         std::this_thread::sleep_for(delay_);
+        const bool released = !releaseQuota_.valid() ||
+            releaseQuota_.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        ++completedQuotaFetchCount_;
+        if (!released) {
+            return makeFailedQuotaResponse("Timed out waiting for the test to release quota");
+        }
         return quotaResponse_;
     }
 
@@ -1166,13 +1174,19 @@ public:
         return quotaFetchCount_.load();
     }
 
+    int getCompletedQuotaFetchCount() const {
+        return completedQuotaFetchCount_.load();
+    }
+
 private:
     std::string providerKey_;
     std::string displayName_;
     QuotaResponse quotaResponse_;
     std::chrono::milliseconds delay_{0};
+    std::shared_future<void> releaseQuota_;
     bool enabled_ = true;
     std::atomic<int> quotaFetchCount_{0};
+    std::atomic<int> completedQuotaFetchCount_{0};
 };
 
 class CountingDetectionProviderAdapter final : public IProviderAdapter {
@@ -3501,7 +3515,7 @@ TEST_CASE("AppController normalizes quota fields and dashboard summaries to rema
     app.shutdown();
 }
 
-TEST_CASE("AppController startup hydration shows persisted quota state before delayed live refresh completes", "[app][runtime]") {
+TEST_CASE("AppController startup hydration shows persisted quota state while live refresh is blocked", "[app][runtime]") {
     if (!sqliteAvailable()) {
         SUCCEED("SQLite not available in this build; persisted startup hydration cannot be exercised here.");
         return;
@@ -3523,24 +3537,26 @@ TEST_CASE("AppController startup hydration shows persisted quota state before de
         100,
         40);
 
+    AppController app;
+    std::promise<void> releaseQuota;
     auto delayedProvider = std::make_shared<DelayedQuotaProviderAdapter>(
         "openai",
         "OpenAI",
         makeQuotaResponse(std::time(nullptr), 25, 100, "interval", "openai_subscription_codex_local"),
-        std::chrono::milliseconds(400));
+        std::chrono::milliseconds(0),
+        releaseQuota.get_future().share());
     auto providerManager = std::make_shared<ProviderManager>();
     providerManager->addProvider(delayedProvider);
 
-    AppController app;
     app.setHeadlessForTesting(true);
     app.setDatabasePathForTesting(dbPath.string());
     app.setProviderManagerForTesting(providerManager);
 
-    const auto start = std::chrono::steady_clock::now();
     REQUIRE(app.init());
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start);
-    CHECK(elapsed < std::chrono::milliseconds(300));
+    REQUIRE(waitForCondition([&delayedProvider]() {
+        return delayedProvider->getQuotaFetchCount() > 0;
+    }, std::chrono::seconds(5)));
+    REQUIRE(delayedProvider->getCompletedQuotaFetchCount() == 0);
 
     const DashboardViewModel hydratedViewModel = app.getDashboardViewModelForTesting();
     REQUIRE(hydratedViewModel.providers.size() == 1);
@@ -3554,13 +3570,14 @@ TEST_CASE("AppController startup hydration shows persisted quota state before de
     REQUIRE(hydratedSummary.has_value());
     CHECK(hydratedSummary->detail.find("40% remaining") != std::string::npos);
 
+    releaseQuota.set_value();
     REQUIRE(waitForCondition([&app]() {
         const DashboardViewModel viewModel = app.getDashboardViewModelForTesting();
         const ProviderStatus* openaiStatus = findProviderStatus(viewModel, "openai");
         return openaiStatus != nullptr &&
                !openaiStatus->quotas.empty() &&
                openaiStatus->quotas.front().remaining == 75;
-    }, std::chrono::milliseconds(1500)));
+    }, std::chrono::seconds(5)));
 
     const DashboardViewModel refreshedViewModel = app.getDashboardViewModelForTesting();
     const ProviderStatus* refreshedOpenAI = findProviderStatus(refreshedViewModel, "openai");
@@ -3568,7 +3585,7 @@ TEST_CASE("AppController startup hydration shows persisted quota state before de
     REQUIRE(refreshedOpenAI->quotas.size() == 1);
     CHECK(refreshedOpenAI->quotas.front().used == 25);
     CHECK(refreshedOpenAI->quotas.front().remaining == 75);
-    CHECK(delayedProvider->getQuotaFetchCount() >= 1);
+    CHECK(delayedProvider->getCompletedQuotaFetchCount() >= 1);
 
     app.shutdown();
 }

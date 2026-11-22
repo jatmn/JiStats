@@ -2,7 +2,7 @@
 
 > **Status**: Implemented baseline with ongoing expansion
 > **Purpose**: Describe the current repo test strategy, fixture layout, and verification lanes without reverting to planning-era placeholders
-> **Driven by**: `docs/plan.md` section 14.3 plus the shipped test/configuration files in `tests/`, `scripts/`, and the currently disabled GitHub workflow archive under `.github/workflows-disabled/`
+> **Driven by**: `docs/plan.md` section 14.3 plus the shipped test/configuration files in `tests/`, `scripts/`, and the [GitHub Actions workflow](../.github/workflows/ci.yml)
 
 ## Current Test Philosophy
 
@@ -72,7 +72,7 @@ Current cross-component coverage includes:
 The repo now has a dedicated SQLite-enabled verification lane:
 
 - script: `scripts/run_sqlite_quality_gate.ps1`
-- GitHub workflow archive: `.github/workflows-disabled/windows-sqlite-quality-gate.yml.disabled`
+- GitHub Actions: [CI](../.github/workflows/ci.yml) runs on pull requests and pushes targeting `main` and `release/**`. It can also be dispatched manually.
 
 This is the current highest-signal automated storage/migration gate because it configures a clean bundled-SQLite build, builds `JiStatsTests`, and runs the full suite through `ctest`.
 
