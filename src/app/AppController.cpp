@@ -36,6 +36,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -758,6 +759,7 @@ struct DirectApiQuotaPollState {
     QuotaResponse response;
     std::time_t lastAttemptAt = 0;
     std::time_t stableSince = 0;
+    std::uint64_t fetchedInRefresh = 0;
 };
 
 bool quotaUsageFingerprintMatches(const QuotaResponse& lhs, const QuotaResponse& rhs) {
@@ -3744,6 +3746,11 @@ std::chrono::milliseconds adaptiveWatcherIntervalOrDormantForTesting(
 
 class AppController::Impl {
 public:
+    struct QuotaRefresh {
+        std::uint64_t generation;
+        std::set<std::string> fetchedProviderKeys;
+    };
+
     struct ProviderConnectivityUpdates {
         std::vector<PersistedConnectivityState> rows;
         bool confirmedRecovery = false;
@@ -3817,6 +3824,7 @@ public:
     size_t openAICodexWatcherUnchangedPasses = 0;
     size_t localProviderWatcherUnchangedPasses = 0;
     std::map<std::string, DirectApiQuotaPollState> directApiQuotaPollStates;
+    std::uint64_t quotaRefreshGeneration = 0;
     bool claudeCodeDetected = false;
     bool kimiCodeDetected = false;
     std::string claudeCodeDetectionMessage;
@@ -4034,13 +4042,15 @@ public:
 
     QuotaResponse fetchQuotaWithDirectApiBudget(
         const std::shared_ptr<IProviderAdapter>& provider,
-        std::time_t now) {
+        std::time_t now,
+        QuotaRefresh& refresh) {
         if (!provider || !provider->isEnabled()) {
             return QuotaResponse{};
         }
 
         if (!provider->hasDirectQuotaApiConfigured()) {
             directApiQuotaPollStates.erase(provider->getProviderKey());
+            refresh.fetchedProviderKeys.insert(provider->getProviderKey());
             return provider->fetchQuota();
         }
 
@@ -4052,6 +4062,10 @@ public:
         if (pollState.hasResponse &&
             pollState.lastAttemptAt > 0 &&
             (now - pollState.lastAttemptAt) < intervalSeconds) {
+            // The post-catch-up rebuild may reuse a result fetched in this cycle.
+            if (pollState.fetchedInRefresh == refresh.generation) {
+                refresh.fetchedProviderKeys.insert(provider->getProviderKey());
+            }
             return pollState.response;
         }
 
@@ -4064,6 +4078,8 @@ public:
         pollState.lastAttemptAt = now;
         pollState.hasResponse = true;
         pollState.response = response;
+        pollState.fetchedInRefresh = refresh.generation;
+        refresh.fetchedProviderKeys.insert(provider->getProviderKey());
 
         if (response.success) {
             if (!unchanged || pollState.stableSince <= 0) {
@@ -4077,13 +4093,13 @@ public:
     }
 
     std::vector<QuotaResponse> fetchQuotaResponses(
-        ProviderManager& runtimeProviderManager,
-        std::time_t now) {
+        const std::vector<std::shared_ptr<IProviderAdapter>>& providers,
+        std::time_t now,
+        QuotaRefresh& refresh) {
         std::vector<QuotaResponse> responses;
-        const auto providers = runtimeProviderManager.getEnabledProviders();
         responses.reserve(providers.size());
         for (const auto& provider : providers) {
-            responses.push_back(fetchQuotaWithDirectApiBudget(provider, now));
+            responses.push_back(fetchQuotaWithDirectApiBudget(provider, now, refresh));
         }
         return responses;
     }
@@ -6021,16 +6037,19 @@ public:
     }
 
     ProviderConnectivityUpdates persistProviderRefreshState(
-        const DashboardViewModel& viewModel, std::time_t now) {
+        const DashboardViewModel& viewModel,
+        std::time_t now,
+        const QuotaRefresh& refresh) {
         ProviderConnectivityUpdates connectivityUpdates;
         if (!storageAvailable || !storageService.isOpen()) {
             return connectivityUpdates;
         }
 
-        // Sample-only and empty results can change presentation without confirming recovery.
+        // Only a usable result fetched in this refresh can confirm recovery.
         connectivityUpdates.confirmedRecovery =
-            std::any_of(viewModel.providers.begin(), viewModel.providers.end(), [](const auto& provider) {
-                return provider.state == ProviderState::Live || provider.state == ProviderState::Stale;
+            std::any_of(viewModel.providers.begin(), viewModel.providers.end(), [&refresh](const auto& provider) {
+                return (provider.state == ProviderState::Live || provider.state == ProviderState::Stale) &&
+                    refresh.fetchedProviderKeys.count(provider.providerKey) != 0;
             }) &&
             std::none_of(viewModel.providers.begin(), viewModel.providers.end(), [](const auto& provider) {
                 return provider.state == ProviderState::Offline;
@@ -6365,18 +6384,19 @@ public:
         DashboardViewModel& viewModel,
         const DashboardPreferences& preferences,
         std::time_t now,
+        QuotaRefresh& refresh,
         ProviderConnectivityUpdates& connectivityUpdates) {
         bool executedCatchUp = false;
         if (viewModel.runtimeState != RuntimeState::Offline && hasPendingRecovery()) {
             executedCatchUp = executePendingCatchUp(now, viewModel, activeProviderManager());
             if (executedCatchUp) {
-                viewModel = buildDashboardViewModel(now);
+                viewModel = buildDashboardViewModel(now, refresh);
                 viewModel.preferences = preferences;
             }
         }
 
         // Catch-up can replace the quota result used for the notice.
-        connectivityUpdates = persistProviderRefreshState(viewModel, now);
+        connectivityUpdates = persistProviderRefreshState(viewModel, now, refresh);
         applyGapAnnotations(viewModel, now);
         if (viewModel.runtimeState != RuntimeState::Offline && hasPendingRecovery()) {
             promotePendingRecoveryState(viewModel);
@@ -6514,11 +6534,12 @@ public:
         }
     }
 
-    DashboardViewModel buildDashboardViewModel(std::time_t now) {
+    DashboardViewModel buildDashboardViewModel(std::time_t now, QuotaRefresh& refresh) {
+        refresh.fetchedProviderKeys.clear();
 #ifdef JISTATS_ENABLE_TEST_HOOKS
         if (testProviderManager) {
             const auto providers = testProviderManager->getEnabledProviders();
-            const auto quotaResponses = fetchQuotaResponses(*testProviderManager, now);
+            const auto quotaResponses = fetchQuotaResponses(providers, now, refresh);
             persistQuotaSnapshots(providers, quotaResponses, now);
             DashboardViewModel viewModel =
                 buildDashboardViewModelFromResolvedProviderData(now, providers, quotaResponses);
@@ -6532,7 +6553,7 @@ public:
         return viewModel;
 #else
         const auto providers = providerManager.getEnabledProviders();
-        const auto quotaResponses = fetchQuotaResponses(providerManager, now);
+        const auto quotaResponses = fetchQuotaResponses(providers, now, refresh);
         persistQuotaSnapshots(providers, quotaResponses, now);
         DashboardViewModel viewModel =
             buildDashboardViewModelFromResolvedProviderData(now, providers, quotaResponses);
@@ -6651,10 +6672,11 @@ public:
         if (importLocalActivity) {
             importEnabledLocalProviderActivity(preferences);
         }
-        DashboardViewModel viewModel = buildDashboardViewModel(now);
+        QuotaRefresh refresh{++quotaRefreshGeneration, {}};
+        DashboardViewModel viewModel = buildDashboardViewModel(now, refresh);
         viewModel.preferences = preferences;
         ProviderConnectivityUpdates connectivityUpdates;
-        applyRecoveryPersistenceCycle(viewModel, preferences, now, connectivityUpdates);
+        applyRecoveryPersistenceCycle(viewModel, preferences, now, refresh, connectivityUpdates);
         applyPersistedActivitySummaries(viewModel, now);
         applyDashboardOperationalStatus(viewModel);
         if (shouldRefreshAnalysisSurface()) {
@@ -7054,10 +7076,12 @@ bool AppController::init(bool launchInBackground) {
         } else {
             pImpl->runProviderDiscovery();
             pImpl->importEnabledLocalProviderActivity(loadedPreferences);
-            viewModel = pImpl->buildDashboardViewModel(now);
+            Impl::QuotaRefresh refresh{++pImpl->quotaRefreshGeneration, {}};
+            viewModel = pImpl->buildDashboardViewModel(now, refresh);
             viewModel.preferences = loadedPreferences; // Use persisted preferences
             executedStartupCatchUp =
-                pImpl->applyRecoveryPersistenceCycle(viewModel, loadedPreferences, now, connectivityUpdates.emplace());
+                pImpl->applyRecoveryPersistenceCycle(
+                    viewModel, loadedPreferences, now, refresh, connectivityUpdates.emplace());
         }
         viewModel.preferences = loadedPreferences; // Use persisted preferences
         if (usedPersistedStartupHydration) {

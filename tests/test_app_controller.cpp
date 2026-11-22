@@ -2533,6 +2533,75 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     app.shutdown();
 }
 
+TEST_CASE("AppController keeps offline dismissal when remaining quota comes from the polling cache", "[app][runtime][offline_notice][polling]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, true, false, true);
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        REQUIRE(ensureProviderId(storage, "kimi", "Kimi Code") > 0);
+    }
+    const std::time_t now = std::time(nullptr);
+    auto miniMax = makeCurrentQuotaProvider(
+        "minimax", "MiniMax", 120, 1000, now, "daily", "minimax_subscription_coding_plan");
+    miniMax->setDirectQuotaApiConfigured(true, "minimax:coding_plan_remains");
+    auto kimi = makeOfflineQuotaProvider("kimi", "Kimi Code");
+    auto providerManager = makeProviderManager({miniMax, kimi});
+    ScopedTrayTestHandler handler([](TrayController::TestOperation,
+                                     TrayStatus,
+                                     const std::string&,
+                                     std::string&) -> std::optional<bool> {
+        return true;
+    });
+
+    AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setDisableTaskbarForTesting(true);
+    REQUIRE(app.init());
+    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
+    REQUIRE(miniMax->getQuotaFetchCount() == 1);
+    REQUIRE(app.clickDashboardOfflineDismissForTesting());
+    REQUIRE(waitForCondition([&app]() {
+        return !app.isDashboardOfflineNoticeVisibleForTesting();
+    }, std::chrono::seconds(5)));
+    const auto dismissed = app.getConnectivityStateForTesting("kimi");
+    REQUIRE(dismissed.has_value());
+    REQUIRE(dismissed->noticeDismissedAt > 0);
+
+    auto preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.kimiCodeEnabled = false;
+    app.applyDashboardPreferencesForTesting(preferences);
+    const DashboardViewModel cached = app.getDashboardViewModelForTesting();
+    CHECK(cached.runtimeState == RuntimeState::Current);
+    CHECK(miniMax->getQuotaFetchCount() == 1);
+    const auto* cachedMiniMax = findProviderStatus(cached, "minimax");
+    REQUIRE(cachedMiniMax != nullptr);
+    REQUIRE_FALSE(cachedMiniMax->quotas.empty());
+    CHECK(cachedMiniMax->quotas.front().used == 120);
+    const auto afterCache = app.getConnectivityStateForTesting("kimi");
+    REQUIRE(afterCache.has_value());
+    CHECK(afterCache->noticeDismissedAt == dismissed->noticeDismissedAt);
+
+    preferences.kimiCodeEnabled = true;
+    app.applyDashboardPreferencesForTesting(preferences);
+    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
+
+    preferences.kimiCodeEnabled = false;
+    app.applyDashboardPreferencesForTesting(preferences);
+    CHECK(miniMax->getQuotaFetchCount() == 1);
+    app.setCurrentTimeForTesting(now + 301);
+    app.refreshRuntimeForTesting();
+    REQUIRE(miniMax->getQuotaFetchCount() == 2);
+    const auto afterFetch = app.getConnectivityStateForTesting("kimi");
+    REQUIRE(afterFetch.has_value());
+    CHECK(afterFetch->noticeDismissedAt == 0);
+    app.shutdown();
+}
+
 TEST_CASE("AppController surfaces stale provider runtime state for taskbar validation", "[app][runtime]") {
     TempTestDatabase dbPath;
     const std::time_t now = std::time(nullptr);
