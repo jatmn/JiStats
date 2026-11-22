@@ -28,8 +28,8 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 
 From Linux, run the portable tests before pushing code changes. For Windows-facing changes, also cross-build the app, CLI and full test executable with MinGW-w64. Both command sequences and dependencies are in the [Linux build instructions](README.md#building-on-linux). Add `-DJISTATS_BUILD_TESTS=ON` to the cross-build configuration to include the full suite.
 
-The PR workflow executes the cross-built suite on a hosted Windows runner. A local Visual Studio installation is optional. For an MSVC build or Release packaging, see the [Windows instructions](README.md#building-on-windows).
+CI executes the cross-built suite on a hosted Windows runner for PRs, protected-branch pushes and manual dispatch. Use the [build and packaging instructions](README.md#build-and-packaging) for MinGW releases from Linux or Windows.
 
 - Use the [verification guide](docs/validation/testing.md) to choose verification for the change and record what ran and any blockers in the handoff.
-- For storage, schema, or SQLite persistence changes, run the [SQLite-enabled quality gate](docs/validation/sqlite-quality-gate.md). Run the bundled-SQLite portable tests on Linux and check the full Windows suite in CI. The [PowerShell gate](scripts/run_sqlite_quality_gate.ps1) and [manual CI dispatch](.github/workflows/ci.yml) also exercise MSVC.
+- For storage, schema, or SQLite persistence changes, run the [SQLite-enabled quality gate](docs/validation/sqlite-quality-gate.md). Run the bundled-SQLite portable tests on Linux and check the full Windows suite in CI. Use [manual CI dispatch](.github/workflows/ci.yml) to test any branch.
 - Use the [manual taskbar checks](docs/validation/desktop.md#taskbar-checks) when changing Windows shell behavior.

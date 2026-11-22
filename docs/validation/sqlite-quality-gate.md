@@ -64,7 +64,7 @@ The [portable test build](../../README.md#building-on-linux) enables bundled SQL
 
 ## Windows validation
 
-Run [`scripts/run_sqlite_quality_gate.ps1`](../../scripts/run_sqlite_quality_gate.ps1) from the repository or dispatch [Windows CI](../../.github/workflows/ci.yml). Both routes configure with bundled SQLite and tests enabled, build, and run CTest. Record the commands and outcome in the handoff.
+Follow the [UCRT64 commands](../../README.md#building-on-windows) locally, or dispatch [CI](../../.github/workflows/ci.yml) to build on Linux and run the full test executable on Windows. Both use bundled SQLite. Record the commands and outcome in the handoff.
 
 ## Exit Rule
 

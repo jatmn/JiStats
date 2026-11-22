@@ -34,22 +34,24 @@ cmake --build build-mingw
 
 Cross-builds use bundled SQLite by default. With bundled or statically linked SQLite, you can copy the executables to Windows without extra DLLs. To use `-DJISTATS_USE_SYSTEM_SQLITE=ON`, install SQLite built for Windows x64 into the MinGW target prefix or set `CMAKE_FIND_ROOT_PATH` to the Windows dependency prefix. If the build links a shared SQLite package, copy that package's SQLite DLL (typically `sqlite3.dll`) alongside the executables. Configure in a fresh build directory if CMake previously cached Linux SQLite paths.
 
-On code pull requests, GitHub Actions runs the portable tests on Linux and the full cross-built test executable on Windows. Contributors can push from Linux without a local Windows build. See the [verification guide](docs/validation/testing.md).
+For a portable release, take `JiStats.exe` from `build-mingw/bin/` (it embeds the SQLite baseline) and include the [redistribution notices](#license). The CLI and test executable are developer tools. Follow the [release checklist](docs/release-checklist.md) to smoke-test the assembled bundle on Windows.
+
+GitHub Actions uses MinGW-w64 for pull requests, protected-branch pushes, and manual builds. Linux runs the portable tests and Windows runs the full cross-built test executable. See the [verification guide](docs/validation/testing.md).
 
 ### Building on Windows
 
-For the reference MSVC Release build, run these commands from the repository root on Windows. The Visual Studio C++ Build Tools and Windows SDK are sufficient for command-line builds.
+From an [MSYS2 UCRT64 shell](https://www.msys2.org/docs/environments/), install the Windows-native GCC, CMake and Ninja packages and build from the repository root.
 
-```powershell
-cmake -S . -B build -G "Visual Studio 18 2026" -DJISTATS_BUILD_TESTS=ON
-pwsh -File .\scripts\build_release.ps1
+```bash
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+cmake -S . -B build-ucrt -G Ninja -DCMAKE_BUILD_TYPE=Release -DJISTATS_BUILD_TESTS=ON
+cmake --build build-ucrt
+ctest --test-dir build-ucrt --output-on-failure
 ```
 
-The helper stops running JiStats, MiniMax CLI, and test binaries before building to release file locks. Use `-Target JiStats` to build only the desktop app. Release outputs are in `build/bin/Release/`.
+Release outputs are in `build-ucrt/bin/`. On Windows, the optional packed `JiStats-upx.exe` uses the bundled UPX. Configure with `-DJISTATS_ENABLE_UPX=OFF` to omit it.
 
-- `JiStats.exe` is the desktop app. `JiStatsMiniMaxCli.exe` and `JiStatsTests.exe` are developer tools.
-- With `JISTATS_ENABLE_UPX=ON`, Release builds also produce `JiStats-upx.exe` using the bundled UPX 5.1.1. Use `-DJISTATS_ENABLE_UPX=OFF` at configure time to omit packed variants.
-- For a portable bundle, include the license files described below. Follow the [release checklist](docs/release-checklist.md) for package smoke testing.
+An existing Visual Studio build tree also works with `pwsh -File .\scripts\build_release.ps1`. The helper stops running JiStats binaries to release file locks and builds the Release configuration in `build/bin/Release/`.
 
 ## 📦 Third-Party Components
 

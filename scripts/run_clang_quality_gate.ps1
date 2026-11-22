@@ -129,7 +129,9 @@ function Invoke-CmakeConfigure {
         "-DJISTATS_ENABLE_UPX=OFF"
     )
 
-    if (Get-Command cl -ErrorAction SilentlyContinue) {
+    # Ninja can configure in an active MinGW or Visual Studio environment.
+    if ($env:CXX -or (Get-Command g++ -ErrorAction SilentlyContinue) -or
+        (Get-Command cl -ErrorAction SilentlyContinue)) {
         Write-Host ("Running: cmake {0}" -f ($cmakeArgs -join " "))
         & cmake @cmakeArgs
         if ($LASTEXITCODE -ne 0) {
@@ -140,7 +142,7 @@ function Invoke-CmakeConfigure {
 
     $vsDevCmdPath = Get-VsDevCmdPath
     if (-not $vsDevCmdPath) {
-        throw "MSVC build tools are not active and VsDevCmd.bat was not found. Open a Visual Studio 2026 (version 18) Developer PowerShell or install the matching Build Tools."
+        throw "No C++ toolchain found. Run from an MSYS2 UCRT64 environment with GCC, set CC and CXX, or open a Visual Studio Developer PowerShell."
     }
 
     $quotedArgs = $cmakeArgs | ForEach-Object { Quote-CmdArgument $_ }

@@ -74,7 +74,7 @@ jobs:
                   ;;
                 *.md)
                   continue ;;
-                docs/fixtures/* | .github/workflows/ci.yml | scripts/run_sqlite_quality_gate.ps1)
+                docs/fixtures/* | .github/workflows/ci.yml)
                   ;;
                 docs/*)
                   continue ;;
@@ -115,29 +115,10 @@ jobs:
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           echo "build=$build" >> "$GITHUB_OUTPUT"
 
-  windows:
-    name: Windows build and tests
-    needs: changes
-    if: github.event_name != 'pull_request' && needs.changes.outputs.build == 'true'
-    runs-on: windows-latest
-    timeout-minutes: 30
-    env:
-      # Ninja compiles every translation unit in parallel; the Visual Studio
-      # generator compiles each target's files one at a time.
-      CMAKE_GENERATOR: Ninja
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-      - name: Run SQLite quality gate
-        shell: powershell
-        run: .\scripts\run_sqlite_quality_gate.ps1
-
   linux-cross:
     name: Linux tests and Windows cross-build
     needs: changes
-    if: github.event_name != 'push' && needs.changes.outputs.build == 'true'
+    if: needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -162,7 +143,6 @@ jobs:
       - name: Build the app, MiniMax CLI, and tests
         run: cmake --build build-mingw --parallel
       - name: Upload the test executable for Windows
-        if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-tests
@@ -174,7 +154,6 @@ jobs:
   windows-runtime:
     name: Run cross-built tests on Windows
     needs: linux-cross
-    if: github.event_name == 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -193,7 +172,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: always()
-    needs: [changes, windows, linux-cross, windows-runtime]
+    needs: [changes, linux-cross, windows-runtime]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
