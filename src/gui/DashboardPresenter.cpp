@@ -1141,12 +1141,18 @@ public:
         DashboardNoticeActionResult result;
     };
 
+#ifdef _WIN32
     struct ModelChartPointHit {
         int seriesIndex = -1;
         int pointIndex = -1;
+        POINT position{};
+
+        bool operator==(const ModelChartPointHit& other) const {
+            return seriesIndex == other.seriesIndex && pointIndex == other.pointIndex &&
+                   position.x == other.position.x && position.y == other.position.y;
+        }
     };
 
-#ifdef _WIN32
     std::thread uiThread;
     std::condition_variable readyCv;
     HWND window = nullptr;
@@ -1187,8 +1193,8 @@ public:
     int codexChartHoverIndex = -1;
     bool codexChartTrackingMouse = false;
     HWND modelChartHoverWindow = nullptr;
-    int modelChartHoverSeries = -1;
-    int modelChartHoverPoint = -1;
+    POINT modelChartHoverCursor{};
+    ModelChartPointHit modelChartHoverHit;
     bool modelChartTrackingMouse = false;
     ULONGLONG nextDashboardChartRefreshTick = 0;
     HWND chartCountdownHoverWindow = nullptr;
@@ -6037,22 +6043,17 @@ public:
                     std::lock_guard<std::mutex> lock(mutex);
                     vm = viewModel;
                 }
-                if (hwnd == openAiUsageChart) {
+                if (hwnd == openAiUsageChart || hwnd == hicapUsageChart) {
+                    const auto& chart =
+                        hwnd == openAiUsageChart ? vm.analysis.openAiCodexModelUsage : vm.analysis.hicapCodexModelUsage;
                     const bool hovered = modelChartHoverWindow == hwnd;
-                    drawModelUsageChart(
-                        hdc,
-                        rect,
-                        vm.analysis.openAiCodexModelUsage,
-                        hovered ? modelChartHoverSeries : -1,
-                        hovered ? modelChartHoverPoint : -1);
-                } else if (hwnd == hicapUsageChart) {
-                    const bool hovered = modelChartHoverWindow == hwnd;
-                    drawModelUsageChart(
-                        hdc,
-                        rect,
-                        vm.analysis.hicapCodexModelUsage,
-                        hovered ? modelChartHoverSeries : -1,
-                        hovered ? modelChartHoverPoint : -1);
+                    const auto cursor = hovered && chartCountdownHoverWindow != hwnd
+                                            ? std::optional<POINT>{modelChartHoverCursor}
+                                            : std::nullopt;
+                    const auto hit = drawModelUsageChart(hdc, rect, chart, cursor);
+                    if (hovered) {
+                        modelChartHoverHit = hit;
+                    }
                 } else {
                     drawCodexThroughputChart(hdc, rect, vm.analysis.codexHourlyHistory, codexChartHoverIndex);
                 }
@@ -6095,8 +6096,9 @@ public:
                     TrackMouseEvent(&tme);
                     modelChartTrackingMouse = true;
                 }
-                POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-                const bool countdownHovered = updateChartCountdownHover(hwnd, pt, rectFromHwnd(hwnd));
+                const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                const RECT rect = rectFromHwnd(hwnd);
+                const bool countdownHovered = updateChartCountdownHover(hwnd, pt, rect);
                 AnalysisProviderModelUsageChart chart;
                 {
                     std::lock_guard<std::mutex> lock(mutex);
@@ -6104,14 +6106,15 @@ public:
                         ? viewModel.analysis.openAiCodexModelUsage
                         : viewModel.analysis.hicapCodexModelUsage;
                 }
-                const ModelChartPointHit hit = countdownHovered ? ModelChartPointHit{} : modelChartHitTest(pt, rectFromHwnd(hwnd), chart);
-                if (modelChartHoverWindow != hwnd ||
-                    hit.seriesIndex != modelChartHoverSeries ||
-                    hit.pointIndex != modelChartHoverPoint) {
+                ModelChartPointHit hit;
+                if (!countdownHovered && chart.hasData && PtInRect(&rect, pt)) {
+                    hit = modelChartHitTest(pt, modelChartPlot(rect, chart));
+                }
+                modelChartHoverCursor = pt;
+                if (modelChartHoverWindow != hwnd || !(hit == modelChartHoverHit)) {
                     HWND previous = modelChartHoverWindow;
                     modelChartHoverWindow = hwnd;
-                    modelChartHoverSeries = hit.seriesIndex;
-                    modelChartHoverPoint = hit.pointIndex;
+                    modelChartHoverHit = hit;
                     if (previous != nullptr && previous != hwnd) {
                         InvalidateRect(previous, nullptr, FALSE);
                     }
@@ -6138,8 +6141,7 @@ public:
                 clearChartCountdownHover(hwnd);
                 if (modelChartHoverWindow == hwnd) {
                     modelChartHoverWindow = nullptr;
-                    modelChartHoverSeries = -1;
-                    modelChartHoverPoint = -1;
+                    modelChartHoverHit = {};
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
                 return 0;
@@ -6482,11 +6484,19 @@ public:
         RestoreDC(dc, saved);
     }
 
+    struct ModelChartMarker {
+        POINT center;
+        size_t seriesIndex;
+        size_t pointIndex;
+    };
+
     struct ModelChartPlot {
         RECT bounds;
         double maxTokens = 4;
         std::time_t first = 0;
         std::time_t last = 0;
+        std::vector<std::vector<POINT>> seriesPoints;
+        std::vector<ModelChartMarker> markers;
 
         POINT position(std::time_t time, long long tokens) const {
             const LONG width = bounds.right - bounds.left;
@@ -6500,7 +6510,8 @@ public:
     };
 
     ModelChartPlot modelChartPlot(const RECT& rect, const AnalysisProviderModelUsageChart& chart) const {
-        ModelChartPlot plot{dashboardPlotRect(rect, false)};
+        ModelChartPlot plot{};
+        plot.bounds = dashboardPlotRect(rect, false);
         for (const auto& series : chart.series) {
             for (const auto& point : series.points) {
                 plot.maxTokens = std::max(plot.maxTokens, static_cast<double>(point.totalTokens));
@@ -6511,27 +6522,50 @@ public:
         // Four equal intervals with whole-number tick labels.
         const double step = std::pow(10.0, std::floor(std::log10(plot.maxTokens / 4)));
         plot.maxTokens = std::ceil(plot.maxTokens / (4 * step)) * 4 * step;
+        plot.seriesPoints.resize(chart.series.size());
+        for (size_t index = 0; index < chart.series.size(); ++index) {
+            auto& points = plot.seriesPoints[index];
+            const auto& samples = chart.series[index].points;
+            points.reserve(samples.size());
+            for (const auto& sample : samples) {
+                points.push_back(plot.position(sample.bucketStartUtc, sample.totalTokens));
+            }
+        }
+        if (dashboardHighContrast) {
+            plot.markers = contrastModelMarkers(plot.bounds, plot.seriesPoints);
+        } else {
+            for (size_t index = 0; index < plot.seriesPoints.size(); ++index) {
+                const auto& points = plot.seriesPoints[index];
+                if (points.size() == 1) {
+                    plot.markers.push_back({points.front(), index, 0});
+                }
+            }
+        }
         return plot;
     }
 
-    ModelChartPointHit modelChartHitTest(POINT pt, const RECT& rect, const AnalysisProviderModelUsageChart& chart) {
-        ModelChartPointHit hit;
-        if (!chart.hasData || !PtInRect(&rect, pt)) {
-            return hit;
+    ModelChartPointHit modelChartHitTest(POINT pt, const ModelChartPlot& plot) const {
+        const int markerRadius = scaledPixels(kModelMarkerRadius);
+        // Match the paint order if markers share any pixels.
+        for (auto marker = plot.markers.rbegin(); marker != plot.markers.rend(); ++marker) {
+            if (std::abs(marker->center.x - pt.x) <= markerRadius &&
+                std::abs(marker->center.y - pt.y) <= markerRadius) {
+                return {static_cast<int>(marker->seriesIndex), static_cast<int>(marker->pointIndex), marker->center};
+            }
         }
-        const ModelChartPlot plot = modelChartPlot(rect, chart);
+        ModelChartPointHit hit;
         const int radius = scaledPixels(14);
         int nearest = radius * radius;
-        for (size_t series = 0; series < chart.series.size(); ++series) {
-            const auto& points = chart.series[series].points;
+        for (size_t series = 0; series < plot.seriesPoints.size(); ++series) {
+            const auto& points = plot.seriesPoints[series];
             for (size_t index = 0; index < points.size(); ++index) {
-                const POINT point = plot.position(points[index].bucketStartUtc, points[index].totalTokens);
+                const POINT point = points[index];
                 const int dx = point.x - pt.x;
                 const int dy = point.y - pt.y;
                 const int distance = dx * dx + dy * dy;
                 if (distance < nearest) {
                     nearest = distance;
-                    hit = {static_cast<int>(series), static_cast<int>(index)};
+                    hit = {static_cast<int>(series), static_cast<int>(index), point};
                 }
             }
         }
@@ -6557,16 +6591,12 @@ public:
         }
     }
 
-    void drawContrastModelMarkers(HDC dc, const RECT& plot, const std::vector<std::vector<POINT>>& seriesPoints) {
-        struct Marker {
-            POINT anchor;
-            POINT center;
-            size_t series;
-        };
-        std::vector<Marker> markers;
+    std::vector<ModelChartMarker> contrastModelMarkers(const RECT& plot,
+                                                       const std::vector<std::vector<POINT>>& seriesPoints) const {
+        std::vector<ModelChartMarker> markers;
         const LONG markerGap = 2L * scaledPixels(kModelMarkerRadius) + 2;
         const auto isClear = [&](POINT center) {
-            return std::none_of(markers.begin(), markers.end(), [&](const Marker& marker) {
+            return std::none_of(markers.begin(), markers.end(), [&](const ModelChartMarker& marker) {
                 return std::abs(center.x - marker.center.x) < markerGap &&
                        std::abs(center.y - marker.center.y) < markerGap;
             });
@@ -6590,7 +6620,10 @@ public:
             }
             const auto distinct = std::find_if(points.rbegin(), points.rend(),
                                                [&](POINT point) { return owners.at({point.x, point.y}) == index; });
-            const POINT anchor = distinct == points.rend() ? points.back() : *distinct;
+            const size_t sampleIndex = distinct == points.rend()
+                                           ? points.size() - 1
+                                           : static_cast<size_t>(distinct.base() - points.begin() - 1);
+            const POINT anchor = points[sampleIndex];
             POINT center = anchor;
             // Keep the sample at its actual position. Move only its marker when the shapes would overlap.
             const LONG span = plot.right - plot.left;
@@ -6603,42 +6636,51 @@ public:
                     center = right;
                 }
             }
-            markers.push_back({anchor, center, index});
+            markers.push_back({center, index, sampleIndex});
         }
 
         // Reserve every series identifier before adding the repeated markers on longer traces.
         const int spacing = scaledPixels(32);
         for (size_t index = 0; index < seriesPoints.size(); ++index) {
             LONG nextX = plot.left;
-            for (const auto point : seriesPoints[index]) {
+            const auto& points = seriesPoints[index];
+            for (size_t pointIndex = 0; pointIndex < points.size(); ++pointIndex) {
+                const POINT point = points[pointIndex];
                 if (point.x >= nextX && isClear(point)) {
-                    markers.push_back({point, point, index});
+                    markers.push_back({point, index, pointIndex});
                     nextX = point.x + spacing;
                 }
             }
         }
-        const int saved = SaveDC(dc);
-        SelectObject(dc, GetStockObject(DC_PEN));
-        SetDCPenColor(dc, GetSysColor(COLOR_WINDOWTEXT));
-        for (const auto& marker : markers) {
-            if (marker.anchor.x != marker.center.x) {
-                MoveToEx(dc, marker.anchor.x, marker.anchor.y, nullptr);
-                LineTo(dc, marker.center.x, marker.center.y);
+        return markers;
+    }
+
+    void drawModelChartMarkers(HDC dc, const ModelChartPlot& plot) {
+        if (dashboardHighContrast) {
+            const int saved = SaveDC(dc);
+            SelectObject(dc, GetStockObject(DC_PEN));
+            SetDCPenColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+            for (const auto& marker : plot.markers) {
+                const POINT anchor = plot.seriesPoints[marker.seriesIndex][marker.pointIndex];
+                if (anchor.x != marker.center.x) {
+                    MoveToEx(dc, anchor.x, anchor.y, nullptr);
+                    LineTo(dc, marker.center.x, marker.center.y);
+                }
             }
+            RestoreDC(dc, saved);
         }
-        RestoreDC(dc, saved);
-        for (const auto& marker : markers) {
-            drawModelMarker(dc, marker.center, marker.series);
+        for (const auto& marker : plot.markers) {
+            drawModelMarker(dc, marker.center, marker.seriesIndex);
         }
     }
 
-    void drawModelUsageChart(HDC dc, const RECT& rect, const AnalysisProviderModelUsageChart& chart, int hoverSeries,
-                             int hoverPoint) {
+    ModelChartPointHit drawModelUsageChart(HDC dc, const RECT& rect, const AnalysisProviderModelUsageChart& chart,
+                                           std::optional<POINT> cursor) {
         const int saved = SaveDC(dc);
         if (!chart.hasData || chart.series.empty()) {
             drawEmptyChart(dc, rect, L"Waiting for new model usage");
             RestoreDC(dc, saved);
-            return;
+            return {};
         }
 
         fillDashboardRect(dc, rect, GetSysColor(COLOR_WINDOW));
@@ -6648,42 +6690,31 @@ public:
         DrawTextW(dc, L"Tokens per 5-minute bucket", -1, &units, DT_SINGLELINE | DT_NOPREFIX);
         drawChartTimeLabels(dc, rect, plot.bounds, plot.first, plot.last);
 
-        std::vector<std::vector<POINT>> seriesPoints(chart.series.size());
-        for (size_t index = 0; index < chart.series.size(); ++index) {
-            const auto& series = chart.series[index];
-            auto& points = seriesPoints[index];
-            points.reserve(series.points.size());
-            for (const auto& point : series.points) {
-                points.push_back(plot.position(point.bucketStartUtc, point.totalTokens));
-            }
+        for (size_t index = 0; index < plot.seriesPoints.size(); ++index) {
+            const auto& points = plot.seriesPoints[index];
             if (points.size() > 1) {
                 drawChartSeries(dc, points, modelSeriesColor(index));
             }
         }
-        if (dashboardHighContrast) {
-            drawContrastModelMarkers(dc, plot.bounds, seriesPoints);
-        } else {
-            for (size_t index = 0; index < seriesPoints.size(); ++index) {
-                if (seriesPoints[index].size() == 1) {
-                    drawModelMarker(dc, seriesPoints[index].front(), index);
-                }
-            }
-        }
+        drawModelChartMarkers(dc, plot);
 
-        if (hoverSeries >= 0 && static_cast<size_t>(hoverSeries) < chart.series.size()) {
-            const auto& series = chart.series[static_cast<size_t>(hoverSeries)];
-            if (hoverPoint >= 0 && static_cast<size_t>(hoverPoint) < series.points.size()) {
-                const auto& value = series.points[static_cast<size_t>(hoverPoint)];
-                const POINT point = plot.position(value.bucketStartUtc, value.totalTokens);
-                drawModelMarker(dc, point, static_cast<size_t>(hoverSeries), 7);
-                std::wostringstream tooltip;
-                tooltip << utf8ToWide(series.modelKey.empty() ? "unknown" : series.modelKey) << L"\n"
-                        << L"Tokens: " << utf8ToWide(formatNumber(value.totalTokens)) << L"\n"
-                        << L"Bucket: " << utf8ToWide(formatChartBucketLabel(value.bucketStartUtc));
-                drawTooltipBox(dc, tooltip.str(), point.x, point.y, rect.left, rect.top, rect.right, rect.bottom);
-            }
+        ModelChartPointHit hit;
+        if (cursor && PtInRect(&rect, *cursor)) {
+            hit = modelChartHitTest(*cursor, plot);
+        }
+        if (hit.seriesIndex >= 0) {
+            const auto& series = chart.series[static_cast<size_t>(hit.seriesIndex)];
+            const auto& value = series.points[static_cast<size_t>(hit.pointIndex)];
+            const POINT point = hit.position;
+            drawModelMarker(dc, point, static_cast<size_t>(hit.seriesIndex), 7);
+            std::wostringstream tooltip;
+            tooltip << utf8ToWide(series.modelKey.empty() ? "unknown" : series.modelKey) << L"\n"
+                    << L"Tokens: " << utf8ToWide(formatNumber(value.totalTokens)) << L"\n"
+                    << L"Bucket: " << utf8ToWide(formatChartBucketLabel(value.bucketStartUtc));
+            drawTooltipBox(dc, tooltip.str(), point.x, point.y, rect.left, rect.top, rect.right, rect.bottom);
         }
         RestoreDC(dc, saved);
+        return hit;
     }
 
     void drawCodexThroughputChart(HDC dc, const RECT& rect, const AnalysisCodexHourlyHistory& history, int hoverIndex) {
