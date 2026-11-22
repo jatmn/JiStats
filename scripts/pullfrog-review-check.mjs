@@ -1,4 +1,6 @@
 import { appendFileSync } from 'node:fs';
+import { setTimeout as wait } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { OWNER_ID } from './pullfrog-command-check.mjs';
 
 const REVIEW_TRIGGERS = new Set([
@@ -7,27 +9,48 @@ const REVIEW_TRIGGERS = new Set([
   'pull_request_synchronize',
 ]);
 
-const payload = JSON.parse(process.env.PULLFROG_PROMPT);
-const event = payload?.event;
-if (payload?.['~pullfrog'] !== true || event?.is_pr !== true ||
-    !REVIEW_TRIGGERS.has(event.trigger) ||
-    !Number.isSafeInteger(event.issue_number) || event.issue_number <= 0) {
-  console.log('Skipping dispatch outside automatic PR review.');
-  process.exit(0);
+export async function isAuthorizedReview(payload, { apiUrl, repository, token }) {
+  const event = payload?.event;
+  if (payload?.['~pullfrog'] !== true || event?.is_pr !== true ||
+      !REVIEW_TRIGGERS.has(event.trigger) ||
+      !Number.isSafeInteger(event.issue_number) || event.issue_number <= 0) {
+    return false;
+  }
+
+  // Read the PR author from GitHub because a different account may have pushed the commit.
+  const url = `${apiUrl}/repos/${repository}/pulls/${event.issue_number}`;
+  const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
+  let lastError;
+  for (const delay of [0, 250, 750]) {
+    if (delay > 0) await wait(delay);
+    try {
+      const response = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
+      if (response.ok) {
+        const pr = await response.json();
+        return pr?.user?.id === OWNER_ID && pr.user.login === 'jatmn';
+      }
+
+      lastError = new Error(`GitHub HTTP ${response.status}`);
+      const retryable = response.status === 408 || response.status >= 500;
+      if (!retryable || response.headers.has('Retry-After')) break;
+      await response.body?.cancel();
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof TypeError || error?.name === 'TimeoutError' || error?.name === 'AbortError')) break;
+    }
+  }
+  throw new Error(`Could not verify PR #${event.issue_number} author.`, { cause: lastError });
 }
 
-// The bot dispatches the workflow. GitHub's PR record identifies the author
-// even when a different account pushed the commit.
-const response = await fetch(
-  `${process.env.GITHUB_API_URL}/repos/${process.env.GITHUB_REPOSITORY}/pulls/${event.issue_number}`,
-  { headers: { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json' } },
-);
-if (!response.ok) {
-  throw new Error(`Could not verify PR #${event.issue_number} author (GitHub HTTP ${response.status}).`);
-}
-const pr = await response.json();
-if (pr.user?.id === OWNER_ID && pr.user.login === 'jatmn') {
-  appendFileSync(process.env.GITHUB_OUTPUT, 'authorized=true\n');
-} else {
-  console.log('Skipping automatic review for a PR by another author.');
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const authorized = await isAuthorizedReview(JSON.parse(process.env.PULLFROG_PROMPT), {
+    apiUrl: process.env.GITHUB_API_URL,
+    repository: process.env.GITHUB_REPOSITORY,
+    token: process.env.GH_TOKEN,
+  });
+  if (authorized) {
+    appendFileSync(process.env.GITHUB_OUTPUT, 'authorized=true\n');
+  } else {
+    console.log('Skipping automatic review. The dispatch must target an owner-authored PR.');
+  }
 }

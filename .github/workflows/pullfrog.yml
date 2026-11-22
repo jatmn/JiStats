@@ -55,6 +55,7 @@ jobs:
   auto-review:
     if: >-
       github.event_name == 'workflow_dispatch' &&
+      !github.event.repository.private &&
       github.actor == 'pullfrog[bot]' &&
       github.actor_id == '226033991' &&
       github.triggering_actor == 'pullfrog[bot]' &&
