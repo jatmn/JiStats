@@ -3,6 +3,9 @@
 #include "gui/NotificationService.hpp"
 
 #include <ctime>
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+#include <future>
+#endif
 #include <memory>
 #include <optional>
 #include <string>
@@ -97,7 +100,7 @@ public:
         int statusCode,
         const std::string& body = "",
         const std::string& error = "");
-    void setMiniMaxValidationDelayForTesting(int delayMs);
+    void setMiniMaxValidationReleaseForTesting(std::shared_future<void> release);
     void setOpenAICodexRefreshPollIntervalForTesting(int intervalMs);
     void setLocalProviderRefreshPollIntervalForTesting(int intervalMs);
     void setCurrentTimeForTesting(std::time_t now);

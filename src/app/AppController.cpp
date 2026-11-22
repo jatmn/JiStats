@@ -3774,6 +3774,8 @@ public:
     std::map<std::string, MiniMaxSubscriptionCredentialProfile> miniMaxCredentialProfiles;
     mutable std::mutex miniMaxValidationMutex;
     std::mutex runtimeRefreshMutex;
+    // Serializes connectivity writes and notice publication independently of provider I/O.
+    std::mutex offlineNoticeMutex;
     std::thread startupRefreshThread;
     std::thread interactionWorkThread;
     std::thread taskbarRefreshThread;
@@ -3824,7 +3826,7 @@ public:
     bool disableTaskbarForTesting = false;
     bool taskbarTestModeForTesting = false;
     bool disableCodexTokenImportForTesting = false;
-    int miniMaxValidationDelayMsForTesting = 0;
+    std::shared_future<void> miniMaxValidationReleaseForTesting;
     std::optional<std::time_t> currentTimeForTesting;
 #endif
 
@@ -3985,6 +3987,7 @@ public:
 
             if (requiresProviderDiscoveryRefresh) {
                 runProviderDiscovery();
+                std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
                 DashboardViewModel refreshedViewModel = dashboardPresenter.getViewModel();
                 if (!refreshedViewModel.appVersion.empty()) {
                     applyProviderDiscoveryStatusToViewModel(refreshedViewModel);
@@ -4606,7 +4609,7 @@ public:
             ? PersistedMetricSnapshotMode::Full
             : PersistedMetricSnapshotMode::TrayOnly;
         ensureFreshPersistedMetricSnapshot(now, snapshotMode);
-        syncRuntimeIndicators(viewModel, now);
+        syncTrayRuntimeIndicator(viewModel);
 
         if (!viewModel.preferences.taskbarOverlayEnabled) {
             return;
@@ -5388,9 +5391,8 @@ public:
         std::lock_guard<std::mutex> lock(miniMaxValidationMutex);
         miniMaxValidationThreads.emplace_back([this, planKey, profile]() {
 #ifdef JISTATS_ENABLE_TEST_HOOKS
-            if (miniMaxValidationDelayMsForTesting > 0) {
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(miniMaxValidationDelayMsForTesting));
+            if (miniMaxValidationReleaseForTesting.valid()) {
+                miniMaxValidationReleaseForTesting.wait();
             }
 #endif
 
@@ -5828,13 +5830,12 @@ public:
         return false;
     }
 
-    void persistOfflineNoticeDismissal(std::time_t now) {
+    void persistOfflineNoticeDismissal(const DashboardViewModel& viewModel, std::time_t now) {
         if (!storageAvailable || !storageService.isOpen()) {
             return;
         }
 
-        const DashboardViewModel currentViewModel = dashboardPresenter.getViewModel();
-        for (const auto& provider : currentViewModel.providers) {
+        for (const auto& provider : viewModel.providers) {
             if (provider.state != ProviderState::Offline) {
                 continue;
             }
@@ -5847,7 +5848,7 @@ public:
             }
 
             auto connectivity = storageService.getConnectivityState(*providerId, *runtimeAccountId);
-            if (!connectivity.has_value()) {
+            if (!connectivity.has_value() || connectivity->status != "offline") {
                 continue;
             }
 
@@ -5856,14 +5857,12 @@ public:
         }
     }
 
-    void refreshOfflineNoticePresentationOnly() {
-        DashboardViewModel viewModel = dashboardPresenter.getViewModel();
-        if (viewModel.appVersion.empty()) {
-            return;
-        }
-
+    void publishDashboardWithOfflineNotice(DashboardViewModel& viewModel) {
         applyOfflineNoticePresentation(viewModel);
         dashboardPresenter.updateViewModel(viewModel);
+        taskbarPresenter.setOfflineMenuState(
+            viewModel.offlineRetryAvailable,
+            viewModel.offlineNoticeVisible);
     }
 
     DashboardNoticeActionResult handleOfflineRetryAction() {
@@ -5883,11 +5882,10 @@ public:
     }
 
     DashboardNoticeActionResult handleOfflineDismissAction() {
-        // A runtime refresh rewrites each connectivity row from the copy it read
-        // first, so an unserialized dismissal could be overwritten and lost.
-        std::lock_guard<std::mutex> refreshLock(runtimeRefreshMutex);
+        std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
+        DashboardViewModel viewModel = dashboardPresenter.getViewModel();
         DashboardNoticeActionResult result;
-        if (dashboardPresenter.getViewModel().runtimeState != RuntimeState::Offline) {
+        if (viewModel.runtimeState != RuntimeState::Offline) {
             result.success = false;
             result.message = "Offline notice is unavailable.";
             return result;
@@ -5900,14 +5898,14 @@ public:
             notificationService.suppressUntilCleared(NoticeType::Offline);
         }
 
-        persistOfflineNoticeDismissal(std::time(nullptr));
-        refreshOfflineNoticePresentationOnly();
+        persistOfflineNoticeDismissal(viewModel, std::time(nullptr));
+        publishDashboardWithOfflineNotice(viewModel);
         result.success = true;
         result.message = "Offline notice dismissed. JiStats will keep the offline indicator visible and retry automatically.";
         return result;
     }
 
-    void syncRuntimeIndicators(const DashboardViewModel& viewModel, std::time_t now) {
+    void syncTrayRuntimeIndicator(const DashboardViewModel& viewModel) {
         const PersistedMetricSnapshot snapshot = copyPersistedMetricSnapshot();
         if (trayController.isAvailable()) {
             std::string tooltip = buildTrayTooltip(viewModel);
@@ -5916,12 +5914,9 @@ public:
             }
             trayController.setState(trayStatusForRuntimeState(viewModel.runtimeState), tooltip);
         }
-        if (taskbarPresenter.isAvailable()) {
-            taskbarPresenter.setOfflineMenuState(
-                viewModel.offlineRetryAvailable,
-                viewModel.offlineNoticeVisible);
-        }
+    }
 
+    void updateOfflineNotice(const DashboardViewModel& viewModel, std::time_t now) {
         const RuntimeStatusTransition transition =
             describeRuntimeStateTransition(lastRuntimeState, viewModel.runtimeState);
         if (transition.enteredOffline) {
@@ -6063,15 +6058,10 @@ public:
                 continue;
             }
 
-            const auto existingConnectivity =
-                storageService.getConnectivityState(*providerId, *runtimeAccountId);
-
             PersistedConnectivityState connectivity;
             connectivity.providerId = *providerId;
             connectivity.accountId = *runtimeAccountId;
             connectivity.lastCheckedAt = now;
-            connectivity.noticeDismissedAt =
-                existingConnectivity.has_value() ? existingConnectivity->noticeDismissedAt : 0;
 
             PersistedSyncState syncState;
             syncState.providerId = *providerId;
@@ -6083,11 +6073,6 @@ public:
                 anyOfflineProvider = true;
                 connectivity.status = "offline";
                 connectivity.failureCategory = "provider_unreachable";
-                const bool wasOffline = existingConnectivity.has_value() &&
-                    existingConnectivity->status == "offline";
-                connectivity.nextRetryAt =
-                    now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
-
                 syncState.lastFailureAt = now;
                 syncState.lastFailureCategory = connectivity.failureCategory;
 
@@ -6101,13 +6086,23 @@ public:
                     (provider.state == ProviderState::Stale ? "stale" : "online");
                 connectivity.failureCategory.clear();
                 connectivity.nextRetryAt = 0;
-                connectivity.noticeDismissedAt = 0;
 
                 syncState.lastSuccessAt = now;
                 syncState.lastFailureCategory.clear();
             }
 
-            storageService.upsertConnectivityState(connectivity);
+            {
+                std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
+                if (provider.state == ProviderState::Offline) {
+                    const auto existing =
+                        storageService.getConnectivityState(*providerId, *runtimeAccountId);
+                    const bool wasOffline = existing.has_value() && existing->status == "offline";
+                    connectivity.nextRetryAt =
+                        now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
+                    connectivity.noticeDismissedAt = existing.has_value() ? existing->noticeDismissedAt : 0;
+                }
+                storageService.upsertConnectivityState(connectivity);
+            }
             storageService.upsertSyncState(syncState);
         }
 
@@ -6362,11 +6357,14 @@ public:
     }
 
     void applyRuntimeViewModel(const DashboardViewModel& viewModel, std::time_t now) {
-        syncRuntimeIndicators(viewModel, now);
+        syncTrayRuntimeIndicator(viewModel);
 
         DashboardViewModel presentedViewModel = viewModel;
-        applyOfflineNoticePresentation(presentedViewModel);
-        dashboardPresenter.updateViewModel(presentedViewModel);
+        {
+            std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
+            updateOfflineNotice(presentedViewModel, now);
+            publishDashboardWithOfflineNotice(presentedViewModel);
+        }
 
         if (viewModel.preferences.taskbarOverlayEnabled) {
 #ifdef JISTATS_ENABLE_TEST_HOOKS
@@ -6756,6 +6754,7 @@ public:
     }
 
     void syncPresentedPreferences(const DashboardPreferences& preferences) {
+        std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
         DashboardViewModel viewModel = dashboardPresenter.getViewModel();
         if (viewModel.appVersion.empty()) {
             return;
@@ -7118,10 +7117,6 @@ bool AppController::init(bool launchInBackground) {
             pImpl->taskbarPresenter.setOnExitCallback([this]() {
                 requestShutdown();
             });
-            pImpl->taskbarPresenter.setOfflineMenuState(
-                viewModel.offlineRetryAvailable,
-                viewModel.offlineNoticeVisible);
-            
             JISTATS_LOG_INFO(LogCategory::Startup, "TrayController ready");
         } else {
             JISTATS_LOG_WARN(LogCategory::Startup,
@@ -7136,7 +7131,7 @@ bool AppController::init(bool launchInBackground) {
         }
 #endif
 
-        pImpl->syncRuntimeIndicators(viewModel, now);
+        pImpl->syncTrayRuntimeIndicator(viewModel);
         if (pImpl->shouldQueueDeferredStartupRefresh(
                 loadedPreferences,
                 usedPersistedStartupHydration,
@@ -7422,8 +7417,8 @@ void AppController::setMiniMaxValidationResponseForTesting(
     }
 }
 
-void AppController::setMiniMaxValidationDelayForTesting(int delayMs) {
-    pImpl->miniMaxValidationDelayMsForTesting = std::max(0, delayMs);
+void AppController::setMiniMaxValidationReleaseForTesting(std::shared_future<void> release) {
+    pImpl->miniMaxValidationReleaseForTesting = std::move(release);
 }
 
 void AppController::setOpenAICodexRefreshPollIntervalForTesting(int intervalMs) {

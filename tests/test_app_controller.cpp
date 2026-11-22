@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -1065,11 +1066,18 @@ public:
         std::string providerKey,
         std::string displayName,
         QuotaResponse quotaResponse,
-        std::shared_future<void> releaseQuota = {})
+        std::shared_future<void> releaseQuota = {},
+        int firstBlockedFetch = 1)
         : providerKey_(std::move(providerKey)),
           displayName_(std::move(displayName)),
           quotaResponse_(std::move(quotaResponse)),
-          releaseQuota_(std::move(releaseQuota)) {}
+          releaseQuota_(std::move(releaseQuota)),
+          firstBlockedFetch_(firstBlockedFetch) {}
+
+    void setQuotaResponse(QuotaResponse response) {
+        std::lock_guard<std::mutex> lock(quotaMutex_);
+        quotaResponse_ = std::move(response);
+    }
 
     UsageResponse fetchUsage(std::time_t from, std::time_t to) override {
         (void)from;
@@ -1078,13 +1086,14 @@ public:
     }
 
     QuotaResponse fetchQuota() override {
-        ++quotaFetchCount_;
-        const bool released = !releaseQuota_.valid() ||
+        const int fetchNumber = ++quotaFetchCount_;
+        const bool released = fetchNumber < firstBlockedFetch_ || !releaseQuota_.valid() ||
             releaseQuota_.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
         ++completedQuotaFetchCount_;
         if (!released) {
             return makeFailedQuotaResponse("Timed out waiting for the test to release quota");
         }
+        std::lock_guard<std::mutex> lock(quotaMutex_);
         return quotaResponse_;
     }
 
@@ -1123,8 +1132,10 @@ public:
 private:
     std::string providerKey_;
     std::string displayName_;
+    std::mutex quotaMutex_;
     QuotaResponse quotaResponse_;
     std::shared_future<void> releaseQuota_;
+    const int firstBlockedFetch_;
     bool enabled_ = true;
     std::atomic<int> quotaFetchCount_{0};
     std::atomic<int> completedQuotaFetchCount_{0};
@@ -1862,6 +1873,7 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
 }
 
 TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the masked secret field", "[app][shell][minimax]") {
+    requireSqlite();
     TempTestDatabase dbPath;
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
@@ -1874,12 +1886,13 @@ TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the
     });
 
     AppController app;
+    std::promise<void> releaseValidation;
     app.setDisableTaskbarForTesting(true);
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
     app.setMiniMaxValidationResponseForTesting(true, 200, "{}", "");
-    app.setMiniMaxValidationDelayForTesting(250);
+    app.setMiniMaxValidationReleaseForTesting(releaseValidation.get_future().share());
     REQUIRE(app.init());
     REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
     REQUIRE(waitForCondition([&app]() {
@@ -1892,22 +1905,19 @@ TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the
     validate.accountDisplayName = "Async Coding Plan";
     validate.secret = "sk-cp-async";
 
-    const auto startedAt = std::chrono::steady_clock::now();
     REQUIRE(app.submitMiniMaxCredentialActionForTesting(validate));
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - startedAt);
 
-    CHECK(elapsed < std::chrono::milliseconds(150));
     REQUIRE(waitForCondition([&app]() {
         const auto summary = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "coding_plan");
         return summary.has_value() && summary->validationState == "pending";
-    }, std::chrono::milliseconds(150)));
+    }, std::chrono::seconds(5)));
     CHECK(app.getMiniMaxSecretFieldTextForTesting() == "sk-cp-async");
 
+    releaseValidation.set_value();
     REQUIRE(waitForCondition([&app]() {
         const auto summary = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "coding_plan");
         return summary.has_value() && summary->validationState == "valid";
-    }, std::chrono::milliseconds(1500)));
+    }, std::chrono::seconds(5)));
 
     const auto summary = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "coding_plan");
     REQUIRE(summary.has_value());
@@ -2106,9 +2116,6 @@ TEST_CASE("AppController dashboard dismiss and tray retry keep offline notice lo
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
-    auto provider = makeOfflineQuotaProvider("minimax", "MiniMax");
-    auto providerManager = makeProviderManager({provider});
-
     ScopedTrayTestHandler handler([](TrayController::TestOperation,
                                      TrayStatus,
                                      const std::string&,
@@ -2117,6 +2124,13 @@ TEST_CASE("AppController dashboard dismiss and tray retry keep offline notice lo
     });
 
     AppController app;
+    std::future<void> refresh;
+    std::promise<void> releaseQuota;
+    auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "minimax", "MiniMax", makeFailedQuotaResponse("network unreachable"),
+        releaseQuota.get_future().share(), 2);
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(provider);
     app.setTaskbarTestModeForTesting(true);
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
@@ -2126,11 +2140,19 @@ TEST_CASE("AppController dashboard dismiss and tray retry keep offline notice lo
         return app.isDashboardOfflineNoticeVisibleForTesting();
     }, std::chrono::milliseconds(4000)));
 
+    // The initial fetch makes the notice visible. Hold the next refresh's response.
+    refresh = std::async(std::launch::async, [&app]() { app.refreshRuntimeForTesting(); });
+    REQUIRE(waitForCondition([&provider]() {
+        return provider->getQuotaFetchCount() > 1;
+    }, std::chrono::seconds(4)));
+    REQUIRE(provider->getCompletedQuotaFetchCount() == 1);
+
     REQUIRE(app.clickDashboardOfflineDismissForTesting());
     REQUIRE(waitForCondition([&app]() {
         return !app.isDashboardOfflineNoticeVisibleForTesting() &&
             !app.getActiveNoticeForTesting(NoticeType::Offline).has_value();
     }, std::chrono::milliseconds(4000)));
+    REQUIRE(provider->getCompletedQuotaFetchCount() == 1);
     CHECK(app.getTrayStateForTesting().status == TrayStatus::Offline);
 
     const auto dismissedConnectivity = app.getConnectivityStateForTesting("minimax");
@@ -2138,9 +2160,14 @@ TEST_CASE("AppController dashboard dismiss and tray retry keep offline notice lo
     CHECK(dismissedConnectivity->status == "offline");
     CHECK(dismissedConnectivity->noticeDismissedAt > 0);
 
-    app.refreshRuntimeForTesting();
+    releaseQuota.set_value();
+    refresh.get();
     CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
     CHECK_FALSE(app.getActiveNoticeForTesting(NoticeType::Offline).has_value());
+    const auto stillOffline = app.getConnectivityStateForTesting("minimax");
+    REQUIRE(stillOffline.has_value());
+    CHECK(stillOffline->status == "offline");
+    CHECK(stillOffline->noticeDismissedAt == dismissedConnectivity->noticeDismissedAt);
 
     provider->setQuotaResponse(
         makeQuotaResponse(now, 120, 1000, "daily", "minimax_subscription_coding_plan"));
