@@ -22,6 +22,8 @@ Update the tracker when work changes state. At handoff, record what changed, the
 
 - Updated [CI build detection](validation/testing.md#windows-commands) to skip native builds for documentation-only PRs and reuse Windows validation for documentation-only pushes with a successful previous push on the same branch. Verified the workflow with `actionlint -color` and exercised its Bash filter against local Git histories and prior push results, including failure, cancellation, and missing proof. The hosted PR run exercises both builds for the workflow change.
 
+- Removed the AI credits section from the [README](../README.md) in [PR #17](https://github.com/jatmn/JiStats/pull/17). The `python3 -` command in the PR description verified 12 local links and anchors. `git diff --check 3bee5a1` passed.
+
 ## Current decisions
 
 | Decision | Where it applies |
