@@ -5883,6 +5883,9 @@ public:
     }
 
     DashboardNoticeActionResult handleOfflineDismissAction() {
+        // A runtime refresh rewrites each connectivity row from the copy it read
+        // first, so an unserialized dismissal could be overwritten and lost.
+        std::lock_guard<std::mutex> refreshLock(runtimeRefreshMutex);
         DashboardNoticeActionResult result;
         if (dashboardPresenter.getViewModel().runtimeState != RuntimeState::Offline) {
             result.success = false;
