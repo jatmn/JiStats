@@ -1,0 +1,8 @@
+#pragma once
+
+namespace JiStats {
+
+inline constexpr char kBaselineSchemaSql[] =
+    R"jistats_sql(@JISTATS_BASELINE_SQL@)jistats_sql";
+
+} // namespace JiStats

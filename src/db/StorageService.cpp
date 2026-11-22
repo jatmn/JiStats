@@ -486,11 +486,10 @@ bool StorageService::init(const std::string& dbPath) {
     
     // Run migrations
     SchemaManager schemaManager(*this);
-    if (schemaManager.needsMigration()) {
-        if (!schemaManager.migrate()) {
-            pImpl->lastError = "Migration failed: " + schemaManager.getLastError();
-            return false;
-        }
+    if (!schemaManager.migrate()) {
+        pImpl->lastError = "Migration failed: " + schemaManager.getLastError();
+        close();
+        return false;
     }
     
     return true;

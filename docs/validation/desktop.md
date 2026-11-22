@@ -5,22 +5,23 @@ Use a Windows 11 desktop session and a build of the candidate. Record the revisi
 ## Dashboard and background checks
 
 - Launch normally and with `--background`. Check that the tray opens the dashboard and that closing the dashboard leaves the app available.
-- Test **Start with Windows** with the packaged build in an isolated Windows profile. Enable the setting and exit JiStats. Place a disposable copy of a supported database with a pending migration at the profile's JiStats data path. Record its version with `SELECT MAX(version) FROM schema_version;`, then sign out and back in without launching the app manually. Verify the tray appears and the same database reaches the expected schema version. Record both versions. See [migration discovery](../reference/storage.md#migration-behavior) for why a tray icon can appear even when the migration is skipped.
+- Test **Start with Windows** with the packaged build in an isolated Windows profile. Enable the setting and exit JiStats. Move the disposable test database and any companion files aside, then sign out and back in without launching the app manually. Verify that the tray appears and the new database passes the [fresh packaged database check](#fresh-packaged-database). For a future release with a numbered migration after version 12, also use a disposable supported database with that migration pending and record the version before and after sign-in.
 - Enable the providers being tested. Compare Overview remaining bars and provider-table used percentages with the returned quota windows. Confirm each bar fills as remaining quota increases. Verify paired windows, missing data, and stale state without treating local activity as quota.
 - Check the offline notice, its retry and dismiss actions, and the persistent status through recovery. Verify that Analysis range controls reflect the effective persisted scope and that manual export uses that scope when relevant.
 - For MiniMax Settings, exercise the [credential scenarios](../providers/minimax.md#credential-behavior-to-preserve).
 
 ### Fresh packaged database
 
-In a separate isolated Windows profile with no existing JiStats database, launch the packaged executable from the directory containing `db_migrations/`. Leave all integrations disabled so provider activity cannot create the Kimi row. Exit JiStats and open the new `%LOCALAPPDATA%\JiStats\jistats.db` read-only in a SQLite client. Run:
+In a separate isolated Windows profile with no existing JiStats database, launch the packaged executable with a working directory outside the portable folder and without an external migration directory. Leave all integrations disabled so provider activity cannot create the Kimi row. Exit JiStats and open the new `%LOCALAPPDATA%\JiStats\jistats.db` read-only in a SQLite client. Run:
 
 ```sql
 SELECT
+    (SELECT MAX(version) FROM schema_version) AS schema_version,
     EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'export_runs') AS has_export_runs,
     EXISTS(SELECT 1 FROM providers WHERE provider_key = 'kimi') AS has_kimi_provider;
 ```
 
-Record both results. Both must be `1` before marking the package verified. The two `010` migrations create the export table and seed Kimi separately, so the recorded schema version can reach `12` with either effect missing.
+Record all three results. The schema version must be `12`, and both existence checks must be `1`.
 
 ## Taskbar checks
 

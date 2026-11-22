@@ -56,10 +56,19 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+# Embed the baseline for portable launches from outside the source tree.
+set(JISTATS_BASELINE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/db_migrations/012_baseline_schema.sql")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${JISTATS_BASELINE_FILE}")
+file(READ "${JISTATS_BASELINE_FILE}" JISTATS_BASELINE_SQL)
+# Keep individual literals within MSVC's size limit.
+string(REPLACE "\n" "\n)jistats_sql\"\n    R\"jistats_sql(" JISTATS_BASELINE_SQL "${JISTATS_BASELINE_SQL}")
+configure_file(src/db/BaselineSchema.hpp.in generated/BaselineSchema.hpp @ONLY)
+
 # Include directories
 include_directories(
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
 # Find SQLite3

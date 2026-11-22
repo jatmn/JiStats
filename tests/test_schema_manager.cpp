@@ -3,7 +3,6 @@
 #include "db/SettingsService.hpp"
 #include "db/StorageService.hpp"
 #include <cstdlib>
-#include <exception>
 #include <filesystem>
 #include <string>
 #include "sqlite_test_support.hpp"
@@ -52,28 +51,6 @@ private:
     bool hadOriginal_ = false;
 };
 
-class ScopedWorkingDirectory {
-public:
-    explicit ScopedWorkingDirectory(const std::filesystem::path& path)
-        : originalPath_(std::filesystem::current_path()) {
-        std::filesystem::current_path(path);
-    }
-
-    ScopedWorkingDirectory(const ScopedWorkingDirectory&) = delete;
-    ScopedWorkingDirectory& operator=(const ScopedWorkingDirectory&) = delete;
-
-    ~ScopedWorkingDirectory() {
-        std::error_code error;
-        std::filesystem::current_path(originalPath_, error);
-        if (error) {
-            std::terminate();
-        }
-    }
-
-private:
-    std::filesystem::path originalPath_;
-};
-
 bool tableExists(StorageService& storage, const std::string& tableName) {
     auto result = storage.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?;",
@@ -105,7 +82,7 @@ bool indexExists(StorageService& storage, const std::string& indexName) {
 
 } // namespace
 
-TEST_CASE("SchemaManager::getLatestVersion discovers migration files", "[schema]") {
+TEST_CASE("SchemaManager::getLatestVersion reports the baseline version", "[schema]") {
     StorageService storage;
     SchemaManager manager(storage);
 
@@ -127,7 +104,6 @@ TEST_CASE("SchemaManager::needsMigration without DB", "[schema]") {
     // Don't call storage.init() - getCurrentVersion will return 0
     SchemaManager manager(storage);
 
-    // With no DB, current version is 0, latest is 12, so needs migration
     bool needs = manager.needsMigration();
     REQUIRE(needs);
 }
@@ -144,6 +120,7 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(manager.getCurrentVersion() == 12);
     REQUIRE_FALSE(manager.needsMigration());
 
+    REQUIRE(tableExists(storage, "activity_events"));
     REQUIRE(tableExists(storage, "sync_state"));
     REQUIRE(tableExists(storage, "mirror_rules"));
     REQUIRE(tableExists(storage, "connectivity_state"));
@@ -187,210 +164,30 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(columnExists(storage, "codex_thread_import_state", "baseline_tokens_used"));
     REQUIRE(indexExists(storage, "idx_codex_thread_import_state_provider_model"));
 
-    auto versionResult = storage.execute("SELECT MAX(version) FROM schema_version;");
-    REQUIRE(versionResult.success());
-    REQUIRE(versionResult.rowCount() == 1);
-    REQUIRE(versionResult.getInt(0, 0) == 12);
+    auto versions = storage.execute("SELECT version FROM schema_version;");
+    REQUIRE(versions.success());
+    REQUIRE(versions.rowCount() == 1);
+    CHECK(versions.getInt(0, 0) == 12);
+
+    auto providers = storage.execute("SELECT provider_key FROM providers ORDER BY id;");
+    REQUIRE(providers.success());
+    REQUIRE(providers.rowCount() == 5);
+    CHECK(providers.getString(0, 0) == "openai");
+    CHECK(providers.getString(1, 0) == "minimax");
+    CHECK(providers.getString(2, 0) == "claude_code");
+    CHECK(providers.getString(3, 0) == "kimi");
+    CHECK(providers.getString(4, 0) == "hicap-ai");
+
+    auto runtime = storage.execute("SELECT id FROM runtime_state;");
+    REQUIRE(runtime.success());
+    REQUIRE(runtime.rowCount() == 1);
+    CHECK(runtime.getInt(0, 0) == 1);
+
+    SettingsService settings(storage);
+    CHECK(settings.getBool("ui.taskbar_overlay_enabled") == true);
 }
 
-TEST_CASE("SchemaManager recovers migration 004 after partial apply when SQLite is available", "[schema][migration]") {
-    requireSqlite();
-
-    TempTestDatabase tempDb;
-    StorageService storage;
-
-    REQUIRE(storage.init(tempDb.path()));
-
-    auto resetResult = storage.execute(
-        "DELETE FROM schema_version WHERE version IN (4, 5, 6);"
-        "DROP TABLE IF EXISTS sync_state;"
-        "DROP TABLE IF EXISTS mirror_rules;"
-        "DROP TABLE IF EXISTS connectivity_state;"
-        "DROP TABLE IF EXISTS runtime_state;"
-        "DROP TABLE IF EXISTS provider_capabilities;");
-    REQUIRE(resetResult.success());
-
-    auto partialApply = storage.execute(
-        "CREATE TABLE IF NOT EXISTS sync_state ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "provider_id INTEGER NOT NULL REFERENCES providers(id),"
-        "account_id INTEGER NOT NULL REFERENCES accounts(id),"
-        "sync_kind TEXT NOT NULL,"
-        "cursor_value TEXT,"
-        "last_attempt_at_utc TEXT,"
-        "last_success_at_utc TEXT,"
-        "last_failure_at_utc TEXT,"
-        "last_failure_category TEXT,"
-        "created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),"
-        "updated_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),"
-        "UNIQUE(provider_id, account_id, sync_kind));");
-    REQUIRE(partialApply.success());
-
-    SchemaManager manager(storage);
-    REQUIRE(manager.migrateToVersion(4));
-
-    REQUIRE(tableExists(storage, "sync_state"));
-    REQUIRE(tableExists(storage, "mirror_rules"));
-    REQUIRE(tableExists(storage, "connectivity_state"));
-    REQUIRE(columnExists(storage, "quota_snapshots", "quota_dimension"));
-    REQUIRE(columnExists(storage, "quota_snapshots", "remaining_value"));
-    REQUIRE(columnExists(storage, "quota_snapshots", "is_reconciled"));
-
-    auto versionResult = storage.execute("SELECT MAX(version) FROM schema_version;");
-    REQUIRE(versionResult.success());
-    REQUIRE(versionResult.rowCount() == 1);
-    REQUIRE(versionResult.getInt(0, 0) >= 4);
-}
-
-TEST_CASE("SchemaManager upgrades a version 6 database to version 7 usage rollups when SQLite is available", "[schema][migration]") {
-    requireSqlite();
-
-    TempTestDatabase tempDb;
-    StorageService storage;
-
-    REQUIRE(storage.init(tempDb.path()));
-
-    auto resetResult = storage.execute(
-        "DELETE FROM schema_version WHERE version IN (7, 8, 9, 10, 11, 12);"
-        "DROP TABLE IF EXISTS usage_rollups_hourly;"
-        "DROP TABLE IF EXISTS usage_rollups_daily;"
-        "DROP TABLE IF EXISTS gap_markers;");
-    REQUIRE(resetResult.success());
-
-    SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 6);
-    REQUIRE(manager.needsMigration());
-    REQUIRE(manager.migrateToVersion(7));
-
-    REQUIRE(tableExists(storage, "usage_rollups_hourly"));
-    REQUIRE(tableExists(storage, "usage_rollups_daily"));
-
-    auto versionResult = storage.execute("SELECT MAX(version) FROM schema_version;");
-    REQUIRE(versionResult.success());
-    REQUIRE(versionResult.rowCount() == 1);
-    REQUIRE(versionResult.getInt(0, 0) == 7);
-}
-
-TEST_CASE("SchemaManager upgrades a version 7 database to version 8 gap markers when SQLite is available", "[schema][migration]") {
-    requireSqlite();
-
-    TempTestDatabase tempDb;
-    StorageService storage;
-
-    REQUIRE(storage.init(tempDb.path()));
-
-    auto resetResult = storage.execute(
-        "DELETE FROM schema_version WHERE version IN (8, 9, 10, 11, 12);"
-        "DROP TABLE IF EXISTS gap_markers;");
-    REQUIRE(resetResult.success());
-
-    SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 7);
-    REQUIRE(manager.needsMigration());
-    REQUIRE(manager.migrateToVersion(8));
-
-    REQUIRE(tableExists(storage, "gap_markers"));
-
-    auto versionResult = storage.execute("SELECT MAX(version) FROM schema_version;");
-    REQUIRE(versionResult.success());
-    REQUIRE(versionResult.rowCount() == 1);
-    REQUIRE(versionResult.getInt(0, 0) == 8);
-}
-
-TEST_CASE("SchemaManager upgrades a version 9 database to version 10 analysis persistence metadata when SQLite is available", "[schema][migration]") {
-    requireSqlite();
-
-    const auto sourceMigrations = std::filesystem::absolute("db_migrations");
-    TempTestDirectory fixture("jistats_schema_v9");
-    const auto fixtureRoot = std::filesystem::absolute(fixture.path());
-    const auto fixtureMigrations = fixtureRoot / "db_migrations";
-    REQUIRE(std::filesystem::create_directory(fixtureMigrations));
-
-    constexpr const char* version9Migrations[] = {
-        "001_initial_schema.sql",
-        "002_add_taskbar_preference.sql",
-        "003_add_activity_events.sql",
-        "004_add_mirror_state_tables.sql",
-        "005_add_runtime_state.sql",
-        "006_add_provider_capabilities.sql",
-        "007_add_usage_rollups.sql",
-        "008_add_gap_markers.sql",
-        "009_add_claude_provider.sql",
-    };
-    for (const char* migration : version9Migrations) {
-        CAPTURE(migration);
-        REQUIRE(std::filesystem::copy_file(sourceMigrations / migration, fixtureMigrations / migration));
-    }
-
-    StorageService storage;
-    {
-        // SchemaManager discovers migrations relative to the working directory.
-        ScopedWorkingDirectory workingDirectory(fixtureRoot);
-        REQUIRE(storage.init((fixtureRoot / "test.db").string()));
-
-        SchemaManager manager(storage);
-        REQUIRE(manager.getCurrentVersion() == 9);
-        REQUIRE_FALSE(manager.needsMigration());
-
-        constexpr auto analysisMigration = "010_add_analysis_persistence_metadata.sql";
-        REQUIRE(std::filesystem::copy_file(sourceMigrations / analysisMigration, fixtureMigrations / analysisMigration));
-        REQUIRE(manager.needsMigration());
-        REQUIRE(manager.migrateToVersion(10));
-    }
-
-    REQUIRE(tableExists(storage, "recovery_checkpoints"));
-    REQUIRE(tableExists(storage, "export_runs"));
-    REQUIRE(columnExists(storage, "usage_rollups_hourly", "local_request_count"));
-    REQUIRE(columnExists(storage, "usage_rollups_hourly", "imported_request_count"));
-    REQUIRE(columnExists(storage, "usage_rollups_hourly", "api_request_count"));
-    REQUIRE(columnExists(storage, "usage_rollups_hourly", "unknown_request_count"));
-    REQUIRE(columnExists(storage, "usage_rollups_hourly", "backfilled_request_count"));
-    REQUIRE(columnExists(storage, "usage_rollups_daily", "local_request_count"));
-    REQUIRE(columnExists(storage, "usage_rollups_daily", "imported_request_count"));
-    REQUIRE(columnExists(storage, "usage_rollups_daily", "api_request_count"));
-    REQUIRE(columnExists(storage, "usage_rollups_daily", "unknown_request_count"));
-    REQUIRE(columnExists(storage, "usage_rollups_daily", "backfilled_request_count"));
-    REQUIRE(indexExists(storage, "idx_recovery_checkpoints_provider_account_kind_attempt"));
-    REQUIRE(indexExists(storage, "idx_export_runs_kind_requested"));
-
-    auto versionResult = storage.execute("SELECT MAX(version) FROM schema_version;");
-    REQUIRE(versionResult.success());
-    REQUIRE(versionResult.rowCount() == 1);
-    REQUIRE(versionResult.getInt(0, 0) == 10);
-}
-
-TEST_CASE("SchemaManager upgrades a version 10 database to version 11 quota snapshot rollups when SQLite is available", "[schema][migration]") {
-    requireSqlite();
-
-    TempTestDatabase tempDb;
-    StorageService storage;
-
-    REQUIRE(storage.init(tempDb.path()));
-
-    auto resetResult = storage.execute(
-        "DELETE FROM schema_version WHERE version IN (11, 12);"
-        "DROP TABLE IF EXISTS quota_snapshot_rollups_daily;");
-    REQUIRE(resetResult.success());
-
-    SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 10);
-    REQUIRE(manager.needsMigration());
-    REQUIRE(manager.migrateToVersion(11));
-
-    REQUIRE(tableExists(storage, "quota_snapshot_rollups_daily"));
-    REQUIRE(columnExists(storage, "quota_snapshot_rollups_daily", "sample_count"));
-    REQUIRE(columnExists(storage, "quota_snapshot_rollups_daily", "latest_remaining_value"));
-    REQUIRE(columnExists(storage, "quota_snapshot_rollups_daily", "low_water_remaining_value"));
-    REQUIRE(indexExists(storage, "idx_quota_snapshot_rollups_daily_scope_period"));
-    REQUIRE(indexExists(storage, "idx_quota_snapshot_rollups_daily_series_period"));
-
-    auto versionResult = storage.execute("SELECT MAX(version) FROM schema_version;");
-    REQUIRE(versionResult.success());
-    REQUIRE(versionResult.rowCount() == 1);
-    REQUIRE(versionResult.getInt(0, 0) == 11);
-}
-
-TEST_CASE("SchemaManager preserves settings rows across version 10 to 11 upgrade", "[schema][migration][settings]") {
+TEST_CASE("StorageService preserves version 12 database settings on reopen", "[schema][migration][settings]") {
     requireSqlite();
 
     TempTestDatabase tempDb;
@@ -399,24 +196,38 @@ TEST_CASE("SchemaManager preserves settings rows across version 10 to 11 upgrade
     REQUIRE(storage.init(tempDb.path()));
 
     SettingsService settings(storage);
-    REQUIRE(settings.setBool("runtime.openai_subscription_tracking_enabled", true));
+    REQUIRE(storage.execute(
+        "INSERT INTO schema_version (version, description) VALUES (11, 'Previous schema');").success());
+    REQUIRE(settings.setBool("ui.taskbar_overlay_enabled", false));
     REQUIRE(settings.setString("ui.last_selected_provider_id", "minimax"));
-    REQUIRE(settings.setString("ui.analysis_selected_provider_id", "openai"));
+    storage.close();
 
-    auto resetResult = storage.execute(
-        "DELETE FROM schema_version WHERE version IN (11, 12);"
-        "DROP TABLE IF EXISTS quota_snapshot_rollups_daily;");
-    REQUIRE(resetResult.success());
-
+    REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 10);
-    REQUIRE(manager.needsMigration());
-    REQUIRE(manager.migrateToVersion(11));
+    CHECK(manager.getCurrentVersion() == 12);
+    CHECK_FALSE(manager.needsMigration());
+    const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
+    REQUIRE(versions.success());
+    REQUIRE(versions.rowCount() == 2);
+    CHECK(versions.getInt(0, 0) == 11);
+    CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
+    CHECK(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
+}
 
-    REQUIRE(settings.getBool("runtime.openai_subscription_tracking_enabled") == true);
-    REQUIRE(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
-    REQUIRE(settings.getString("ui.analysis_selected_provider_id") == std::optional<std::string>("openai"));
-    REQUIRE(tableExists(storage, "quota_snapshot_rollups_daily"));
+TEST_CASE("StorageService rejects databases older than the baseline", "[schema][migration]") {
+    requireSqlite();
+
+    TempTestDatabase tempDb;
+    StorageService storage;
+
+    REQUIRE(storage.init(tempDb.path()));
+
+    REQUIRE(storage.execute("UPDATE schema_version SET version = 11;").success());
+    storage.close();
+
+    REQUIRE_FALSE(storage.init(tempDb.path()));
+    CHECK_FALSE(storage.isOpen());
+    CHECK(storage.getLastError().find("Database schema version 11 predates the supported baseline") != std::string::npos);
 }
 
 TEST_CASE("StorageService redirects the default database to LOCALAPPDATA",

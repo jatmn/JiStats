@@ -24,9 +24,6 @@ public:
     // Apply all pending migrations
     bool migrate();
     
-    // Apply specific migration
-    bool migrateToVersion(int version);
-    
     // Get migration status
     std::string getStatus() const;
     
@@ -34,11 +31,8 @@ public:
     std::string getLastError() const;
     
 private:
-    // Load migration from file
+    bool migrateToVersion(int version);
     std::string loadMigration(int version) const;
-    std::string buildRecoveryMigration(int version) const;
-    bool tableExists(const std::string& tableName) const;
-    bool columnExists(const std::string& tableName, const std::string& columnName) const;
     
     StorageService& storage;
     class Impl;
