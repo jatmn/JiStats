@@ -166,7 +166,30 @@ jobs:
           name: windows-tests
           path: build-mingw/bin
       # Run from the checkout root so the suite can read the test fixtures.
-      - run: .\build-mingw\bin\JiStatsTests.exe
+      - name: Run Windows suite and diagnose intermittent restart stalls
+        shell: pwsh
+        run: |
+          function Invoke-WindowsTests([string[]] $testArguments, [int] $diagnosticDelay) {
+            $options = @{
+              FilePath = (Resolve-Path '.\build-mingw\bin\JiStatsTests.exe').Path
+              NoNewWindow = $true
+              PassThru = $true
+            }
+            if ($testArguments) { $options.ArgumentList = $testArguments }
+            $process = Start-Process @options
+            if (!$process.WaitForExit($diagnosticDelay)) {
+              Write-Host "Collecting Windows test thread stacks for PID $($process.Id)"
+              gdb --batch --nx --quiet -iex 'set auto-load off' -iex 'set debuginfod enabled off' -p $process.Id -ex 'set print frame-arguments none' -ex 'thread apply all bt 40' -ex detach
+            }
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+          }
+          Invoke-WindowsTests @() 300000
+          foreach ($attempt in 1..8) {
+            Write-Host "Checking offline notice restart timing, pass $attempt"
+            Invoke-WindowsTests @('[offline_notice]', '--reporter', 'compact', '--success') 60000
+          }
+          exit 0
 
   # The ruleset requires this check. It passes when the build jobs pass or were
   # skipped because nothing they cover changed, and fails otherwise.
