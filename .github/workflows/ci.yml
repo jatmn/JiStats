@@ -148,7 +148,8 @@ jobs:
           name: windows-tests
           path: build-mingw/bin/JiStatsTests.exe
           if-no-files-found: error
-          retention-days: 7
+          # A Windows-only retry needs the original binary throughout the 30-day rerun window.
+          retention-days: 30
           overwrite: true
 
   windows-runtime:
@@ -164,7 +165,7 @@ jobs:
         with:
           name: windows-tests
           path: build-mingw/bin
-      # Run from the checkout root so the suite can read fixtures and migrations.
+      # Run from the checkout root so the suite can read the test fixtures.
       - run: .\build-mingw\bin\JiStatsTests.exe
 
   # The ruleset requires this check. It passes when the build jobs pass or were

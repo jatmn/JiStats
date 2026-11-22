@@ -35,7 +35,7 @@ See the [archived release record](https://github.com/jatmn/JiStats-public-prep/b
 - [ ] Resolve the open gates above and record the final test and evidence scope.
 - [ ] Check version 1.0.0 consistency across the build, manifest, and About.
 - [ ] Update the changelog and verify user docs against the packaged behavior.
-- [ ] Assemble and smoke-test the portable bundle. For the packed variant, record the exact UPX version and include its matching license and copying texts.
+- [ ] Assemble and smoke-test the portable bundle. For MinGW builds, include the [runtime license files from the toolchain used](../THIRD_PARTY_NOTICES.md#mingw-w64-and-winpthreads). For the packed variant, record the exact UPX version and include its matching license and copying texts.
 
 ## Release and follow-up
 
