@@ -1,23 +1,33 @@
 #include "platform/StartupManager.hpp"
 
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+#include <atomic>
+#include <mutex>
+#else
 #include <windows.h>
+#endif
 #include <optional>
 #include <string>
 
 namespace JiStats {
 
 struct StartupManager::Impl {
-    std::wstring appName = L"JiStats";
     std::string lastError;
-    bool startMinimized = false;
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
+    // Test executables must never read or write the user's startup entry.
+    std::atomic<bool> startMinimized{false};
+    mutable std::mutex startupCommandMutexForTesting;
+    std::wstring startupCommandForTesting;
     std::optional<StartupManager::TestHooks> testHooks;
-#endif
-    
+#else
+    bool startMinimized = false;
+    std::wstring appName = L"JiStats";
+
     // Registry path for startup entries
     static constexpr const wchar_t* RUN_KEY_PATH = 
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+#endif
 
     void clearLastError() {
         lastError.clear();
@@ -28,14 +38,15 @@ struct StartupManager::Impl {
         if (testHooks.has_value() && testHooks->executablePathProvider) {
             return testHooks->executablePathProvider();
         }
-#endif
-
+        return L"JiStats.exe";
+#else
         wchar_t buffer[MAX_PATH] = {0};
         DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
         if (length == 0 || length >= MAX_PATH) {
             return L"";
         }
         return std::wstring(buffer, length);
+#endif
     }
     
     bool writeRegistryValue(const std::wstring& value) {
@@ -50,8 +61,10 @@ struct StartupManager::Impl {
             }
             return true;
         }
-#endif
-
+        const std::lock_guard<std::mutex> lock(startupCommandMutexForTesting);
+        startupCommandForTesting = value;
+        return true;
+#else
         HKEY hKey = nullptr;
         LONG result = RegOpenKeyExW(
             HKEY_CURRENT_USER,
@@ -96,6 +109,7 @@ struct StartupManager::Impl {
         }
         
         return true;
+#endif
     }
     
     std::wstring readRegistryValue() const {
@@ -103,8 +117,9 @@ struct StartupManager::Impl {
         if (testHooks.has_value() && testHooks->readRegistryValue) {
             return testHooks->readRegistryValue();
         }
-#endif
-
+        const std::lock_guard<std::mutex> lock(startupCommandMutexForTesting);
+        return startupCommandForTesting;
+#else
         HKEY hKey = nullptr;
         LONG result = RegOpenKeyExW(
             HKEY_CURRENT_USER,
@@ -138,6 +153,7 @@ struct StartupManager::Impl {
         }
         
         return std::wstring(buffer);
+#endif
     }
 
     std::wstring buildStartupCommand() const {

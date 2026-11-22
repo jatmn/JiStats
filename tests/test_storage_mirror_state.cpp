@@ -4,31 +4,14 @@
 #include <string>
 
 #include "db/StorageService.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::requireSqlite;
 
 namespace {
-
-class TempDbFile {
-public:
-    TempDbFile() {
-        path_ = std::filesystem::temp_directory_path() / "jistats_mirror_state_test.db";
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string path() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 long long requireSingleId(const QueryResult& result) {
     REQUIRE(result.success());
@@ -74,13 +57,12 @@ StorageIds seedProviderAccount(StorageService& storage) {
 } // namespace
 
 TEST_CASE("StorageService upserts and queries sync state when SQLite is available", "[storage][mirror]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto ids = seedProviderAccount(storage);
 
@@ -120,13 +102,12 @@ TEST_CASE("StorageService upserts and queries sync state when SQLite is availabl
 }
 
 TEST_CASE("StorageService upserts and queries mirror rules when SQLite is available", "[storage][mirror]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const int providerId = static_cast<int>(requireSingleId(
         storage.execute("SELECT id FROM providers WHERE provider_key = 'openai';")));
@@ -165,13 +146,12 @@ TEST_CASE("StorageService upserts and queries mirror rules when SQLite is availa
 }
 
 TEST_CASE("StorageService upserts and queries connectivity state when SQLite is available", "[storage][mirror]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto ids = seedProviderAccount(storage);
 
@@ -211,13 +191,12 @@ TEST_CASE("StorageService upserts and queries connectivity state when SQLite is 
 }
 
 TEST_CASE("StorageService upserts and queries runtime state when SQLite is available", "[storage][mirror]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     PersistedRuntimeState state;
     state.lastLaunchAt = 1713700000;
@@ -246,13 +225,12 @@ TEST_CASE("StorageService upserts and queries runtime state when SQLite is avail
 }
 
 TEST_CASE("StorageService upserts and queries provider capabilities when SQLite is available", "[storage][mirror]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const int providerId = static_cast<int>(requireSingleId(
         storage.execute("SELECT id FROM providers WHERE provider_key = 'openai';")));
@@ -288,13 +266,12 @@ TEST_CASE("StorageService upserts and queries provider capabilities when SQLite 
 }
 
 TEST_CASE("StorageService upserts and queries credential profiles when SQLite is available", "[storage][mirror][credentials]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto ids = seedProviderAccount(
         storage,

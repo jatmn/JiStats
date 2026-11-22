@@ -7,8 +7,13 @@
 
 #include "db/StorageService.hpp"
 #include "providers/openai/OpenAIExportImport.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::TempTestDirectory;
+using JiStats::TestSupport::requireSqlite;
 
 namespace {
 
@@ -17,45 +22,12 @@ const std::filesystem::path kRedactedExportFixtureDir =
 const std::filesystem::path kRedactedConversationsFixturePath =
     kRedactedExportFixtureDir / "conversations.json";
 
-class TempDbFile {
-public:
-    TempDbFile() {
-        path_ = std::filesystem::temp_directory_path() / "jistats_openai_export_import_test.db";
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string path() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
-
 class TempExportDirectory {
 public:
-    TempExportDirectory() {
-        static long long counter = 0;
-        path_ = std::filesystem::temp_directory_path() /
-            ("jistats_openai_export_dir_" + std::to_string(++counter));
-        std::filesystem::create_directories(path_);
-    }
-
-    ~TempExportDirectory() {
-        std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
-    }
-
     std::filesystem::path makeFile(
         const std::filesystem::path& relativePath,
         const std::string& contents) const {
-        const std::filesystem::path filePath = path_ / relativePath;
+        const std::filesystem::path filePath = directory_.path() / relativePath;
         std::filesystem::create_directories(filePath.parent_path());
         std::ofstream out(filePath, std::ios::binary);
         if (!out.is_open()) {
@@ -67,11 +39,11 @@ public:
     }
 
     std::filesystem::path path() const {
-        return path_;
+        return directory_.path();
     }
 
 private:
-    std::filesystem::path path_;
+    TempTestDirectory directory_{"jistats_openai_export"};
 };
 
 long long requireSingleId(const QueryResult& result) {
@@ -156,13 +128,12 @@ TEST_CASE("OpenAI export import parser rejects unsupported or weak-provenance in
 
 TEST_CASE("OpenAI export import persists historical activity events into the durable storage path",
           "[openai][export_import][storage]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto run = OpenAIExportImport::importHistoricalActivity(
         storage,
@@ -207,13 +178,12 @@ TEST_CASE("OpenAI export import persists historical activity events into the dur
 
 TEST_CASE("OpenAI export import is idempotent for the same artifact run",
           "[openai][export_import][storage]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto firstRun = OpenAIExportImport::importHistoricalActivity(
         storage,

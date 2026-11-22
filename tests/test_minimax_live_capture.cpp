@@ -17,49 +17,18 @@
 #include "platform/WindowsCredentialStore.hpp"
 #include "providers/minimax/MiniMaxAdapter.hpp"
 #include "providers/minimax/MiniMaxLiveCapture.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::TempTestDirectory;
+using JiStats::TestSupport::requireSqlite;
 
 namespace {
 
-class TempDbFile {
-public:
-    TempDbFile() {
-        static long long counter = 0;
-        path_ = std::filesystem::temp_directory_path() /
-            ("jistats_minimax_live_capture_" + std::to_string(++counter) + ".db");
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string path() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
-
 class TempOutputFile {
 public:
-    TempOutputFile() {
-        static long long counter = 0;
-        path_ = std::filesystem::temp_directory_path() /
-            ("jistats_minimax_capture_output_" + std::to_string(++counter) + ".json");
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempOutputFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
     std::string path() const {
         return path_.string();
     }
@@ -75,41 +44,19 @@ public:
     }
 
 private:
-    std::filesystem::path path_;
+    TempTestDirectory directory_{"jistats_minimax_output"};
+    std::filesystem::path path_ = directory_.path() / "capture.json";
 };
 
 class TempOutputDirectory {
 public:
-    TempOutputDirectory() {
-        static long long counter = 0;
-        path_ = std::filesystem::temp_directory_path() /
-            ("jistats_minimax_capture_dir_" + std::to_string(++counter));
-        std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
-    }
-
-    ~TempOutputDirectory() {
-        std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
-    }
-
     std::string nestedFilePath(const std::string& fileName) const {
-        return (path_ / "captures" / fileName).string();
+        return (directory_.path() / "captures" / fileName).string();
     }
 
 private:
-    std::filesystem::path path_;
+    TempTestDirectory directory_{"jistats_minimax_capture"};
 };
-
-bool sqliteAvailable() {
-    TempDbFile probe;
-    StorageService storage;
-    const bool available = storage.init(probe.path());
-    if (available) {
-        storage.close();
-    }
-    return available;
-}
 
 class FakeWindowsCredentialBackend final : public IWindowsCredentialBackend {
 public:
@@ -260,12 +207,9 @@ const MiniMaxCapturePlanStatus* findPlanStatus(
 
 TEST_CASE("MiniMax live capture reports stored metadata with missing secrets as not ready",
           "[minimax][live_capture]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; MiniMax live capture storage cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbFile tempDb;
+    TempTestDatabase tempDb;
     const MiniMaxSubscriptionCredentialProfile profile = makeSubscriptionProfile("coding_plan");
     seedCredentialMetadata(tempDb.path(), profile);
 
@@ -285,12 +229,9 @@ TEST_CASE("MiniMax live capture reports stored metadata with missing secrets as 
 
 TEST_CASE("MiniMax live capture validates stored credentials through MiniMax adapter hooks",
           "[minimax][live_capture]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; MiniMax live capture storage cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbFile tempDb;
+    TempTestDatabase tempDb;
     const auto credentialStore = makeFakeCredentialStore();
     const MiniMaxSubscriptionCredentialProfile profile = makeSubscriptionProfile("coding_plan");
     seedCredentialMetadata(tempDb.path(), profile);
@@ -319,12 +260,9 @@ TEST_CASE("MiniMax live capture validates stored credentials through MiniMax ada
 
 TEST_CASE("MiniMax live capture can store a plan secret using persisted secret_ref metadata",
           "[minimax][live_capture]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; MiniMax live capture storage cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbFile tempDb;
+    TempTestDatabase tempDb;
     const auto credentialStore = makeFakeCredentialStore();
     const MiniMaxSubscriptionCredentialProfile profile = makeSubscriptionProfile("token_plan");
     seedCredentialMetadata(tempDb.path(), profile);
@@ -342,12 +280,9 @@ TEST_CASE("MiniMax live capture can store a plan secret using persisted secret_r
 
 TEST_CASE("MiniMax live capture writes successful capture output to JSON",
           "[minimax][live_capture]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; MiniMax live capture storage cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbFile tempDb;
+    TempTestDatabase tempDb;
     TempOutputFile outputFile;
     const auto credentialStore = makeFakeCredentialStore();
     const MiniMaxSubscriptionCredentialProfile profile = makeSubscriptionProfile("coding_plan");
@@ -400,12 +335,9 @@ TEST_CASE("MiniMax live capture writes successful capture output to JSON",
 
 TEST_CASE("MiniMax live capture creates nested output directories when writing JSON",
           "[minimax][live_capture]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; MiniMax live capture storage cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbFile tempDb;
+    TempTestDatabase tempDb;
     TempOutputDirectory outputDir;
     const auto credentialStore = makeFakeCredentialStore();
     const MiniMaxSubscriptionCredentialProfile profile = makeSubscriptionProfile("coding_plan");
@@ -443,12 +375,9 @@ TEST_CASE("MiniMax live capture creates nested output directories when writing J
 
 TEST_CASE("MiniMax live capture writes a diagnostic report with plan state and credential targets",
           "[minimax][live_capture]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; MiniMax live capture storage cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbFile tempDb;
+    TempTestDatabase tempDb;
     TempOutputFile outputFile;
     const auto credentialStore = makeFakeCredentialStore();
     const MiniMaxSubscriptionCredentialProfile codingProfile = makeSubscriptionProfile("coding_plan");
@@ -481,12 +410,10 @@ TEST_CASE("MiniMax live capture writes a diagnostic report with plan state and c
 
 TEST_CASE("MiniMax live capture surfaces database open failures distinctly during readiness inspection",
           "[minimax][live_capture]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; MiniMax live capture storage cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    const std::string directoryPath = std::filesystem::temp_directory_path().string();
+    const TempTestDirectory directory("jistats_minimax_open_failure");
+    const std::string directoryPath = directory.path().string();
 
     MiniMaxLiveCapture liveCapture(makeFakeCredentialStore());
     const std::vector<MiniMaxCapturePlanStatus> statuses =
@@ -502,12 +429,9 @@ TEST_CASE("MiniMax live capture surfaces database open failures distinctly durin
 
 TEST_CASE("MiniMax live capture surfaces missing provider metadata distinctly",
           "[minimax][live_capture]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; MiniMax live capture storage cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbFile tempDb;
+    TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
     const QueryResult deleteResult = storage.execute(

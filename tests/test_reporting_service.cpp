@@ -10,26 +10,12 @@
 
 #include "reporting/ReportingService.hpp"
 #include "gui/DashboardPresenter.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDirectory;
 
 namespace {
-
-struct TempReportDir {
-    TempReportDir() {
-        static int counter = 0;
-        path = std::filesystem::temp_directory_path() /
-            ("jistats_reporting_tests_" + std::to_string(++counter));
-        std::filesystem::create_directories(path);
-    }
-
-    ~TempReportDir() {
-        std::error_code ec;
-        std::filesystem::remove_all(path, ec);
-    }
-
-    std::filesystem::path path;
-};
 
 QuotaInfo makeQuota(
     const std::string& planName,
@@ -144,8 +130,8 @@ TEST_CASE("ReportingService constructs safely", "[reporting]") {
 
 TEST_CASE("ReportingService suggestFilename uses configured directory and format extension", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    service.setDefaultOutputDirectory(tempDir.path.string());
+    TempTestDirectory tempDir("jistats_report");
+    service.setDefaultOutputDirectory(tempDir.path().string());
 
     const ReportRequest htmlRequest{ReportFormat::Html};
     const ReportRequest csvRequest{ReportFormat::Csv};
@@ -155,9 +141,9 @@ TEST_CASE("ReportingService suggestFilename uses configured directory and format
     const std::filesystem::path csvPath(service.suggestFilename(csvRequest));
     const std::filesystem::path jsonPath(service.suggestFilename(jsonRequest));
 
-    CHECK(htmlPath.parent_path() == tempDir.path);
-    CHECK(csvPath.parent_path() == tempDir.path);
-    CHECK(jsonPath.parent_path() == tempDir.path);
+    CHECK(htmlPath.parent_path() == tempDir.path());
+    CHECK(csvPath.parent_path() == tempDir.path());
+    CHECK(jsonPath.parent_path() == tempDir.path());
     CHECK(htmlPath.extension() == ".html");
     CHECK(csvPath.extension() == ".csv");
     CHECK(jsonPath.extension() == ".json");
@@ -235,8 +221,8 @@ TEST_CASE("ReportingService generateReport captures provider exceptions", "[repo
 
 TEST_CASE("ReportingService generateReport writes HTML report for valid dashboard data", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "report.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "report.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -263,8 +249,8 @@ TEST_CASE("ReportingService generateReport writes HTML report for valid dashboar
 
 TEST_CASE("ReportingService generateReport with empty output path uses suggested filename", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    service.setDefaultOutputDirectory(tempDir.path.string());
+    TempTestDirectory tempDir("jistats_report");
+    service.setDefaultOutputDirectory(tempDir.path().string());
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
         return true;
@@ -278,15 +264,15 @@ TEST_CASE("ReportingService generateReport with empty output path uses suggested
 
     REQUIRE(result.success);
     const std::filesystem::path reportPath(result.outputPath);
-    CHECK(reportPath.parent_path() == tempDir.path);
+    CHECK(reportPath.parent_path() == tempDir.path());
     CHECK(reportPath.extension() == ".html");
     CHECK(std::filesystem::exists(reportPath));
 }
 
 TEST_CASE("ReportingService providerFilter applies by provider key", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "filter_by_key.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "filter_by_key.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -308,8 +294,8 @@ TEST_CASE("ReportingService providerFilter applies by provider key", "[reporting
 
 TEST_CASE("ReportingService providerFilter applies by display name", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "filter_by_display_name.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "filter_by_display_name.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -331,8 +317,8 @@ TEST_CASE("ReportingService providerFilter applies by display name", "[reporting
 
 TEST_CASE("ReportingService accountFilter applies to the selected account scope", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "filter_by_account.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "filter_by_account.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel.appVersion = "1.0.0-test";
@@ -376,8 +362,8 @@ TEST_CASE("ReportingService accountFilter applies to the selected account scope"
 
 TEST_CASE("ReportingService providerFilter recomputes runtime state when hidden provider is offline", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "filter_runtime_hidden_offline.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "filter_runtime_hidden_offline.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -409,8 +395,8 @@ TEST_CASE("ReportingService providerFilter recomputes runtime state when hidden 
 
 TEST_CASE("ReportingService providerFilter recomputes runtime state when hidden provider is stale", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "filter_runtime_hidden_stale.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "filter_runtime_hidden_stale.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -441,8 +427,8 @@ TEST_CASE("ReportingService providerFilter recomputes runtime state when hidden 
 
 TEST_CASE("ReportingService providerFilter recomputes runtime state when hidden provider is syncing", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "filter_runtime_hidden_syncing.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "filter_runtime_hidden_syncing.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -474,8 +460,8 @@ TEST_CASE("ReportingService providerFilter recomputes runtime state when hidden 
 
 TEST_CASE("ReportingService includeProviderQuotas false strips quota rows from report", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "without_quotas.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "without_quotas.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -498,8 +484,8 @@ TEST_CASE("ReportingService includeProviderQuotas false strips quota rows from r
 
 TEST_CASE("ReportingService includeProviderQuotas false preserves source-label metadata", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "without_quotas_source_labels.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "without_quotas_source_labels.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel.appVersion = "1.0.0-test";
@@ -539,8 +525,8 @@ TEST_CASE("ReportingService includeProviderQuotas false preserves source-label m
 
 TEST_CASE("ReportingService renders Claude local source labels without leaking raw provider surfaces", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "claude_kimi_source_labels.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "claude_kimi_source_labels.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel.appVersion = "1.0.0-test";
@@ -570,8 +556,8 @@ TEST_CASE("ReportingService renders Claude local source labels without leaking r
 
 TEST_CASE("ReportingService renders a friendly Kimi subscription source label", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "kimi_subscription_source_label.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "kimi_subscription_source_label.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel.appVersion = "1.0.0-test";
@@ -600,8 +586,8 @@ TEST_CASE("ReportingService renders a friendly Kimi subscription source label", 
 
 TEST_CASE("ReportingService generateReport populates metadata with provider scope", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_scope.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_scope.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -625,8 +611,8 @@ TEST_CASE("ReportingService generateReport populates metadata with provider scop
 
 TEST_CASE("ReportingService generateReport metadata reflects live provider state", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_live.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_live.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -650,8 +636,8 @@ TEST_CASE("ReportingService generateReport metadata reflects live provider state
 
 TEST_CASE("ReportingService generateReport metadata reflects offline provider state", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_offline.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_offline.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -675,8 +661,8 @@ TEST_CASE("ReportingService generateReport metadata reflects offline provider st
 
 TEST_CASE("ReportingService generateReport metadata reflects stale provider state", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_stale.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_stale.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -700,8 +686,8 @@ TEST_CASE("ReportingService generateReport metadata reflects stale provider stat
 
 TEST_CASE("ReportingService generateReport metadata reflects syncing provider state", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_syncing.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_syncing.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -724,38 +710,10 @@ TEST_CASE("ReportingService generateReport metadata reflects syncing provider st
     CHECK(html.find("Catching Up") != std::string::npos);
 }
 
-TEST_CASE("ReportingService generateReport metadata reflects backfilled quotas", "[reporting]") {
-    ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_backfilled.html";
-
-    service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
-        viewModel = makeDashboardViewModel();
-        // Set backfill state on quotas - per plan.md section 13.1, use real reconciliation state
-        for (auto& provider : viewModel.providers) {
-            for (auto& quota : provider.quotas) {
-                quota.isBackfilled = true;
-                quota.hasUnknownGaps = true;
-            }
-        }
-        return true;
-    });
-
-    ReportRequest request;
-    request.format = ReportFormat::Html;
-    request.outputPath = outputPath.string();
-
-    ReportResult result = service.generateReport(request);
-    REQUIRE(result.success);
-    
-    CHECK(result.metadata.containsUnknownGaps == true);
-    CHECK(result.metadata.containsBackfilledData == true);
-}
-
 TEST_CASE("ReportingService generateReport metadata contains backfill label in HTML", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_backfill_label.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_backfill_label.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -779,8 +737,8 @@ TEST_CASE("ReportingService generateReport metadata contains backfill label in H
 
 TEST_CASE("ReportingService generateReport metadata with backfilled data shows correct label", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_backfill_yes.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_backfill_yes.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -800,6 +758,8 @@ TEST_CASE("ReportingService generateReport metadata with backfilled data shows c
 
     ReportResult result = service.generateReport(request);
     REQUIRE(result.success);
+    CHECK(result.metadata.containsUnknownGaps);
+    CHECK(result.metadata.containsBackfilledData);
 
     const std::string html = readFileContents(outputPath);
     CHECK(html.find("Contains backfilled data: Yes") != std::string::npos);
@@ -808,8 +768,8 @@ TEST_CASE("ReportingService generateReport metadata with backfilled data shows c
 
 TEST_CASE("ReportingService generateReport parses runtime UTC timestamps for freshness", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_runtime_timestamp.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_runtime_timestamp.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -844,8 +804,8 @@ TEST_CASE("ReportingService generateReport parses runtime UTC timestamps for fre
 
 TEST_CASE("ReportingService generateReport renders explicit account scope labels", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_account_scope.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_account_scope.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel.appVersion = "1.0.0-test";
@@ -890,8 +850,8 @@ TEST_CASE("ReportingService generateReport renders explicit account scope labels
 
 TEST_CASE("ReportingService generateReport uses mirror policy version provider when available", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_mirror_policy.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_mirror_policy.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -917,8 +877,8 @@ TEST_CASE("ReportingService generateReport uses mirror policy version provider w
 
 TEST_CASE("ReportingService generateReport renders normalized OpenAI source labels when available", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_source_labels.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_source_labels.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel.appVersion = "1.0.0-test";
@@ -959,8 +919,8 @@ TEST_CASE("ReportingService generateReport renders normalized OpenAI source labe
 
 TEST_CASE("ReportingService generateReport renders OpenAI API-platform source labels with distinct user-facing wording", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "metadata_api_source_labels.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "metadata_api_source_labels.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel.appVersion = "1.0.0-test";
@@ -996,8 +956,8 @@ TEST_CASE("ReportingService generateReport renders OpenAI API-platform source la
 
 TEST_CASE("ReportingService generateReport renders the Phase 6 HTML export sections when aggregate data is provided", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path outputPath = tempDir.path / "phase6_sections.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path outputPath = tempDir.path() / "phase6_sections.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -1032,8 +992,8 @@ TEST_CASE("ReportingService generateReport renders the Phase 6 HTML export secti
 
 TEST_CASE("ReportingService suggestFilename carries scope context when provider and date range are known", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    service.setDefaultOutputDirectory(tempDir.path.string());
+    TempTestDirectory tempDir("jistats_report");
+    service.setDefaultOutputDirectory(tempDir.path().string());
 
     ReportRequest request;
     request.format = ReportFormat::Html;
@@ -1043,7 +1003,7 @@ TEST_CASE("ReportingService suggestFilename carries scope context when provider 
     request.dateRange.end = std::chrono::system_clock::from_time_t(1716076800);   // 2024-05-19 UTC
 
     const std::filesystem::path suggested(service.suggestFilename(request));
-    CHECK(suggested.parent_path() == tempDir.path);
+    CHECK(suggested.parent_path() == tempDir.path());
     CHECK(suggested.filename().string().find("openai") != std::string::npos);
     CHECK(suggested.filename().string().find("acct_openai_secondary") != std::string::npos);
     CHECK(suggested.filename().string().find("_to_") != std::string::npos);
@@ -1051,8 +1011,8 @@ TEST_CASE("ReportingService suggestFilename carries scope context when provider 
 
 TEST_CASE("ReportingService manual export request generates valid HTML file at explicit path", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path explicitPath = tempDir.path / "manual-export.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path explicitPath = tempDir.path() / "manual-export.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -1079,8 +1039,8 @@ TEST_CASE("ReportingService manual export request generates valid HTML file at e
 
 TEST_CASE("ReportingService manual export respects provider and account scope filters", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path explicitPath = tempDir.path / "scoped-export.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path explicitPath = tempDir.path() / "scoped-export.html";
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();
@@ -1103,8 +1063,8 @@ TEST_CASE("ReportingService manual export respects provider and account scope fi
 
 TEST_CASE("ReportingService manual export preserves an explicit output path even when the file already exists", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    const std::filesystem::path requestedPath = tempDir.path / "report.html";
+    TempTestDirectory tempDir("jistats_report");
+    const std::filesystem::path requestedPath = tempDir.path() / "report.html";
     {
         std::ofstream existing(requestedPath);
         REQUIRE(existing.is_open());
@@ -1132,8 +1092,8 @@ TEST_CASE("ReportingService manual export preserves an explicit output path even
 
 TEST_CASE("ReportingService auto-generated output path stays unique when the suggested filename already exists", "[reporting]") {
     ReportingService service;
-    TempReportDir tempDir;
-    service.setDefaultOutputDirectory(tempDir.path.string());
+    TempTestDirectory tempDir("jistats_report");
+    service.setDefaultOutputDirectory(tempDir.path().string());
 
     service.setDashboardDataProvider([](DashboardViewModel& viewModel) {
         viewModel = makeDashboardViewModel();

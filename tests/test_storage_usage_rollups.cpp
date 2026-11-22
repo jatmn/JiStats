@@ -4,31 +4,14 @@
 #include <string>
 
 #include "db/StorageService.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::requireSqlite;
 
 namespace {
-
-class TempDbFile {
-public:
-    TempDbFile() {
-        path_ = std::filesystem::temp_directory_path() / "jistats_usage_rollups_test.db";
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string path() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 long long requireSingleId(const QueryResult& result) {
     REQUIRE(result.success());
@@ -101,13 +84,12 @@ constexpr std::time_t NEXT_DAY = HOUR_ZERO + 86400;
 } // namespace
 
 TEST_CASE("StorageService rebuilds hourly and daily usage rollups when SQLite is available", "[storage][rollups]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto ids = seedProviderAccount(storage);
     insertUsageEvent(storage, ids.providerId, ids.accountId, "2026-01-15T01:15:00Z", "gpt-4", 60, 40, 100, 10);
@@ -176,13 +158,12 @@ TEST_CASE("StorageService rebuilds hourly and daily usage rollups when SQLite is
 }
 
 TEST_CASE("StorageService rebuilds complete affected rollup buckets for partial time windows", "[storage][rollups]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto ids = seedProviderAccount(storage);
     insertUsageEvent(storage, ids.providerId, ids.accountId, "2026-01-15T01:05:00Z", "gpt-4", 10, 10, 20, 2);
@@ -225,13 +206,12 @@ TEST_CASE("StorageService rebuilds complete affected rollup buckets for partial 
 }
 
 TEST_CASE("StorageService rollups preserve request provenance counters for analysis reporting", "[storage][rollups][analysis]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto ids = seedProviderAccount(storage);
     insertUsageEvent(
@@ -343,13 +323,12 @@ TEST_CASE("StorageService rollups preserve request provenance counters for analy
 }
 
 TEST_CASE("StorageService rebuilds daily quota snapshot rollups for long-range analysis", "[storage][rollups][quota]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto ids = seedProviderAccount(storage);
     const auto planInsert = storage.execute(
@@ -441,13 +420,12 @@ TEST_CASE("StorageService rebuilds daily quota snapshot rollups for long-range a
 }
 
 TEST_CASE("StorageService retention helpers delete expired usage events and rollups when SQLite is available", "[storage][rollups][retention]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto ids = seedProviderAccount(storage);
     insertUsageEvent(storage, ids.providerId, ids.accountId, "2026-01-15T01:15:00Z", "gpt-4", 60, 40, 100, 10);

@@ -17,33 +17,13 @@
 #include "db/StorageService.hpp"
 #include "gui/DashboardPresenter.hpp"
 #include "runtime_test_support.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
 using namespace JiStats::TestSupport;
 
 namespace {
-
-class TempDbPath {
-public:
-    TempDbPath() {
-        path_ = std::filesystem::temp_directory_path() /
-            ("jistats_provider_path_" + std::to_string(std::time(nullptr)) + ".db");
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbPath() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string string() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 void seedProviderTrackingPreferences(
     const std::string& path,
@@ -79,35 +59,15 @@ void enableProviderTracking(
 
 } // namespace
 
-TEST_CASE("ProviderManager can be injected into AppController", "[provider_data_path]") {
-    const std::time_t now = std::time(nullptr);
-    auto openaiProvider = makeCurrentQuotaProvider("openai", "OpenAI", 1305, 1500, now, "monthly");
-    auto minimaxProvider = makeCurrentQuotaProvider("minimax", "MiniMax", 42000, 100000, now, "daily");
-    auto providerManager = makeProviderManager({openaiProvider, minimaxProvider});
-
-    REQUIRE(providerManager->getProviderCount() == 2);
-    
-    // Create AppController and inject ProviderManager
-    AppController controller;
-    controller.setHeadlessForTesting(true);
-    controller.setProviderManagerForTesting(providerManager);
-
-    REQUIRE(controller.init());
-    enableProviderTracking(controller, true, true, false, false);
-
-    const DashboardViewModel viewModel = controller.getDashboardViewModelForTesting();
-    REQUIRE(viewModel.providers.size() == 2);
-
-    controller.shutdown();
-}
-
 TEST_CASE("AppController provider path builds live and offline provider states correctly", "[provider_data_path]") {
     const std::time_t now = std::time(nullptr);
     auto liveProvider = makeCurrentQuotaProvider("openai", "OpenAI", 1305, 1500, now, "monthly");
     auto offlineProvider = makeOfflineQuotaProvider("minimax", "MiniMax", "Missing credentials");
     auto providerManager = makeProviderManager({liveProvider, offlineProvider});
 
+    TempTestDatabase dbPath;
     AppController controller;
+    controller.setDatabasePathForTesting(dbPath.path());
     controller.setHeadlessForTesting(true);
     controller.setProviderManagerForTesting(providerManager);
     REQUIRE(controller.init());
@@ -143,8 +103,10 @@ TEST_CASE("AppController provider path builds live and offline provider states c
 }
 
 TEST_CASE("AppController provider path does not fetch usage during startup when only quota data is needed", "[provider_data_path]") {
-    TempDbPath dbPath;
-    seedProviderTrackingPreferences(dbPath.string(), true, true, false, false);
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedProviderTrackingPreferences(dbPath.path(), true, true, false, false);
     const std::time_t now = std::time(nullptr);
     auto openaiProvider = makeCurrentQuotaProvider("openai", "OpenAI", 1305, 1500, now, "monthly");
     auto minimaxProvider = makeCurrentQuotaProvider("minimax", "MiniMax", 42000, 100000, now, "daily");
@@ -152,7 +114,7 @@ TEST_CASE("AppController provider path does not fetch usage during startup when 
 
     AppController controller;
     controller.setHeadlessForTesting(true);
-    controller.setDatabasePathForTesting(dbPath.string());
+    controller.setDatabasePathForTesting(dbPath.path());
     controller.setProviderManagerForTesting(providerManager);
     REQUIRE(controller.init());
 
@@ -165,8 +127,10 @@ TEST_CASE("AppController provider path does not fetch usage during startup when 
 }
 
 TEST_CASE("AppController provider path suppresses Kimi local-only quota state", "[provider_data_path][kimi]") {
-    TempDbPath dbPath;
-    seedProviderTrackingPreferences(dbPath.string(), false, false, false, true);
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedProviderTrackingPreferences(dbPath.path(), false, false, false, true);
     const std::time_t now = std::time(nullptr);
     auto kimiProvider = makeCurrentQuotaProvider(
         "kimi",
@@ -180,7 +144,7 @@ TEST_CASE("AppController provider path suppresses Kimi local-only quota state", 
 
     AppController controller;
     controller.setHeadlessForTesting(true);
-    controller.setDatabasePathForTesting(dbPath.string());
+    controller.setDatabasePathForTesting(dbPath.path());
     controller.setProviderManagerForTesting(providerManager);
     REQUIRE(controller.init());
 
@@ -199,8 +163,10 @@ TEST_CASE("AppController provider path suppresses Kimi local-only quota state", 
 }
 
 TEST_CASE("AppController provider path gives Claude local quotas a readable plan label and unknown confidence", "[provider_data_path][claude]") {
-    TempDbPath dbPath;
-    seedProviderTrackingPreferences(dbPath.string(), false, false, true, false);
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedProviderTrackingPreferences(dbPath.path(), false, false, true, false);
     const std::time_t now = std::time(nullptr);
     auto claudeProvider = makeCurrentQuotaProvider(
         "claude_code",
@@ -214,7 +180,7 @@ TEST_CASE("AppController provider path gives Claude local quotas a readable plan
 
     AppController controller;
     controller.setHeadlessForTesting(true);
-    controller.setDatabasePathForTesting(dbPath.string());
+    controller.setDatabasePathForTesting(dbPath.path());
     controller.setProviderManagerForTesting(providerManager);
     REQUIRE(controller.init());
 
@@ -242,20 +208,19 @@ TEST_CASE("ProviderManager handles empty providers gracefully", "[provider_data_
     CHECK(usageResponses.empty());
 }
 
-TEST_CASE("ProviderManager handles failed quota response", "[provider_data_path]") {
-    auto providerManager = std::make_shared<ProviderManager>();
-    
-    auto provider = std::make_shared<RuntimeMockProviderAdapter>("test", "Test Provider");
-    
-    // Set failed quota response
-    provider->setQuotaResponse(makeFailedQuotaResponse("API error"));
-    
-    providerManager->addProvider(provider);
-    
-    auto quotaResponses = providerManager->fetchAllQuota();
-    REQUIRE(quotaResponses.size() == 1);
+TEST_CASE("ProviderManager keeps other quota responses when a provider fails", "[provider_data_path]") {
+    const auto failed = makeOfflineQuotaProvider("minimax", "MiniMax", "API error");
+    const auto healthy = makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, std::time(nullptr));
+    const auto providerManager = makeProviderManager({failed, healthy});
+
+    const auto quotaResponses = providerManager->fetchAllQuota();
+    REQUIRE(quotaResponses.size() == 2);
     CHECK_FALSE(quotaResponses[0].success);
     CHECK(quotaResponses[0].error == "API error");
+    CHECK(quotaResponses[1].success);
+    CHECK(quotaResponses[1].used == 25);
+    CHECK(failed->getQuotaFetchCount() == 1);
+    CHECK(healthy->getQuotaFetchCount() == 1);
 }
 
 TEST_CASE("ProviderManager respects enabled/disabled state", "[provider_data_path]") {

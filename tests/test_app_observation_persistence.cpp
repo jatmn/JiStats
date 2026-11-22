@@ -10,32 +10,13 @@
 #include "observation/ActivityEvent.hpp"
 #include "runtime_test_support.hpp"
 #include "taskbar/TaskbarPresenter.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
 using namespace JiStats::TestSupport;
 
 namespace {
-
-class TempDbPath {
-public:
-    TempDbPath()
-        : path_(std::filesystem::temp_directory_path() / "jistats_app_observation_test.db") {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbPath() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string string() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 ActivityEvent makeObservedActivity() {
     const std::time_t now = std::time(nullptr);
@@ -54,16 +35,6 @@ ActivityEvent makeObservedActivity() {
     event.confidence = ActivityConfidence::LocalExact;
     event.rawReference = "window:chatgpt";
     return event;
-}
-
-bool sqliteAvailable() {
-    TempDbPath probePath;
-    StorageService storage;
-    const bool available = storage.init(probePath.string());
-    if (available) {
-        storage.close();
-    }
-    return available;
 }
 
 void applyProviderTrackingPreferences(
@@ -188,15 +159,12 @@ void insertUsageEvent(
 } // namespace
 
 TEST_CASE("AppController persists local observation events through the runtime path", "[app][observation]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; runtime persistence path cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
 
     REQUIRE(app.init());
     applyProviderTrackingPreferences(app, true, false);
@@ -235,15 +203,12 @@ TEST_CASE("AppController persists local observation events through the runtime p
 }
 
 TEST_CASE("AppController drops new OpenAI local observations while OpenAI tracking is disabled", "[app][observation]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; disabled observation gating cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     AppController app;
     app.setHeadlessForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
 
     REQUIRE(app.init());
     applyProviderTrackingPreferences(app, false, false);
@@ -264,12 +229,9 @@ TEST_CASE("AppController drops new OpenAI local observations while OpenAI tracki
 }
 
 TEST_CASE("AppController keeps taskbar overlay on subscription quota when local activity exists", "[app][observation]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; persisted taskbar overlay coverage cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     const std::time_t now = std::time(nullptr);
     auto openaiProvider = makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now);
     auto minimaxProvider = makeOfflineQuotaProvider("minimax", "MiniMax");
@@ -277,7 +239,7 @@ TEST_CASE("AppController keeps taskbar overlay on subscription quota when local 
     AppController app;
     app.setHeadlessForTesting(true);
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(makeProviderManager({openaiProvider, minimaxProvider}));
 
     REQUIRE(app.init());
@@ -299,27 +261,18 @@ TEST_CASE("AppController keeps taskbar overlay on subscription quota when local 
 }
 
 TEST_CASE("AppController prefers rollup-backed quantified summaries when usage rollups exist", "[app][observation][rollups]") {
-    if (!sqliteAvailable()) {
-        SUCCEED("SQLite not available in this build; rollup-backed summary path cannot be exercised here.");
-        return;
-    }
+    requireSqlite();
 
-    TempDbPath dbPath;
+    TempTestDatabase dbPath;
     StorageService storage;
-    REQUIRE(storage.init(dbPath.string()));
+    REQUIRE(storage.init(dbPath.path()));
 
     const auto ids = seedUsageAccounts(storage);
-    const std::time_t now = std::time(nullptr);
-    const std::time_t utcDayStart = utcDayStartForTest(now);
-    const std::time_t secondsIntoUtcDay = std::max<std::time_t>(0, now - utcDayStart);
-    if (secondsIntoUtcDay <= (31 * 60)) {
-        SUCCEED("Current UTC time is too close to midnight to keep 'Today' distinct from 'Last 30 Minutes'.");
-        return;
-    }
-
+    // Use the previous UTC noon so startup wall time is outside the fixture windows.
+    const std::time_t now = utcDayStartForTest(std::time(nullptr)) - 12 * 60 * 60;
     const std::time_t openaiRecent = now - 120;
-    const std::time_t minimaxRecent = now - (20 * 60);
-    const std::time_t openaiOlder = now - std::min<std::time_t>(3 * 60 * 60, secondsIntoUtcDay - 60);
+    const std::time_t minimaxRecent = now - 20 * 60;
+    const std::time_t openaiOlder = now - 3 * 60 * 60;
 
     insertUsageEvent(storage, ids.openaiProviderId, ids.openaiAccountId, formatTimeUtcIsoForTest(openaiRecent), "gpt-4.1", 90, 110, 200, 25);
     insertUsageEvent(storage, ids.minimaxProviderId, ids.minimaxAccountId, formatTimeUtcIsoForTest(minimaxRecent), "MiniMax-Text-01", 120, 180, 300, 35);
@@ -344,8 +297,14 @@ TEST_CASE("AppController prefers rollup-backed quantified summaries when usage r
     AppController app;
     app.setHeadlessForTesting(true);
     app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.string());
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setCurrentTimeForTesting(now);
     REQUIRE(app.init());
+
+    const DashboardViewModel startupViewModel = app.getDashboardViewModelForTesting();
+    REQUIRE(startupViewModel.runtimeSummaries.size() == 4);
+    CHECK(startupViewModel.runtimeSummaries[0].detail == "1 request, 200 tokens");
+
     app.refreshRuntimeForTesting();
 
     const DashboardViewModel viewModel = app.getDashboardViewModelForTesting();

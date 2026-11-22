@@ -28,7 +28,7 @@ The repository includes an automatic [Windows SQLite workflow](../.github/workfl
 | Item | Value |
 | --- | --- |
 | Phase | Phases 0, 1, 2, 3, 4, 5, 6, and 7 are closed for the current v1.0 baseline |
-| Current Focus | v1.0 release signoff, including the Windows CI startup timing failure and the remaining quality, testing, migration, and release-day checks |
+| Current Focus | v1.0 release signoff, including Windows CI verification of the test cleanup and the remaining quality, migration, and release-day checks |
 | v1.0 Providers | OpenAI / Codex + MiniMax + Claude Code + Kimi Code |
 | Primary Goal | Provider quota mirroring |
 | Stack | Native `C++/C` |
@@ -47,7 +47,7 @@ Reviewed the four superseded plans and related Analysis and fixture plans agains
 
 ## 🚧 Active Work
 
-The [release checklist](release-checklist.md#evidence-backed-release-queue) is the active v1.0 queue. Use the Windows SQLite quality gate for automated build and test results.
+The [release checklist](release-checklist.md#evidence-backed-release-queue) is the active v1.0 queue. Use the Windows SQLite quality gate for automated build and test results. The test cleanup removes redundant cases, isolates temporary fixtures, and extends the controlled quota response test to use the shared SQLite fixture. The review follow-up makes the rollup test use its fixture clock at startup and refresh, and makes the remaining controller cases that seed preferences skip when SQLite is absent. The Analysis migration test builds a version 9 database in a private fixture directory and adds the Analysis migration for the upgrade. Startup commands stay in memory during controller tests. Offline dismissal and provider refresh synchronize connectivity writes and notice updates without waiting for provider requests. A controlled quota response verifies that dismissal stays responsive and persists until recovery. When catch-up checks quota again, the final result drives both saved connectivity and the displayed notice. Connectivity and the notice are updated together, and a dismissal follows the offline episode when the failing provider changes. A live result confirming recovery clears the saved dismissal for disabled providers too, including after restart. Cached quota, empty refreshes, sample-only results, and local reads such as Claude Code stats or an unchanged Codex rollout preserve the saved dismissal. A provider quota API result clears it for every provider, while a provider that recovers through a local read clears only its own dismissal. The MiniMax validation test also uses a controlled response to verify the pending dashboard state before validation completes.
 
 Pullfrog automatic reviews are pending deployment of the [workflow](../.github/workflows/pullfrog.yml) to the default branch. Verify an owner-authored draft and a subsequent push after deployment.
 
@@ -190,7 +190,7 @@ Guardrails:
 | `⏸️ DEFERRED` | Review Codex import durability | Storage follow-up | Assess database-level rollout deduplication and whether SQLite delta writes and thread checkpoints should share a transaction. Add targeted retry and counter-reset coverage if this work is picked up. |
 | `⏸️ DEFERRED` | Run a live Codex SQLite smoke pass | Windows validation | Launch with existing thread totals, check that first scan produces no new chart usage, generate new activity, and confirm OpenAI/HICAP model deltas and unchanged source data. Cover a WAL-only refresh where possible. |
 | `⏸️ DEFERRED` | Add a 5-hour Codex throughput window | `v1.x` refinement | The original throughput plan proposed 5-minute, 30-minute, and 5-hour windows. The dashboard and Analysis compute only the 5-minute and 30-minute rates. |
-| `⏸️ DEFERRED` | Extract shared test temp-db and polling helpers | Test cleanup | Review found repeated temp DB/path fixtures and polling helpers across presenter, controller, analysis, and storage tests. Leave until more test cleanup is underway; avoid broad churn during current release slice. |
+| `⏸️ DEFERRED` | Extract shared test polling helpers | Test cleanup | The suite now shares temporary database and directory fixtures. Presenter and controller polling helpers still use different timeouts. |
 | `⏸️ DEFERRED` | Extract shared GUI formatting/conversion helpers | UI cleanup | `DashboardPresenter`, `AnalysisPresenter`, and taskbar presenter repeat UTF-8/wide and number/time formatting helpers. Consolidate after chart/reporting surfaces stabilize. |
 
 ## 🐞 Known UI / Taskbar Bug Backlog

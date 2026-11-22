@@ -1,41 +1,18 @@
 #include <catch_amalgamated.hpp>
 
-#include <cstdint>
-#include <filesystem>
 #include <string>
-#include <system_error>
 
 #include "db/StorageService.hpp"
 #include "observation/LocalObservationService.hpp"
 #include "observation/ObservationPersistenceBridge.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::requireSqlite;
 
 namespace {
-
-class TempDbFile {
-public:
-    TempDbFile() {
-        const auto uniqueSuffix = std::to_string(reinterpret_cast<std::uintptr_t>(this));
-        path_ = std::filesystem::temp_directory_path() /
-            ("jistats_observation_persistence_" + uniqueSuffix + ".db");
-
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string path() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 ActivityEvent makeObservedActivityEvent() {
     ActivityEvent event;
@@ -57,18 +34,12 @@ ActivityEvent makeObservedActivityEvent() {
 } // namespace
 
 TEST_CASE("Local observation runtime path persists activity through the callback wiring", "[observation][storage][integration]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        const std::string error = storage.getLastError();
-        if (error.find("SQLite not available") != std::string::npos) {
-            WARN(error);
-            SUCCEED("SQLite-backed persistence is not compiled into this test build");
-            return;
-        }
-        FAIL("StorageService init failed: " << error);
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     LocalObservationService observationService;
     REQUIRE(observationService.init());
@@ -140,18 +111,12 @@ TEST_CASE("Local observation runtime path persists activity through the callback
 }
 
 TEST_CASE("ObservationPersistenceBridge preserves binding query errors instead of clearing them", "[observation][storage][integration]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        const std::string error = storage.getLastError();
-        if (error.find("SQLite not available") != std::string::npos) {
-            WARN(error);
-            SUCCEED("SQLite-backed persistence is not compiled into this test build");
-            return;
-        }
-        FAIL("StorageService init failed: " << error);
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     ObservationPersistenceBridge persistenceBridge(storage);
     long long insertedId = 0;

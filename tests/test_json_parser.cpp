@@ -353,6 +353,7 @@ TEST_CASE("JsonParser getString returns string correctly", "[json]") {
 TEST_CASE("JsonParser getString returns default for non-string", "[json]") {
     JsonValue numVal(42.0);
     REQUIRE(JsonParser::getString(numVal, "default") == "default");
+    REQUIRE(JsonParser::getString(JsonValue{}, "default") == "default");
 }
 
 TEST_CASE("JsonParser getMember returns null for missing key", "[json]") {

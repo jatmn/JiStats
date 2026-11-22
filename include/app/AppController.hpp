@@ -3,6 +3,10 @@
 #include "gui/NotificationService.hpp"
 
 #include <ctime>
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+#include <functional>
+#include <future>
+#endif
 #include <memory>
 #include <optional>
 #include <string>
@@ -90,6 +94,7 @@ public:
     std::string getDashboardStatusTextForTesting() const;
     DashboardHtmlExportResult exportHtmlReportForTesting(const std::string& outputPath);
     void refreshRuntimeForTesting();
+    void setBeforeRuntimePublicationForTesting(std::function<void()> callback);
     void applyDashboardPreferencesForTesting(const DashboardPreferences& preferences);
     void setMiniMaxCredentialStoreForTesting(std::shared_ptr<WindowsCredentialStore> store);
     void setMiniMaxValidationResponseForTesting(
@@ -97,7 +102,7 @@ public:
         int statusCode,
         const std::string& body = "",
         const std::string& error = "");
-    void setMiniMaxValidationDelayForTesting(int delayMs);
+    void setMiniMaxValidationReleaseForTesting(std::shared_future<void> release);
     void setOpenAICodexRefreshPollIntervalForTesting(int intervalMs);
     void setLocalProviderRefreshPollIntervalForTesting(int intervalMs);
     void setCurrentTimeForTesting(std::time_t now);

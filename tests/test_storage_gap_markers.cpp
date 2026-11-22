@@ -5,31 +5,14 @@
 
 #include "analytics/GapClassifier.hpp"
 #include "db/StorageService.hpp"
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::requireSqlite;
 
 namespace {
-
-class TempDbFile {
-public:
-    TempDbFile() {
-        path_ = std::filesystem::temp_directory_path() / "jistats_gap_markers_test.db";
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string path() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 long long requireSingleId(const QueryResult& result) {
     REQUIRE(result.success());
@@ -103,13 +86,12 @@ TEST_CASE("GapClassifier classifies known-zero reconstructed and unknown periods
 }
 
 TEST_CASE("StorageService upserts and queries gap markers when SQLite is available", "[storage][gap]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto ids = seedProviderAccount(storage);
 
@@ -159,13 +141,12 @@ TEST_CASE("StorageService upserts and queries gap markers when SQLite is availab
 }
 
 TEST_CASE("StorageService queries overlapping gap markers and prunes expired rows when SQLite is available", "[storage][gap]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     const auto ids = seedProviderAccount(storage);
 
@@ -207,13 +188,12 @@ TEST_CASE("StorageService queries overlapping gap markers and prunes expired row
 }
 
 TEST_CASE("StorageService rejects invalid gap marker inputs before insert", "[storage][gap]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     PersistedGapMarker invalid;
     invalid.providerId = 1;

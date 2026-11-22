@@ -36,6 +36,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -758,6 +759,7 @@ struct DirectApiQuotaPollState {
     QuotaResponse response;
     std::time_t lastAttemptAt = 0;
     std::time_t stableSince = 0;
+    std::uint64_t fetchedInRefresh = 0;
 };
 
 bool quotaUsageFingerprintMatches(const QuotaResponse& lhs, const QuotaResponse& rhs) {
@@ -3744,6 +3746,26 @@ std::chrono::milliseconds adaptiveWatcherIntervalOrDormantForTesting(
 
 class AppController::Impl {
 public:
+    struct QuotaRefresh {
+        std::uint64_t generation;
+        std::set<std::string> fetchedProviderKeys;
+        // Subset of fetchedProviderKeys whose result came from a direct provider API.
+        std::set<std::string> providerApiKeys;
+    };
+
+    struct StagedConnectivity {
+        PersistedConnectivityState connectivity;
+        // The provider returned a non-offline result fetched in this refresh.
+        bool fetchedRecovery = false;
+    };
+
+    struct ProviderConnectivityUpdates {
+        std::vector<StagedConnectivity> rows;
+        // Includes providers whose connectivity cannot be stored.
+        bool anyOfflineProvider = false;
+        bool providerApiConfirmedRecovery = false;
+    };
+
     bool initialized = false;
     std::string state = "uninitialized";
     DashboardPresenter dashboardPresenter;
@@ -3774,6 +3796,8 @@ public:
     std::map<std::string, MiniMaxSubscriptionCredentialProfile> miniMaxCredentialProfiles;
     mutable std::mutex miniMaxValidationMutex;
     std::mutex runtimeRefreshMutex;
+    // Serializes connectivity writes and notice publication independently of provider I/O.
+    std::mutex offlineNoticeMutex;
     std::thread startupRefreshThread;
     std::thread interactionWorkThread;
     std::thread taskbarRefreshThread;
@@ -3810,6 +3834,7 @@ public:
     size_t openAICodexWatcherUnchangedPasses = 0;
     size_t localProviderWatcherUnchangedPasses = 0;
     std::map<std::string, DirectApiQuotaPollState> directApiQuotaPollStates;
+    std::uint64_t quotaRefreshGeneration = 0;
     bool claudeCodeDetected = false;
     bool kimiCodeDetected = false;
     std::string claudeCodeDetectionMessage;
@@ -3824,7 +3849,8 @@ public:
     bool disableTaskbarForTesting = false;
     bool taskbarTestModeForTesting = false;
     bool disableCodexTokenImportForTesting = false;
-    int miniMaxValidationDelayMsForTesting = 0;
+    std::shared_future<void> miniMaxValidationReleaseForTesting;
+    std::function<void()> beforeRuntimePublicationForTesting;
     std::optional<std::time_t> currentTimeForTesting;
 #endif
 
@@ -3985,6 +4011,7 @@ public:
 
             if (requiresProviderDiscoveryRefresh) {
                 runProviderDiscovery();
+                std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
                 DashboardViewModel refreshedViewModel = dashboardPresenter.getViewModel();
                 if (!refreshedViewModel.appVersion.empty()) {
                     applyProviderDiscoveryStatusToViewModel(refreshedViewModel);
@@ -4025,13 +4052,15 @@ public:
 
     QuotaResponse fetchQuotaWithDirectApiBudget(
         const std::shared_ptr<IProviderAdapter>& provider,
-        std::time_t now) {
+        std::time_t now,
+        QuotaRefresh& refresh) {
         if (!provider || !provider->isEnabled()) {
             return QuotaResponse{};
         }
 
         if (!provider->hasDirectQuotaApiConfigured()) {
             directApiQuotaPollStates.erase(provider->getProviderKey());
+            refresh.fetchedProviderKeys.insert(provider->getProviderKey());
             return provider->fetchQuota();
         }
 
@@ -4043,6 +4072,11 @@ public:
         if (pollState.hasResponse &&
             pollState.lastAttemptAt > 0 &&
             (now - pollState.lastAttemptAt) < intervalSeconds) {
+            // The post-catch-up rebuild may reuse a result fetched in this cycle.
+            if (pollState.fetchedInRefresh == refresh.generation) {
+                refresh.fetchedProviderKeys.insert(provider->getProviderKey());
+                refresh.providerApiKeys.insert(provider->getProviderKey());
+            }
             return pollState.response;
         }
 
@@ -4055,6 +4089,9 @@ public:
         pollState.lastAttemptAt = now;
         pollState.hasResponse = true;
         pollState.response = response;
+        pollState.fetchedInRefresh = refresh.generation;
+        refresh.fetchedProviderKeys.insert(provider->getProviderKey());
+        refresh.providerApiKeys.insert(provider->getProviderKey());
 
         if (response.success) {
             if (!unchanged || pollState.stableSince <= 0) {
@@ -4068,13 +4105,13 @@ public:
     }
 
     std::vector<QuotaResponse> fetchQuotaResponses(
-        ProviderManager& runtimeProviderManager,
-        std::time_t now) {
+        const std::vector<std::shared_ptr<IProviderAdapter>>& providers,
+        std::time_t now,
+        QuotaRefresh& refresh) {
         std::vector<QuotaResponse> responses;
-        const auto providers = runtimeProviderManager.getEnabledProviders();
         responses.reserve(providers.size());
         for (const auto& provider : providers) {
-            responses.push_back(fetchQuotaWithDirectApiBudget(provider, now));
+            responses.push_back(fetchQuotaWithDirectApiBudget(provider, now, refresh));
         }
         return responses;
     }
@@ -4606,7 +4643,7 @@ public:
             ? PersistedMetricSnapshotMode::Full
             : PersistedMetricSnapshotMode::TrayOnly;
         ensureFreshPersistedMetricSnapshot(now, snapshotMode);
-        syncRuntimeIndicators(viewModel, now);
+        syncTrayRuntimeIndicator(viewModel);
 
         if (!viewModel.preferences.taskbarOverlayEnabled) {
             return;
@@ -5388,9 +5425,8 @@ public:
         std::lock_guard<std::mutex> lock(miniMaxValidationMutex);
         miniMaxValidationThreads.emplace_back([this, planKey, profile]() {
 #ifdef JISTATS_ENABLE_TEST_HOOKS
-            if (miniMaxValidationDelayMsForTesting > 0) {
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(miniMaxValidationDelayMsForTesting));
+            if (miniMaxValidationReleaseForTesting.valid()) {
+                miniMaxValidationReleaseForTesting.wait();
             }
 #endif
 
@@ -5795,11 +5831,22 @@ public:
         viewModel.offlineNoticeMessage = activeNotice->message;
     }
 
-    bool shouldSuppressOfflineNoticeFromStorage(
-        const DashboardViewModel& viewModel,
-        std::time_t now) {
+    std::time_t latestOfflineNoticeDismissal() {
         if (!storageAvailable || !storageService.isOpen()) {
-            return false;
+            return 0;
+        }
+
+        const auto result = storageService.execute(
+            "SELECT MAX(notice_dismissed_at_utc) FROM connectivity_state "
+            "WHERE account_id IN (SELECT id FROM accounts WHERE scope_type = 'runtime');");
+        return result.success() && result.rowCount() == 1
+            ? parseRuntimeTimestamp(result.getString(0, 0))
+            : 0;
+    }
+
+    void persistOfflineNoticeDismissal(const DashboardViewModel& viewModel, std::time_t now) {
+        if (!storageAvailable || !storageService.isOpen()) {
+            return;
         }
 
         for (const auto& provider : viewModel.providers) {
@@ -5814,40 +5861,8 @@ public:
                 continue;
             }
 
-            const auto connectivity =
-                storageService.getConnectivityState(*providerId, *runtimeAccountId);
-            if (!connectivity.has_value() || connectivity->noticeDismissedAt <= 0) {
-                continue;
-            }
-
-            if ((now - connectivity->noticeDismissedAt) <= kOfflineNoticeCooldownSeconds) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    void persistOfflineNoticeDismissal(std::time_t now) {
-        if (!storageAvailable || !storageService.isOpen()) {
-            return;
-        }
-
-        const DashboardViewModel currentViewModel = dashboardPresenter.getViewModel();
-        for (const auto& provider : currentViewModel.providers) {
-            if (provider.state != ProviderState::Offline) {
-                continue;
-            }
-
-            const auto providerId = findProviderIdByKey(storageService, provider.providerKey);
-            const auto runtimeAccountId =
-                ensureRuntimeTrackingAccountId(storageService, provider.providerKey, provider.displayName);
-            if (!providerId.has_value() || !runtimeAccountId.has_value()) {
-                continue;
-            }
-
             auto connectivity = storageService.getConnectivityState(*providerId, *runtimeAccountId);
-            if (!connectivity.has_value()) {
+            if (!connectivity.has_value() || connectivity->status != "offline") {
                 continue;
             }
 
@@ -5856,14 +5871,12 @@ public:
         }
     }
 
-    void refreshOfflineNoticePresentationOnly() {
-        DashboardViewModel viewModel = dashboardPresenter.getViewModel();
-        if (viewModel.appVersion.empty()) {
-            return;
-        }
-
+    void publishDashboardWithOfflineNotice(DashboardViewModel& viewModel) {
         applyOfflineNoticePresentation(viewModel);
         dashboardPresenter.updateViewModel(viewModel);
+        taskbarPresenter.setOfflineMenuState(
+            viewModel.offlineRetryAvailable,
+            viewModel.offlineNoticeVisible);
     }
 
     DashboardNoticeActionResult handleOfflineRetryAction() {
@@ -5883,8 +5896,10 @@ public:
     }
 
     DashboardNoticeActionResult handleOfflineDismissAction() {
+        std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
+        DashboardViewModel viewModel = dashboardPresenter.getViewModel();
         DashboardNoticeActionResult result;
-        if (dashboardPresenter.getViewModel().runtimeState != RuntimeState::Offline) {
+        if (viewModel.runtimeState != RuntimeState::Offline) {
             result.success = false;
             result.message = "Offline notice is unavailable.";
             return result;
@@ -5897,14 +5912,14 @@ public:
             notificationService.suppressUntilCleared(NoticeType::Offline);
         }
 
-        persistOfflineNoticeDismissal(std::time(nullptr));
-        refreshOfflineNoticePresentationOnly();
+        persistOfflineNoticeDismissal(viewModel, std::time(nullptr));
+        publishDashboardWithOfflineNotice(viewModel);
         result.success = true;
         result.message = "Offline notice dismissed. JiStats will keep the offline indicator visible and retry automatically.";
         return result;
     }
 
-    void syncRuntimeIndicators(const DashboardViewModel& viewModel, std::time_t now) {
+    void syncTrayRuntimeIndicator(const DashboardViewModel& viewModel) {
         const PersistedMetricSnapshot snapshot = copyPersistedMetricSnapshot();
         if (trayController.isAvailable()) {
             std::string tooltip = buildTrayTooltip(viewModel);
@@ -5913,16 +5928,14 @@ public:
             }
             trayController.setState(trayStatusForRuntimeState(viewModel.runtimeState), tooltip);
         }
-        if (taskbarPresenter.isAvailable()) {
-            taskbarPresenter.setOfflineMenuState(
-                viewModel.offlineRetryAvailable,
-                viewModel.offlineNoticeVisible);
-        }
+    }
 
+    void updateOfflineNotice(const DashboardViewModel& viewModel, std::time_t now) {
         const RuntimeStatusTransition transition =
             describeRuntimeStateTransition(lastRuntimeState, viewModel.runtimeState);
         if (transition.enteredOffline) {
-            if (shouldSuppressOfflineNoticeFromStorage(viewModel, now)) {
+            const std::time_t dismissedAt = latestOfflineNoticeDismissal();
+            if (dismissedAt > 0 && (now - dismissedAt) <= kOfflineNoticeCooldownSeconds) {
                 notificationService.suppressUntilCleared(NoticeType::Offline);
             }
             notificationService.showNotice(buildOfflineNotice(viewModel, now));
@@ -6035,10 +6048,28 @@ public:
         }
     }
 
-    void persistProviderRefreshState(const DashboardViewModel& viewModel, std::time_t now) {
+    ProviderConnectivityUpdates persistProviderRefreshState(
+        const DashboardViewModel& viewModel,
+        std::time_t now,
+        const QuotaRefresh& refresh) {
+        ProviderConnectivityUpdates connectivityUpdates;
         if (!storageAvailable || !storageService.isOpen()) {
-            return;
+            return connectivityUpdates;
         }
+
+        connectivityUpdates.anyOfflineProvider =
+            std::any_of(viewModel.providers.begin(), viewModel.providers.end(), [](const auto& provider) {
+                return provider.state == ProviderState::Offline;
+            });
+        // Only quota fetched from a provider API in this refresh confirms that
+        // connectivity returned. Local reads and cached responses do not.
+        connectivityUpdates.providerApiConfirmedRecovery =
+            !connectivityUpdates.anyOfflineProvider &&
+            std::any_of(viewModel.providers.begin(), viewModel.providers.end(), [&refresh](const auto& provider) {
+                return (provider.state == ProviderState::Live || provider.state == ProviderState::Stale) &&
+                    refresh.providerApiKeys.count(provider.providerKey) != 0 &&
+                    !provider.quotas.empty();
+            });
 
         PersistedRuntimeState runtimeState;
         if (const auto existing = loadPersistedRuntimeState()) {
@@ -6060,15 +6091,11 @@ public:
                 continue;
             }
 
-            const auto existingConnectivity =
-                storageService.getConnectivityState(*providerId, *runtimeAccountId);
-
-            PersistedConnectivityState connectivity;
+            StagedConnectivity staged;
+            PersistedConnectivityState& connectivity = staged.connectivity;
             connectivity.providerId = *providerId;
             connectivity.accountId = *runtimeAccountId;
             connectivity.lastCheckedAt = now;
-            connectivity.noticeDismissedAt =
-                existingConnectivity.has_value() ? existingConnectivity->noticeDismissedAt : 0;
 
             PersistedSyncState syncState;
             syncState.providerId = *providerId;
@@ -6080,11 +6107,6 @@ public:
                 anyOfflineProvider = true;
                 connectivity.status = "offline";
                 connectivity.failureCategory = "provider_unreachable";
-                const bool wasOffline = existingConnectivity.has_value() &&
-                    existingConnectivity->status == "offline";
-                connectivity.nextRetryAt =
-                    now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
-
                 syncState.lastFailureAt = now;
                 syncState.lastFailureCategory = connectivity.failureCategory;
 
@@ -6098,13 +6120,15 @@ public:
                     (provider.state == ProviderState::Stale ? "stale" : "online");
                 connectivity.failureCategory.clear();
                 connectivity.nextRetryAt = 0;
-                connectivity.noticeDismissedAt = 0;
+                staged.fetchedRecovery =
+                    (provider.state == ProviderState::Live || provider.state == ProviderState::Stale) &&
+                    refresh.fetchedProviderKeys.count(provider.providerKey) != 0;
 
                 syncState.lastSuccessAt = now;
                 syncState.lastFailureCategory.clear();
             }
 
-            storageService.upsertConnectivityState(connectivity);
+            connectivityUpdates.rows.push_back(std::move(staged));
             storageService.upsertSyncState(syncState);
         }
 
@@ -6118,6 +6142,76 @@ public:
         }
 
         storageService.upsertRuntimeState(runtimeState);
+        return connectivityUpdates;
+    }
+
+    void persistConnectivityForPublication(
+        ProviderConnectivityUpdates& updates,
+        std::time_t now) {
+        if (!storageAvailable || !storageService.isOpen()) {
+            return;
+        }
+
+        // The newest saved dismissal belongs to the app-wide episode, even
+        // when a refresh omitted the provider that originally stored it.
+        const bool hasOfflineRows = std::any_of(updates.rows.begin(), updates.rows.end(), [](const auto& row) {
+            return row.connectivity.status == "offline";
+        });
+        const std::time_t carriedDismissal = hasOfflineRows ? latestOfflineNoticeDismissal() : 0;
+        // Save offline rows first so a carried dismissal is stored before the
+        // row that held it is overwritten.
+        bool offlineRowsSaved = true;
+        for (auto& row : updates.rows) {
+            PersistedConnectivityState& connectivity = row.connectivity;
+            if (connectivity.status != "offline") {
+                continue;
+            }
+            const auto existing = storageService.getConnectivityState(
+                connectivity.providerId, connectivity.accountId);
+            const bool wasOffline = existing.has_value() && existing->status == "offline";
+            connectivity.nextRetryAt =
+                now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
+            connectivity.noticeDismissedAt = carriedDismissal;
+            if (!storageService.upsertConnectivityState(connectivity)) {
+                offlineRowsSaved = false;
+            }
+        }
+        if (!offlineRowsSaved) {
+            JISTATS_LOG_WARN(LogCategory::Db, "Failed to save offline connectivity; keeping the saved notice dismissal");
+        }
+
+        const bool preserveExistingDismissals =
+            (!updates.providerApiConfirmedRecovery && !hasOfflineRows) || !offlineRowsSaved;
+        for (auto& row : updates.rows) {
+            PersistedConnectivityState& connectivity = row.connectivity;
+            if (connectivity.status == "offline") {
+                continue;
+            }
+            if (preserveExistingDismissals) {
+                const auto existing = storageService.getConnectivityState(
+                    connectivity.providerId, connectivity.accountId);
+                if (existing.has_value()) {
+                    // A local result can end only its own provider's outage.
+                    // Omitted providers keep the dismissal until they recover.
+                    const bool recoveredOwnOutage = !updates.anyOfflineProvider &&
+                        row.fetchedRecovery && existing->status == "offline";
+                    connectivity.noticeDismissedAt = recoveredOwnOutage ? 0 : existing->noticeDismissedAt;
+                }
+            }
+            storageService.upsertConnectivityState(connectivity);
+        }
+
+        // Provider API evidence ends the saved episode, including for omitted providers.
+        if (updates.providerApiConfirmedRecovery) {
+            const auto result = storageService.execute(
+                "UPDATE connectivity_state SET notice_dismissed_at_utc = NULL, "
+                "updated_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                "WHERE notice_dismissed_at_utc IS NOT NULL AND account_id IN ("
+                "SELECT id FROM accounts WHERE scope_type = 'runtime');");
+            if (!result.success()) {
+                JISTATS_LOG_WARN(LogCategory::Db, "Failed to clear the saved offline notice dismissal");
+            }
+        }
     }
 
     bool executePendingCatchUp(
@@ -6334,36 +6428,44 @@ public:
     bool applyRecoveryPersistenceCycle(
         DashboardViewModel& viewModel,
         const DashboardPreferences& preferences,
-        std::time_t now) {
-        persistProviderRefreshState(viewModel, now);
-
+        std::time_t now,
+        QuotaRefresh& refresh,
+        ProviderConnectivityUpdates& connectivityUpdates) {
         bool executedCatchUp = false;
-        bool recoveryStillPending = hasPendingRecovery();
-        if (recoveryStillPending && viewModel.runtimeState != RuntimeState::Offline) {
-            overlayPendingRecoveryState(viewModel);
+        if (viewModel.runtimeState != RuntimeState::Offline && hasPendingRecovery()) {
             executedCatchUp = executePendingCatchUp(now, viewModel, activeProviderManager());
             if (executedCatchUp) {
-                viewModel = buildDashboardViewModel(now);
+                viewModel = buildDashboardViewModel(now, refresh);
                 viewModel.preferences = preferences;
             }
-            recoveryStillPending = hasPendingRecovery();
         }
 
+        // Catch-up can replace the quota result used for the notice.
+        connectivityUpdates = persistProviderRefreshState(viewModel, now, refresh);
         applyGapAnnotations(viewModel, now);
-        if (recoveryStillPending &&
-            viewModel.runtimeState != RuntimeState::Offline) {
+        if (viewModel.runtimeState != RuntimeState::Offline && hasPendingRecovery()) {
             promotePendingRecoveryState(viewModel);
         }
 
         return executedCatchUp;
     }
 
-    void applyRuntimeViewModel(const DashboardViewModel& viewModel, std::time_t now) {
-        syncRuntimeIndicators(viewModel, now);
+    void applyRuntimeViewModel(
+        const DashboardViewModel& viewModel,
+        std::time_t now,
+        std::optional<ProviderConnectivityUpdates> connectivityUpdates = std::nullopt) {
+        syncTrayRuntimeIndicator(viewModel);
 
         DashboardViewModel presentedViewModel = viewModel;
-        applyOfflineNoticePresentation(presentedViewModel);
-        dashboardPresenter.updateViewModel(presentedViewModel);
+        {
+            std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
+            // Display-only publications have no live connectivity result.
+            if (connectivityUpdates.has_value()) {
+                persistConnectivityForPublication(*connectivityUpdates, now);
+            }
+            updateOfflineNotice(presentedViewModel, now);
+            publishDashboardWithOfflineNotice(presentedViewModel);
+        }
 
         if (viewModel.preferences.taskbarOverlayEnabled) {
 #ifdef JISTATS_ENABLE_TEST_HOOKS
@@ -6477,11 +6579,13 @@ public:
         }
     }
 
-    DashboardViewModel buildDashboardViewModel(std::time_t now) {
+    DashboardViewModel buildDashboardViewModel(std::time_t now, QuotaRefresh& refresh) {
+        refresh.fetchedProviderKeys.clear();
+        refresh.providerApiKeys.clear();
 #ifdef JISTATS_ENABLE_TEST_HOOKS
         if (testProviderManager) {
             const auto providers = testProviderManager->getEnabledProviders();
-            const auto quotaResponses = fetchQuotaResponses(*testProviderManager, now);
+            const auto quotaResponses = fetchQuotaResponses(providers, now, refresh);
             persistQuotaSnapshots(providers, quotaResponses, now);
             DashboardViewModel viewModel =
                 buildDashboardViewModelFromResolvedProviderData(now, providers, quotaResponses);
@@ -6495,7 +6599,7 @@ public:
         return viewModel;
 #else
         const auto providers = providerManager.getEnabledProviders();
-        const auto quotaResponses = fetchQuotaResponses(providerManager, now);
+        const auto quotaResponses = fetchQuotaResponses(providers, now, refresh);
         persistQuotaSnapshots(providers, quotaResponses, now);
         DashboardViewModel viewModel =
             buildDashboardViewModelFromResolvedProviderData(now, providers, quotaResponses);
@@ -6614,15 +6718,22 @@ public:
         if (importLocalActivity) {
             importEnabledLocalProviderActivity(preferences);
         }
-        DashboardViewModel viewModel = buildDashboardViewModel(now);
+        QuotaRefresh refresh{++quotaRefreshGeneration, {}, {}};
+        DashboardViewModel viewModel = buildDashboardViewModel(now, refresh);
         viewModel.preferences = preferences;
-        applyRecoveryPersistenceCycle(viewModel, preferences, now);
+        ProviderConnectivityUpdates connectivityUpdates;
+        applyRecoveryPersistenceCycle(viewModel, preferences, now, refresh, connectivityUpdates);
         applyPersistedActivitySummaries(viewModel, now);
         applyDashboardOperationalStatus(viewModel);
         if (shouldRefreshAnalysisSurface()) {
             applyAnalysisSurface(viewModel, now);
         }
-        applyRuntimeViewModel(viewModel, now);
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (beforeRuntimePublicationForTesting) {
+            beforeRuntimePublicationForTesting();
+        }
+#endif
+        applyRuntimeViewModel(viewModel, now, std::move(connectivityUpdates));
     }
 
     DashboardPreferences loadPreferences() const {
@@ -6753,6 +6864,7 @@ public:
     }
 
     void syncPresentedPreferences(const DashboardPreferences& preferences) {
+        std::lock_guard<std::mutex> noticeLock(offlineNoticeMutex);
         DashboardViewModel viewModel = dashboardPresenter.getViewModel();
         if (viewModel.appVersion.empty()) {
             return;
@@ -6976,7 +7088,7 @@ bool AppController::init(bool launchInBackground) {
 
         pImpl->dashboardPresenter.setAnalysisPresenter(&pImpl->analysisPresenter);
 
-        const std::time_t now = std::time(nullptr);
+        const std::time_t now = pImpl->currentTime();
         pImpl->markLaunchRecoveryState(now);
 
 #ifndef JISTATS_ENABLE_TEST_HOOKS
@@ -7002,6 +7114,7 @@ bool AppController::init(bool launchInBackground) {
         bool usedPersistedStartupHydration = false;
         bool executedStartupCatchUp = false;
         DashboardViewModel viewModel;
+        std::optional<Impl::ProviderConnectivityUpdates> connectivityUpdates;
         if (const auto hydratedViewModel =
                 pImpl->buildPersistedStartupHydrationViewModel(now, loadedPreferences)) {
             viewModel = *hydratedViewModel;
@@ -7009,10 +7122,12 @@ bool AppController::init(bool launchInBackground) {
         } else {
             pImpl->runProviderDiscovery();
             pImpl->importEnabledLocalProviderActivity(loadedPreferences);
-            viewModel = pImpl->buildDashboardViewModel(now);
+            Impl::QuotaRefresh refresh{++pImpl->quotaRefreshGeneration, {}, {}};
+            viewModel = pImpl->buildDashboardViewModel(now, refresh);
             viewModel.preferences = loadedPreferences; // Use persisted preferences
             executedStartupCatchUp =
-                pImpl->applyRecoveryPersistenceCycle(viewModel, loadedPreferences, now);
+                pImpl->applyRecoveryPersistenceCycle(
+                    viewModel, loadedPreferences, now, refresh, connectivityUpdates.emplace());
         }
         viewModel.preferences = loadedPreferences; // Use persisted preferences
         if (usedPersistedStartupHydration) {
@@ -7024,7 +7139,7 @@ bool AppController::init(bool launchInBackground) {
         pImpl->applyPersistedActivitySummaries(viewModel, now);
         pImpl->applyDashboardOperationalStatus(viewModel);
         pImpl->applyAnalysisSurface(viewModel, now);
-        pImpl->applyRuntimeViewModel(viewModel, now);
+        pImpl->applyRuntimeViewModel(viewModel, now, std::move(connectivityUpdates));
         pImpl->reportingService.setDashboardDataProvider([this](DashboardViewModel& reportViewModel) {
             reportViewModel = pImpl->dashboardPresenter.getViewModel();
             return true;
@@ -7115,10 +7230,6 @@ bool AppController::init(bool launchInBackground) {
             pImpl->taskbarPresenter.setOnExitCallback([this]() {
                 requestShutdown();
             });
-            pImpl->taskbarPresenter.setOfflineMenuState(
-                viewModel.offlineRetryAvailable,
-                viewModel.offlineNoticeVisible);
-            
             JISTATS_LOG_INFO(LogCategory::Startup, "TrayController ready");
         } else {
             JISTATS_LOG_WARN(LogCategory::Startup,
@@ -7133,7 +7244,7 @@ bool AppController::init(bool launchInBackground) {
         }
 #endif
 
-        pImpl->syncRuntimeIndicators(viewModel, now);
+        pImpl->syncTrayRuntimeIndicator(viewModel);
         if (pImpl->shouldQueueDeferredStartupRefresh(
                 loadedPreferences,
                 usedPersistedStartupHydration,
@@ -7375,6 +7486,10 @@ void AppController::refreshRuntimeForTesting() {
     pImpl->refreshProviderRuntimeState(pImpl->currentTime(), true, true);
 }
 
+void AppController::setBeforeRuntimePublicationForTesting(std::function<void()> callback) {
+    pImpl->beforeRuntimePublicationForTesting = std::move(callback);
+}
+
 void AppController::applyDashboardPreferencesForTesting(const DashboardPreferences& preferences) {
     DashboardPreferences effectivePreferences = pImpl->applyStartupPreferences(preferences);
     pImpl->savePreferences(effectivePreferences);
@@ -7419,8 +7534,8 @@ void AppController::setMiniMaxValidationResponseForTesting(
     }
 }
 
-void AppController::setMiniMaxValidationDelayForTesting(int delayMs) {
-    pImpl->miniMaxValidationDelayMsForTesting = std::max(0, delayMs);
+void AppController::setMiniMaxValidationReleaseForTesting(std::shared_future<void> release) {
+    pImpl->miniMaxValidationReleaseForTesting = std::move(release);
 }
 
 void AppController::setOpenAICodexRefreshPollIntervalForTesting(int intervalMs) {

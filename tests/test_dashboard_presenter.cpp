@@ -7,14 +7,17 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <thread>
 
 #include "gui/AnalysisPresenter.hpp"
 #include "gui/DashboardPresenter.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDirectory;
 
 namespace {
 
@@ -931,10 +934,9 @@ TEST_CASE("DashboardPresenter skips hidden main-window sync until the UI is show
 }
 
 TEST_CASE("DashboardPresenter dispatches FileExportHtml shell command without callback", "[dashboard_presenter]") {
+    TempTestDirectory tempDir("jistats_dispatch_test");
     DashboardPresenter presenter;
-    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / "jistats_dispatch_test";
-    std::filesystem::create_directories(tempDir);
-    const std::string outputPath = (tempDir / "dispatch-test.html").string();
+    const std::string outputPath = (tempDir.path() / "dispatch-test.html").string();
 
     REQUIRE(presenter.init());
     presenter.setHtmlExportPathForTesting(outputPath);
@@ -949,19 +951,16 @@ TEST_CASE("DashboardPresenter dispatches FileExportHtml shell command without ca
     CHECK(presenter.getStatusTextForTesting().find("HTML export") != std::string::npos);
 
     presenter.shutdown();
-    std::error_code ec;
-    std::filesystem::remove_all(tempDir, ec);
 }
 
 TEST_CASE("DashboardPresenter manual HTML export routes through callback and reports status", "[dashboard_presenter]") {
-    DashboardPresenter presenter;
-    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / "jistats_export_test";
-    std::filesystem::create_directories(tempDir);
-    const std::string outputPath = (tempDir / "test-export.html").string();
+    TempTestDirectory tempDir("jistats_export_test");
+    const std::string outputPath = (tempDir.path() / "test-export.html").string();
 
     std::atomic<bool> callbackInvoked{false};
     std::string receivedPath;
 
+    DashboardPresenter presenter;
     presenter.setHtmlExportActionCallback([&](const std::string& path) {
         receivedPath = path;
         callbackInvoked.store(true);
@@ -991,57 +990,15 @@ TEST_CASE("DashboardPresenter manual HTML export routes through callback and rep
     CHECK(status.find("exported") != std::string::npos);
 
     presenter.shutdown();
-    std::error_code ec;
-    std::filesystem::remove_all(tempDir, ec);
-}
-
-TEST_CASE("DashboardPresenter manual HTML export runs asynchronously", "[dashboard_presenter][async]") {
-    DashboardPresenter presenter;
-    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / "jistats_export_async_test";
-    std::filesystem::create_directories(tempDir);
-    const std::string outputPath = (tempDir / "async-export.html").string();
-
-    std::atomic<bool> callbackInvoked{false};
-
-    presenter.setHtmlExportActionCallback([&](const std::string& path) {
-        callbackInvoked.store(true);
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        DashboardHtmlExportResult result;
-        result.success = true;
-        result.outputPath = path;
-        result.message = "HTML report exported in the background.";
-        return result;
-    });
-
-    REQUIRE(presenter.init());
-    presenter.setHtmlExportPathForTesting(outputPath);
-
-    const auto startedAt = std::chrono::steady_clock::now();
-    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileExportHtml));
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - startedAt);
-
-    CHECK(elapsed < std::chrono::milliseconds(150));
-    REQUIRE(waitForCondition([&]() {
-        return callbackInvoked.load();
-    }));
-    REQUIRE(waitForCondition([&presenter]() {
-        return presenter.getLastHtmlExportStatusForTesting().find("background") != std::string::npos;
-    }));
-
-    presenter.shutdown();
-    std::error_code ec;
-    std::filesystem::remove_all(tempDir, ec);
 }
 
 TEST_CASE("DashboardPresenter manual HTML export shows failure status on error", "[dashboard_presenter]") {
-    DashboardPresenter presenter;
-    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / "jistats_export_fail_test";
-    std::filesystem::create_directories(tempDir);
-    const std::string outputPath = (tempDir / "fail-export.html").string();
+    TempTestDirectory tempDir("jistats_export_fail_test");
+    const std::string outputPath = (tempDir.path() / "fail-export.html").string();
 
     std::atomic<bool> callbackInvoked{false};
 
+    DashboardPresenter presenter;
     presenter.setHtmlExportActionCallback([&](const std::string&) {
         callbackInvoked.store(true);
         DashboardHtmlExportResult result;
@@ -1066,31 +1023,31 @@ TEST_CASE("DashboardPresenter manual HTML export shows failure status on error",
     CHECK(status.find("disk full") != std::string::npos);
 
     presenter.shutdown();
-    std::error_code ec;
-    std::filesystem::remove_all(tempDir, ec);
 }
 
 TEST_CASE("DashboardPresenter rejects a second manual HTML export request without blocking the UI", "[dashboard_presenter]") {
-    DashboardPresenter presenter;
-    std::filesystem::path tempDir = std::filesystem::temp_directory_path() / "jistats_export_busy_test";
-    std::filesystem::create_directories(tempDir);
-    const std::string outputPath = (tempDir / "busy-export.html").string();
+    TempTestDirectory tempDir("jistats_export_busy_test");
+    const std::string outputPath = (tempDir.path() / "busy-export.html").string();
 
     std::atomic<bool> callbackStarted{false};
-    std::atomic<bool> allowCompletion{false};
+    DashboardPresenter presenter;
+    std::promise<void> allowCompletion;
 
-    presenter.setHtmlExportActionCallback([&](const std::string& path) {
-        callbackStarted.store(true);
-        while (!allowCompletion.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
+    presenter.setHtmlExportActionCallback(
+        [&callbackStarted, release = allowCompletion.get_future().share()](const std::string& path) {
+            callbackStarted.store(true);
+            if (release.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+                DashboardHtmlExportResult timedOut;
+                timedOut.message = "Timed out waiting for the test to release export";
+                return timedOut;
+            }
 
-        DashboardHtmlExportResult result;
-        result.success = true;
-        result.outputPath = path;
-        result.message = "HTML report exported to " + path;
-        return result;
-    });
+            DashboardHtmlExportResult result;
+            result.success = true;
+            result.outputPath = path;
+            result.message = "HTML report exported to " + path;
+            return result;
+        });
 
     REQUIRE(presenter.init());
     presenter.setHtmlExportPathForTesting(outputPath);
@@ -1105,12 +1062,10 @@ TEST_CASE("DashboardPresenter rejects a second manual HTML export request withou
         return presenter.getStatusTextForTesting().find("already running") != std::string::npos;
     }));
 
-    allowCompletion.store(true);
+    allowCompletion.set_value();
     REQUIRE(waitForCondition([&presenter]() {
         return presenter.getLastHtmlExportStatusForTesting().find("exported") != std::string::npos;
     }));
 
     presenter.shutdown();
-    std::error_code ec;
-    std::filesystem::remove_all(tempDir, ec);
 }

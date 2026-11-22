@@ -3,57 +3,18 @@
 #include "db/SettingsService.hpp"
 #include "db/StorageService.hpp"
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <string>
+#include "sqlite_test_support.hpp"
+#include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::TempTestDirectory;
+using JiStats::TestSupport::requireSqlite;
 
 namespace {
-
-class TempDbFile {
-public:
-    TempDbFile() {
-        path_ = std::filesystem::temp_directory_path() / "jistats_schema_manager_test.db";
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    ~TempDbFile() {
-        std::error_code ec;
-        std::filesystem::remove(path_, ec);
-    }
-
-    std::string path() const {
-        return path_.string();
-    }
-
-private:
-    std::filesystem::path path_;
-};
-
-class TempDir {
-public:
-    explicit TempDir(const std::string& prefix) {
-        static int counter = 0;
-        path_ = std::filesystem::temp_directory_path() /
-            (prefix + "_" + std::to_string(++counter));
-        std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
-        std::filesystem::create_directories(path_, ec);
-    }
-
-    ~TempDir() {
-        std::error_code ec;
-        std::filesystem::remove_all(path_, ec);
-    }
-
-    const std::filesystem::path& path() const {
-        return path_;
-    }
-
-private:
-    std::filesystem::path path_;
-};
 
 class ScopedEnvironmentVariable {
 public:
@@ -89,6 +50,28 @@ private:
     std::string name_;
     std::optional<std::string> originalValue_;
     bool hadOriginal_ = false;
+};
+
+class ScopedWorkingDirectory {
+public:
+    explicit ScopedWorkingDirectory(const std::filesystem::path& path)
+        : originalPath_(std::filesystem::current_path()) {
+        std::filesystem::current_path(path);
+    }
+
+    ScopedWorkingDirectory(const ScopedWorkingDirectory&) = delete;
+    ScopedWorkingDirectory& operator=(const ScopedWorkingDirectory&) = delete;
+
+    ~ScopedWorkingDirectory() {
+        std::error_code error;
+        std::filesystem::current_path(originalPath_, error);
+        if (error) {
+            std::terminate();
+        }
+    }
+
+private:
+    std::filesystem::path originalPath_;
 };
 
 bool tableExists(StorageService& storage, const std::string& tableName) {
@@ -130,16 +113,6 @@ TEST_CASE("SchemaManager::getLatestVersion discovers migration files", "[schema]
     REQUIRE(latest == 12);
 }
 
-TEST_CASE("SchemaManager::loadMigration loads version 1", "[schema]") {
-    StorageService storage;
-    SchemaManager manager(storage);
-
-    // loadMigration is private, but we can test via migrateToVersion
-    // which calls loadMigration internally. Since we don't have a live DB,
-    // test getLatestVersion which exercises the same directory scanning.
-    REQUIRE(manager.getLatestVersion() >= 1);
-}
-
 TEST_CASE("SchemaManager::getStatus reports version info", "[schema]") {
     StorageService storage;
     SchemaManager manager(storage);
@@ -160,13 +133,12 @@ TEST_CASE("SchemaManager::needsMigration without DB", "[schema]") {
 }
 
 TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata when SQLite is available", "[schema][migration]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     SchemaManager manager(storage);
     REQUIRE(manager.getCurrentVersion() == 12);
@@ -222,13 +194,12 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
 }
 
 TEST_CASE("SchemaManager recovers migration 004 after partial apply when SQLite is available", "[schema][migration]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     auto resetResult = storage.execute(
         "DELETE FROM schema_version WHERE version IN (4, 5, 6);"
@@ -272,13 +243,12 @@ TEST_CASE("SchemaManager recovers migration 004 after partial apply when SQLite 
 }
 
 TEST_CASE("SchemaManager upgrades a version 6 database to version 7 usage rollups when SQLite is available", "[schema][migration]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     auto resetResult = storage.execute(
         "DELETE FROM schema_version WHERE version IN (7, 8, 9, 10, 11, 12);"
@@ -302,13 +272,12 @@ TEST_CASE("SchemaManager upgrades a version 6 database to version 7 usage rollup
 }
 
 TEST_CASE("SchemaManager upgrades a version 7 database to version 8 gap markers when SQLite is available", "[schema][migration]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     auto resetResult = storage.execute(
         "DELETE FROM schema_version WHERE version IN (8, 9, 10, 11, 12);"
@@ -329,42 +298,45 @@ TEST_CASE("SchemaManager upgrades a version 7 database to version 8 gap markers 
 }
 
 TEST_CASE("SchemaManager upgrades a version 9 database to version 10 analysis persistence metadata when SQLite is available", "[schema][migration]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    const auto sourceMigrations = std::filesystem::absolute("db_migrations");
+    TempTestDirectory fixture("jistats_schema_v9");
+    const auto fixtureRoot = std::filesystem::absolute(fixture.path());
+    const auto fixtureMigrations = fixtureRoot / "db_migrations";
+    REQUIRE(std::filesystem::create_directory(fixtureMigrations));
+
+    constexpr const char* version9Migrations[] = {
+        "001_initial_schema.sql",
+        "002_add_taskbar_preference.sql",
+        "003_add_activity_events.sql",
+        "004_add_mirror_state_tables.sql",
+        "005_add_runtime_state.sql",
+        "006_add_provider_capabilities.sql",
+        "007_add_usage_rollups.sql",
+        "008_add_gap_markers.sql",
+        "009_add_claude_provider.sql",
+    };
+    for (const char* migration : version9Migrations) {
+        CAPTURE(migration);
+        REQUIRE(std::filesystem::copy_file(sourceMigrations / migration, fixtureMigrations / migration));
+    }
+
     StorageService storage;
+    {
+        // SchemaManager discovers migrations relative to the working directory.
+        ScopedWorkingDirectory workingDirectory(fixtureRoot);
+        REQUIRE(storage.init((fixtureRoot / "test.db").string()));
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
+        SchemaManager manager(storage);
+        REQUIRE(manager.getCurrentVersion() == 9);
+        REQUIRE_FALSE(manager.needsMigration());
+
+        constexpr auto analysisMigration = "010_add_analysis_persistence_metadata.sql";
+        REQUIRE(std::filesystem::copy_file(sourceMigrations / analysisMigration, fixtureMigrations / analysisMigration));
+        REQUIRE(manager.needsMigration());
+        REQUIRE(manager.migrateToVersion(10));
     }
-
-    auto resetResult = storage.execute(
-        "DELETE FROM schema_version WHERE version IN (10, 11, 12);"
-        "DROP TABLE IF EXISTS recovery_checkpoints;"
-        "DROP TABLE IF EXISTS export_runs;");
-    REQUIRE(resetResult.success());
-
-    auto removeHourlyColumns = storage.execute(
-        "ALTER TABLE usage_rollups_hourly DROP COLUMN local_request_count;"
-        "ALTER TABLE usage_rollups_hourly DROP COLUMN imported_request_count;"
-        "ALTER TABLE usage_rollups_hourly DROP COLUMN api_request_count;"
-        "ALTER TABLE usage_rollups_hourly DROP COLUMN unknown_request_count;"
-        "ALTER TABLE usage_rollups_hourly DROP COLUMN backfilled_request_count;");
-    auto removeDailyColumns = storage.execute(
-        "ALTER TABLE usage_rollups_daily DROP COLUMN local_request_count;"
-        "ALTER TABLE usage_rollups_daily DROP COLUMN imported_request_count;"
-        "ALTER TABLE usage_rollups_daily DROP COLUMN api_request_count;"
-        "ALTER TABLE usage_rollups_daily DROP COLUMN unknown_request_count;"
-        "ALTER TABLE usage_rollups_daily DROP COLUMN backfilled_request_count;");
-
-    if (!removeHourlyColumns.success() || !removeDailyColumns.success()) {
-        SUCCEED("SQLite build does not support DROP COLUMN; version 10 upgrade reset path cannot be simulated here.");
-        return;
-    }
-
-    SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 9);
-    REQUIRE(manager.needsMigration());
-    REQUIRE(manager.migrateToVersion(10));
 
     REQUIRE(tableExists(storage, "recovery_checkpoints"));
     REQUIRE(tableExists(storage, "export_runs"));
@@ -388,13 +360,12 @@ TEST_CASE("SchemaManager upgrades a version 9 database to version 10 analysis pe
 }
 
 TEST_CASE("SchemaManager upgrades a version 10 database to version 11 quota snapshot rollups when SQLite is available", "[schema][migration]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     auto resetResult = storage.execute(
         "DELETE FROM schema_version WHERE version IN (11, 12);"
@@ -420,13 +391,12 @@ TEST_CASE("SchemaManager upgrades a version 10 database to version 11 quota snap
 }
 
 TEST_CASE("SchemaManager preserves settings rows across version 10 to 11 upgrade", "[schema][migration][settings]") {
-    TempDbFile tempDb;
+    requireSqlite();
+
+    TempTestDatabase tempDb;
     StorageService storage;
 
-    if (!storage.init(tempDb.path())) {
-        REQUIRE(storage.getLastError().find("SQLite not available") != std::string::npos);
-        return;
-    }
+    REQUIRE(storage.init(tempDb.path()));
 
     SettingsService settings(storage);
     REQUIRE(settings.setBool("runtime.openai_subscription_tracking_enabled", true));
@@ -451,7 +421,9 @@ TEST_CASE("SchemaManager preserves settings rows across version 10 to 11 upgrade
 
 TEST_CASE("StorageService redirects the default database to LOCALAPPDATA",
           "[schema][storage]") {
-    TempDir localAppData("jistats_storage_localappdata");
+    requireSqlite();
+
+    TempTestDirectory localAppData("jistats_storage_localappdata");
 
     ScopedEnvironmentVariable localAppDataEnv("LOCALAPPDATA", localAppData.path().string());
 

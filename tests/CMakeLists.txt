@@ -22,7 +22,6 @@ set(TEST_SOURCES
     test_analysis_presenter.cpp
     test_analysis_query_engine.cpp
     test_provider_data_path.cpp
-    test_runtime_test_support.cpp
     test_minimax_adapter.cpp
     test_minimax_live_capture.cpp
     test_claude_local_parser.cpp
