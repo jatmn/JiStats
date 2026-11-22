@@ -34,9 +34,9 @@ It does **not** expose the Codex rate-limit snapshot fields JiStats currently ne
 - `rate_limits.secondary.*`
 - `plan_type`
 
-For quota snapshots, SQLite provides discovery and deduplication metadata. The quota signals come from the rollouts.
+For quota snapshots, SQLite could only help discover or deduplicate rollout files. It cannot replace rollout parsing, because the quota signals come from the rollouts.
 
-A local comparison found the same rollouts through both approaches. The small difference in discovery time did not justify adding another dependency.
+A local comparison found the same rollouts through both approaches. The small difference in discovery time did not justify depending on a second Codex artifact for discovery.
 
 ## Why Keep Existing Discovery
 
