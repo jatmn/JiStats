@@ -1,10 +1,10 @@
 name: CI
 
-# Every change reaches main or release/** through a pull request, so CI runs on
-# pull requests and does not repeat the same build after the merge. Use
-# workflow_dispatch to run the full build on any branch.
 on:
   pull_request:
+    branches: [main, 'release/**']
+  # PRs may merge with an out-of-date base. Test the integrated tree on Windows.
+  push:
     branches: [main, 'release/**']
   workflow_dispatch:
 
@@ -20,35 +20,35 @@ jobs:
     name: Detect build changes
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      pull-requests: read
     outputs:
       build: ${{ steps.filter.outputs.build }}
     steps:
+      - name: Check out the PR test merge commit and its parents
+        if: github.event_name == 'pull_request'
+        id: merge-commit
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
       - name: Check whether the change can affect the build or tests
         id: filter
         env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          CHECKOUT_OUTCOME: ${{ steps.merge-commit.outcome }}
         run: |
           set -euo pipefail
-          build=false
-          reason=""
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            build=true
-            reason="$EVENT_NAME run"
-          elif [ "${CHANGED_FILES:-0}" -ge 3000 ]; then
-            # The pull request files API lists at most 3000 files.
-            build=true
-            reason="$CHANGED_FILES changed files"
-          else
-            files=$(gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/files" \
-              --jq '.[] | .filename, (.previous_filename // empty)')
-            while IFS= read -r file; do
-              [ -n "$file" ] || continue
+          build=true
+          files="$RUNNER_TEMP/jistats-changed-files"
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            reason="$GITHUB_EVENT_NAME run"
+          # Diff against the merge commit's base parent, even on a rerun.
+          # Disable rename detection to classify both paths of a rename.
+          elif [ "$CHECKOUT_OUTCOME" = success ] &&
+            git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null &&
+            git diff --no-ext-diff --no-renames --name-only -z "$GITHUB_SHA^1" "$GITHUB_SHA" -- > "$files"; then
+            build=false
+            while IFS= read -r -d '' file; do
               case "$file" in
                 # Test fixtures and the CI definition itself always need the build.
                 docs/fixtures/* | .github/workflows/ci.yml | scripts/run_sqlite_quality_gate.ps1)
@@ -59,9 +59,11 @@ jobs:
                 *)
                   build=true ;;
               esac
-              reason="$file"
+              printf -v reason '%q' "$file"
               break
-            done <<< "$files"
+            done < "$files"
+          else
+            reason="could not determine the changed files for the PR test merge commit"
           fi
           if [ "$build" = true ]; then
             message="Build and tests required ($reason)."
@@ -94,7 +96,7 @@ jobs:
   linux-cross:
     name: Linux cross-build
     needs: changes
-    if: needs.changes.outputs.build == 'true'
+    if: github.event_name != 'push' && needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
