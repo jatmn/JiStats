@@ -1,7 +1,7 @@
 # JiStats - AI Usage Tracker
 # CMake project configuration
 
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.20)
 project(JiStats VERSION 1.0.0 LANGUAGES C CXX)
 
 include(CTest)
@@ -25,17 +25,12 @@ if(WIN32 AND JISTATS_ENABLE_UPX)
     endif()
 
     if(NOT JISTATS_UPX_EXECUTABLE)
-        set(JISTATS_BUNDLED_UPX "${CMAKE_SOURCE_DIR}/tools/upx/upx.exe")
-        if(CMAKE_HOST_WIN32 AND EXISTS "${JISTATS_BUNDLED_UPX}")
-            set(JISTATS_UPX_EXECUTABLE "${JISTATS_BUNDLED_UPX}")
-        else()
-            # Search for a host tool separately from the cached user override.
-            find_program(JISTATS_UPX_FROM_PATH NAMES upx NO_CMAKE_FIND_ROOT_PATH)
-            if(JISTATS_UPX_FROM_PATH)
-                set(JISTATS_UPX_EXECUTABLE "${JISTATS_UPX_FROM_PATH}")
-            endif()
-            unset(JISTATS_UPX_FROM_PATH CACHE)
+        # Search for a host tool separately from the cached user override.
+        find_program(JISTATS_UPX_FROM_PATH NAMES upx NO_CMAKE_FIND_ROOT_PATH)
+        if(JISTATS_UPX_FROM_PATH)
+            set(JISTATS_UPX_EXECUTABLE "${JISTATS_UPX_FROM_PATH}")
         endif()
+        unset(JISTATS_UPX_FROM_PATH CACHE)
     endif()
 
     if(JISTATS_UPX_EXECUTABLE)
@@ -71,6 +66,30 @@ include_directories(
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
+# Third-party sources are downloaded unmodified from pinned upstream releases
+# and verified by hash. Set FETCHCONTENT_SOURCE_DIR_<NAME> to use a local copy.
+include(FetchContent)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+
+FetchContent_Declare(sqlite
+    URL https://www.sqlite.org/2026/sqlite-amalgamation-3530000.zip
+    URL_HASH SHA256=bf3733d7c71b3ab0f6fd8a9ea0052ad87fa037d94333e14ce09878ba3492c3b0
+)
+# SOURCE_SUBDIR points at a directory without a CMakeLists.txt so only the
+# headers and amalgamation are used, not the upstream build.
+FetchContent_Declare(spdlog
+    URL https://github.com/gabime/spdlog/archive/refs/tags/v1.15.1.tar.gz
+    URL_HASH SHA256=25c843860f039a1600f232c6eb9e01e6627f7d030a2ae5e232bdd3c9205d26cc
+    SOURCE_SUBDIR include
+)
+FetchContent_Declare(catch2
+    URL https://github.com/catchorg/Catch2/archive/refs/tags/v3.7.1.tar.gz
+    URL_HASH SHA256=c991b247a1a0d7bb9c39aa35faf0fe9e19764213f28ffba3109388e62ee0269c
+    SOURCE_SUBDIR extras
+)
+
 # Find SQLite3
 set(JISTATS_SQLITE_TARGET "")
 if(JISTATS_USE_SYSTEM_SQLITE)
@@ -85,35 +104,27 @@ if(JISTATS_USE_SYSTEM_SQLITE)
     set(JISTATS_SQLITE_TARGET SQLite::SQLite3)
     add_compile_definitions(JISTATS_USE_SYSTEM_SQLITE=1)
 else()
-    set(JISTATS_BUNDLED_SQLITE_DIR ${CMAKE_SOURCE_DIR}/third_party/sqlite)
-    if(EXISTS "${JISTATS_BUNDLED_SQLITE_DIR}/sqlite3.c" AND EXISTS "${JISTATS_BUNDLED_SQLITE_DIR}/sqlite3.h")
-        add_library(jistats_sqlite STATIC
-            ${JISTATS_BUNDLED_SQLITE_DIR}/sqlite3.c
-        )
-        target_include_directories(jistats_sqlite PUBLIC
-            ${JISTATS_BUNDLED_SQLITE_DIR}
-        )
-        target_compile_definitions(jistats_sqlite PUBLIC JISTATS_HAS_SQLITE=1)
-        if(MSVC)
-            target_compile_options(jistats_sqlite PRIVATE /FS /W0)
-        endif()
-        set(JISTATS_SQLITE_TARGET jistats_sqlite)
-    else()
-        message(STATUS "Bundled SQLite amalgamation not found in third_party/sqlite/.")
+    FetchContent_MakeAvailable(sqlite)
+    add_library(jistats_sqlite STATIC
+        ${sqlite_SOURCE_DIR}/sqlite3.c
+    )
+    target_include_directories(jistats_sqlite PUBLIC
+        ${sqlite_SOURCE_DIR}
+    )
+    target_compile_definitions(jistats_sqlite PUBLIC JISTATS_HAS_SQLITE=1)
+    if(MSVC)
+        target_compile_options(jistats_sqlite PRIVATE /FS /W0)
     endif()
+    set(JISTATS_SQLITE_TARGET jistats_sqlite)
 endif()
 
 # Add spdlog (header-only logging library)
-if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/spdlog/include/spdlog/spdlog.h")
-    add_library(spdlog INTERFACE)
-    target_include_directories(spdlog INTERFACE
-        ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
-    )
-    set(JISTATS_HAS_SPDLOG ON)
-else()
-    message(STATUS "spdlog not found in third_party/spdlog/")
-    set(JISTATS_HAS_SPDLOG OFF)
-endif()
+FetchContent_MakeAvailable(spdlog)
+add_library(spdlog INTERFACE)
+target_include_directories(spdlog INTERFACE
+    ${spdlog_SOURCE_DIR}/include
+)
+set(JISTATS_HAS_SPDLOG ON)
 
 if(JISTATS_BUILD_TESTS)
     enable_testing()

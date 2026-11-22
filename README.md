@@ -11,7 +11,7 @@ JiStats is a local-first Windows 11 desktop app for monitoring AI provider quota
 
 ## Build and packaging
 
-The build and test commands below use CMake 3.20 or newer.
+The build requires CMake 3.20 or newer.
 
 ### Building on Linux
 
@@ -51,26 +51,22 @@ cmake --build build-ucrt
 ctest --test-dir build-ucrt --output-on-failure
 ```
 
-Release outputs are in `build-ucrt/bin/`. On Windows, the optional packed `JiStats-upx.exe` uses the bundled UPX. Configure with `-DJISTATS_ENABLE_UPX=OFF` to omit it.
+Release outputs are in `build-ucrt/bin/`. To also produce the optional packed `JiStats-upx.exe`, put an official [UPX release](https://github.com/upx/upx/releases) on `PATH` or pass `-DJISTATS_UPX_EXECUTABLE=C:/path/to/upx.exe` at configure time. Configure with `-DJISTATS_ENABLE_UPX=OFF` to skip it.
 
 For an existing Visual Studio build tree, run `pwsh -File .\scripts\build_release.ps1 -BuildDir build`. Replace `build` with your configured directory. The helper stops running JiStats binaries to release file locks and builds the Release configuration. The Visual Studio generator puts executables under that directory's `bin/Release/`.
 
 ## 📦 Third-Party Components
 
-JiStats keeps its default dependency sources in the checkout. To select an installed SQLite, configure with `-DJISTATS_USE_SYSTEM_SQLITE=ON`.
+Third-party sources are not stored in this repository. The first CMake configure downloads the pinned upstream releases below and verifies each archive's SHA-256 hash; the versions and hashes are declared in [CMakeLists.txt](CMakeLists.txt). Downloads are cached in the build directory's `_deps/`, so later builds in that directory work offline. To build without network access, pass `-DFETCHCONTENT_SOURCE_DIR_<NAME>=/path/to/extracted/release` for `SQLITE`, `SPDLOG` and `CATCH2`. To use an installed SQLite instead of the pinned amalgamation, configure with `-DJISTATS_USE_SYSTEM_SQLITE=ON`.
 
-| Component | Upstream | Location | Purpose | License |
+| Component | Version | Upstream | Purpose | License |
 | --- | --- | --- | --- | --- |
-| SQLite amalgamation | https://www.sqlite.org/ | `third_party/sqlite/` | bundled local storage engine | SQLite upstream terms |
-| Catch2 amalgamation | https://github.com/catchorg/Catch2 | `third_party/catch2/` | test framework used by `JiStatsTests.exe` | Catch2 upstream terms |
-| spdlog | https://github.com/gabime/spdlog | `third_party/spdlog/include/` | header-only logging | MIT |
-| bundled `fmt` inside spdlog | https://github.com/fmtlib/fmt | `third_party/spdlog/include/spdlog/fmt/bundled/` | formatting support used through spdlog | MIT |
-| UPX | https://github.com/upx/upx | `tools/upx/` | optional release-size reduction tool for `-upx` variants | GPL v2 or later with the UPX special exception |
+| SQLite amalgamation | 3.53.0 | https://www.sqlite.org/ | local storage engine, compiled into the executables | Public domain |
+| spdlog | 1.15.1 | https://github.com/gabime/spdlog | header-only logging, compiled into the executables | MIT |
+| `fmt` bundled inside spdlog | 11.1.3 | https://github.com/fmtlib/fmt | formatting support used through spdlog | MIT with an object-code exception |
+| Catch2 amalgamation | 3.7.1 | https://github.com/catchorg/Catch2 | test framework, only downloaded with `-DJISTATS_BUILD_TESTS=ON` | BSL-1.0 |
 
-Notes:
-
-- `tools/upx/` is a build/distribution tool path, not a runtime dependency of the app.
-- See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for the current notice file and redistribution notes.
+UPX is an optional external build tool for the `-upx` release variants. It is not stored in the repository or required by the app. See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for the notices that ship with release binaries.
 
 ## License
 
@@ -80,6 +76,6 @@ Business and internal use are allowed, but selling JiStats itself requires separ
 
 This repository is not distributed under a single license for every file. Bundled third-party components keep their own licenses and notices.
 
-For redistribution or packaging, keep the root `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the upstream third-party license texts together. If shipping UPX-packed binaries, also include the matching upstream UPX `LICENSE` and `COPYING` texts for the exact official UPX release used. The current bundled copies are `tools/upx/LICENSE` and `tools/upx/COPYING` for UPX `5.1.1`.
+For redistribution or packaging, keep the root `LICENSE` and `THIRD_PARTY_NOTICES.md` together. If shipping UPX-packed binaries, also include the upstream UPX `LICENSE` and `COPYING` texts from the exact official UPX release used.
 
 See `LICENSE` and `THIRD_PARTY_NOTICES.md` for the current license disclosures.

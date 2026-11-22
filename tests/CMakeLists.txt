@@ -1,6 +1,8 @@
+FetchContent_MakeAvailable(catch2)
+
 # Both builds use the same Catch2 tests and production sources for portable components.
 add_executable(JiStatsTests
-    ${CMAKE_SOURCE_DIR}/third_party/catch2/catch_amalgamated.cpp
+    ${catch2_SOURCE_DIR}/extras/catch_amalgamated.cpp
     test_mirror_engine.cpp
     test_logger.cpp
     test_local_observation_service.cpp
@@ -79,7 +81,7 @@ endif()
 
 target_include_directories(JiStatsTests PRIVATE
     ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/third_party/catch2
+    ${catch2_SOURCE_DIR}/extras
 )
 
 if(JISTATS_SQLITE_TARGET)
