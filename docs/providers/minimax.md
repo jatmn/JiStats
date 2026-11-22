@@ -20,3 +20,9 @@ MiniMax is opt-in and mirrors two subscription surfaces. In **File → Settings 
 ## PAYG
 
 A dedicated PAYG key yielded per-request token usage on the text API in the recorded probe. Separate aggregate history and in-app PAYG import/polling remain deferred. Use the [MiniMax fixture inventory](../fixtures/minimax/README.md) for the payload samples and capture procedures.
+
+## Building the MiniMax CLI
+
+For standalone readiness, capture, and diagnostics commands, add `-DJISTATS_BUILD_MINIMAX_CLI=ON` to the Windows-target CMake configure command. Follow the [Linux cross-build instructions](../../README.md#building-on-linux) or the [Windows build instructions](../../README.md#building-on-windows).
+
+The option defaults to `OFF`. Enabling it builds `JiStatsMiniMaxCli.exe` alongside the desktop app, and `cmake --install` installs it to the install prefix's `bin/` directory. The desktop MiniMax integration is available in either configuration. `JISTATS_BUILD_TESTS` controls the tests independently.

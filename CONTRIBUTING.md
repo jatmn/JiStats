@@ -4,7 +4,7 @@ Open a pull request against the default branch and describe the behavior you cha
 
 Keep provider captures, credentials, and personal data out of public issues and pull requests. Use synthetic or redacted [fixtures](docs/fixtures/README.md) in tests. Send vulnerability reports through the [security policy](SECURITY.md).
 
-Dependabot checks GitHub Actions for version updates. It does not track the C++ libraries pinned in [CMakeLists.txt](CMakeLists.txt). To upgrade one, update its `URL` and `URL_HASH` together and the versions in the [README](README.md#-third-party-components) and [notices](THIRD_PARTY_NOTICES.md). When updating Pullfrog, review the action pin and command payload version together.
+Dependabot checks GitHub Actions for version updates. It does not track the C++ libraries pinned in [CMakeLists.txt](CMakeLists.txt). To upgrade one, update its `URL` and `URL_HASH` together and the corresponding version in the [notices](THIRD_PARTY_NOTICES.md). When updating Pullfrog, review the action pin and command payload version together.
 
 ### Pullfrog
 
