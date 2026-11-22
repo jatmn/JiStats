@@ -1,7 +1,7 @@
 import { appendFileSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const OWNER_ID = 12479882;
+export const OWNER_ID = 12479882;
 const REPOSITORY = 'jatmn/JiStats';
 // Matches the pinned action in .github/workflows/pullfrog.yml. Pullfrog's
 // structured prompt is version-specific; verify its schema when updating both.
