@@ -26,7 +26,7 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 
 ## Build and verify
 
-From Linux, run the portable tests before pushing code changes. For Windows-facing changes, also cross-build the app, CLI and full test executable with MinGW-w64. Both command sequences and dependencies are in the [Linux build instructions](README.md#building-on-linux). Add `-DJISTATS_BUILD_TESTS=ON` to the cross-build configuration to include the full suite.
+From Linux, run the portable tests before pushing code changes. For Windows-facing changes, also cross-build the app, CLI and full test executable with MinGW-w64. Both command sequences and dependencies are in the [Linux build instructions](README.md#building-on-linux). Add `-DJISTATS_BUILD_TESTS=ON` and `-DJISTATS_BUILD_MINIMAX_CLI=ON` to the cross-build configuration to include the full suite and the CLI.
 
 CI executes the cross-built suite on a hosted Windows runner for PRs, protected-branch pushes and manual dispatch. Use the [build and packaging instructions](README.md#build-and-packaging) for MinGW releases from Linux or Windows.
 

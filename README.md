@@ -24,7 +24,7 @@ cmake --build build-linux
 ctest --test-dir build-linux --output-on-failure
 ```
 
-To build the Windows app and CLI on Linux, use a separate build directory with MinGW-w64 and ImageMagick.
+To build the Windows app on Linux, use a separate build directory with MinGW-w64 and ImageMagick.
 
 ```bash
 sudo apt install cmake ninja-build g++-mingw-w64-x86-64-posix imagemagick
@@ -32,7 +32,7 @@ cmake -S . -B build-mingw -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw
 cmake --build build-mingw
 ```
 
-`build-mingw/bin/` then holds `JiStats.exe` and `JiStatsMiniMaxCli.exe`. Add `-DJISTATS_BUILD_TESTS=ON` for `JiStatsTests.exe`. The executables link the MinGW runtime statically. ImageMagick generates the app icon when cross-building. To produce `JiStats-upx.exe`, put a Linux `upx` on `PATH` or pass `-DJISTATS_UPX_EXECUTABLE=/path/to/upx` at configure time.
+`build-mingw/bin/` then holds `JiStats.exe`. Add `-DJISTATS_BUILD_TESTS=ON` for `JiStatsTests.exe`. The executables link the MinGW runtime statically. ImageMagick generates the app icon when cross-building. To produce `JiStats-upx.exe`, put a Linux `upx` on `PATH` or pass `-DJISTATS_UPX_EXECUTABLE=/path/to/upx` at configure time.
 
 Cross-builds use bundled SQLite by default. With bundled or statically linked SQLite, you can copy the executables to Windows without extra DLLs. To use `-DJISTATS_USE_SYSTEM_SQLITE=ON`, install SQLite built for Windows x64 into the MinGW target prefix or set `CMAKE_FIND_ROOT_PATH` to the Windows dependency prefix. If the build links a shared SQLite package, copy that package's SQLite DLL (typically `sqlite3.dll`) alongside the executables. Configure in a fresh build directory if CMake previously cached Linux SQLite paths.
 
@@ -54,6 +54,10 @@ ctest --test-dir build-ucrt --output-on-failure
 Release outputs are in `build-ucrt/bin/`. To also produce the optional packed `JiStats-upx.exe`, put an official [UPX release](https://github.com/upx/upx/releases) on `PATH` or pass `-DJISTATS_UPX_EXECUTABLE=C:/path/to/upx.exe` at configure time. Configure with `-DJISTATS_ENABLE_UPX=OFF` to skip it.
 
 For an existing Visual Studio build tree, run `pwsh -File .\scripts\build_release.ps1 -BuildDir build`. Replace `build` with your configured directory. The helper stops running JiStats binaries to release file locks and builds the Release configuration. The Visual Studio generator puts executables under that directory's `bin/Release/`.
+
+### Building the MiniMax CLI
+
+For standalone MiniMax readiness, capture, and diagnostics commands, add `-DJISTATS_BUILD_MINIMAX_CLI=ON` to either Windows-target CMake configure command above. The option defaults to `OFF`. When enabled, the build produces `JiStatsMiniMaxCli.exe` alongside the app, and `cmake --install` installs it to the install prefix's `bin/` directory. The desktop MiniMax integration is available in either configuration, and `JISTATS_BUILD_TESTS` controls the tests independently.
 
 ## 📦 Third-Party Components
 

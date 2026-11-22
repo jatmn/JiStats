@@ -139,14 +139,20 @@ jobs:
           cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
           cmake --build build-linux --parallel
           ctest --test-dir build-linux --output-on-failure
-      - name: Configure
-        run: >-
-          cmake -S . -B build-mingw -G Ninja
-          -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake
-          -DCMAKE_BUILD_TYPE=Debug
-          -DJISTATS_BUILD_TESTS=ON
+      - name: Check the default build and enable the MiniMax CLI and tests
+        shell: bash
+        run: |
+          cmake -S . -B build-mingw -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake \
+            -DCMAKE_BUILD_TYPE=Debug
+          targets=$(ninja -C build-mingw -t targets all)
+          if grep -q '^JiStatsMiniMaxCli:' <<< "$targets"; then
+            echo "::error::The default Windows build has a MiniMax CLI target"
+            exit 1
+          fi
+          cmake -S . -B build-mingw -DJISTATS_BUILD_TESTS=ON -DJISTATS_BUILD_MINIMAX_CLI=ON
       - name: Build the app, MiniMax CLI, and tests
-        run: cmake --build build-mingw --parallel
+        run: cmake --build build-mingw --parallel --target JiStats JiStatsMiniMaxCli JiStatsTests
       - name: Upload the test executable for Windows
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
