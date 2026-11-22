@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { isAuthorizedReview } from './pullfrog-review-check.mjs';
@@ -99,4 +100,25 @@ test('fails immediately for access errors and rate limits', async (t) => {
     });
     assert.equal(fetch.mock.callCount(), index + 1);
   }
+});
+
+test('requires verified author on the automatic review step', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/pullfrog.yml', import.meta.url), 'utf8');
+  const [, automatic] = workflow.split('\n  auto-review:\n');
+  assert.ok(automatic, 'Expected the automatic review job');
+  const job = automatic.split(/^ {2}\S/m, 1)[0];
+  const condition = job.match(/^ {4}if: >-\n((?: {6}\S[^\n]*\n)+)/m)?.[1];
+  assert.ok(condition?.split('\n').includes("      github.repository == 'jatmn/JiStats' &&"));
+  const steps = job.split(/^ {6}- /m);
+  const authorize = steps.find((step) => step.startsWith('name: Verify the pull request author\n'));
+  const review = steps.find((step) => step.startsWith('name: Review the pull request\n'));
+  assert.ok(authorize && review, 'Expected authorization and review steps');
+  assert.ok(steps.indexOf(authorize) < steps.indexOf(review));
+  assert.ok(authorize.split('\n').includes('        id: authorize'));
+  assert.ok(authorize.split('\n').includes('        run: node scripts/pullfrog-review-check.mjs'));
+  assert.ok(review.split('\n').includes("        if: steps.authorize.outputs.authorized == 'true'"));
+  assert.match(review, /^ {8}uses: pullfrog\/pullfrog@[0-9a-f]{40}(?: +#.*)?$/m);
+  const [, withInputs] = review.split('\n        with:\n');
+  const inputs = withInputs?.split(/^ {8}\S/m, 1)[0];
+  assert.ok(inputs?.split('\n').includes('          prompt: ${{ inputs.prompt }}'));
 });
