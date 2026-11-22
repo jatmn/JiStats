@@ -12,8 +12,6 @@ Follow the [release queue](release-checklist.md#evidence-backed-release-queue) a
 
 Verify the packaged SQLite baseline, historical version 12 repair, and the older-database warning in the Windows release-candidate checks. The [release queue](release-checklist.md#evidence-backed-release-queue) tracks that signoff.
 
-Complete the [CodeQL cutover](validation/testing.md#codeql-scanning). The repository workflow is active, with GitHub-managed default setup still publishing results.
-
 The local [Codex SQLite import](providers/openai.md#codex-sqlite-privacy-boundary) can run at startup with OpenAI subscription tracking off. The setting behavior remains an open follow-up under the opt-in policy.
 
 Confirm that [Pullfrog automatic reviews](../CONTRIBUTING.md#pullfrog) run while an owner-authored PR is still a draft.
@@ -22,7 +20,9 @@ Confirm that [Pullfrog automatic reviews](../CONTRIBUTING.md#pullfrog) run while
 
 Update the tracker when work changes state. At handoff, record what changed, the revision, the verification commands and results, and any blocker or next step. Keep dated release evidence in the release checklist. Record new decisions with their rationale and link to the current contract.
 
-- Audited the documentation against main at `eba30e2`. Updated the quick start, Codex SQLite behavior, build and CI guidance, and release evidence. The [Linux CMake/Ninja build](../README.md#building-on-linux) passed CTest with bundled SQLite, covering 125 cases and 920 assertions. The CodeQL cutover and Codex SQLite setting behavior remain open.
+- Completed the CodeQL cutover after GitHub-managed default setup scanned Markdown-only PR #20. Disabled default setup and removed `CODEQL_UPLOAD_DISABLED`. A manual scan on `eba30e2` published C/C++, JavaScript/TypeScript, and GitHub Actions results through the repository workflow. [CodeQL analysis run](https://github.com/jatmn/JiStats/actions/runs/45069746335)
+
+- Audited the documentation against main at `eba30e2`. Updated the quick start, Codex SQLite behavior, build and CI guidance, and release evidence. The [Linux CMake/Ninja build](../README.md#building-on-linux) passed CTest with bundled SQLite, covering 125 cases and 920 assertions. The Codex SQLite setting behavior remains open.
 
 - Fixed an intermittent shutdown hang seen in the [Windows test stack trace](https://github.com/jatmn/JiStats/actions/runs/45066218501/job/137343424464). AppController now sets the stop flag while holding both worker wait mutexes before waking and joining the workers. A controlled shutdown interleaving reproduced the missed wakeup and verified the fix.
 
@@ -32,9 +32,9 @@ Update the tracker when work changes state. At handoff, record what changed, the
 
 - Switched the [formatting check](validation/testing.md#pull-request-lint) to Git and native LLVM 18 against base `252209f`. Ran `actionlint -color` and exercised `bash scripts/check_changed_format.sh <base-commit>` on local Git histories with clean edits, formatting errors, and deletions.
 
-- Added [repository-managed CodeQL scanning](validation/testing.md#codeql-scanning) after [GitHub's managed scan](https://github.com/jatmn/JiStats/actions/runs/45060965031) ran on docs-only PR #17 (`e18eb23`). The local Git replay skipped analysis for the PR and its merge push (`252209f`) and retained analysis for code, workflows, and fixture payloads. Follow the verification guide's setup transition after the workflow lands on `main`.
+- Added [repository-managed CodeQL scanning](validation/testing.md#codeql-scanning) after [GitHub's managed scan](https://github.com/jatmn/JiStats/actions/runs/45060965031) ran on docs-only PR #17 (`e18eb23`). The local Git replay skipped analysis for the PR and its merge push (`252209f`) and retained analysis for code, workflows, and fixture payloads.
 
-- Paused uploads from the replacement workflow in [PR #18](https://github.com/jatmn/JiStats/pull/18) after GitHub rejected them with default setup enabled. The replacement still runs its analyses, and default setup continues publishing results until the [cutover](validation/testing.md#codeql-scanning).
+- Paused uploads from the replacement workflow in [PR #18](https://github.com/jatmn/JiStats/pull/18) after GitHub rejected them with default setup enabled. Default setup published results while the replacement ran with uploads paused.
 
 ## Current decisions
 

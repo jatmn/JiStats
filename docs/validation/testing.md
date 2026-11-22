@@ -43,11 +43,7 @@ For full-tree formatting and static analysis on Windows, install `mingw-w64-ucrt
 
 The [repository CodeQL workflow](../../.github/workflows/codeql.yml) scans C/C++, JavaScript/TypeScript, and GitHub Actions on same-repository pull requests and pushes for `main` and `release/**`. It skips the analysis jobs when the tested diff contains only Markdown documentation. Markdown inside the synthetic Kimi runtime and redacted ChatGPT export payloads still triggers scans. The workflow also scans weekly, on manual dispatch, and when a diff cannot be verified.
 
-The repository workflow is active on `main`. GitHub-managed default setup still publishes results and can scan docs-only changes. During the cutover, `CODEQL_UPLOAD_DISABLED=true` lets the repository workflow run its analyses with uploads disabled. To finish the cutover:
-
-1. Disable GitHub-managed default setup in **Settings → Advanced Security → CodeQL analysis**. See [GitHub's setup transition instructions](https://docs.github.com/en/code-security/reference/code-scanning/troubleshoot-analysis-errors/results-different-than-expected).
-2. Delete `CODEQL_UPLOAD_DISABLED` under **Settings → Secrets and variables → Actions → Variables** so the repository workflow publishes results.
-3. Enable the repository workflow if GitHub lists it as disabled, then dispatch **CodeQL analysis** on `main` and confirm that all three languages publish results.
+The repository workflow publishes results to **Security and quality → Code scanning**. To scan a branch on demand, select **Run workflow** on the **CodeQL analysis** page in GitHub Actions.
 
 ## Native UI coverage
 
