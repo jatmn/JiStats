@@ -3,13 +3,14 @@ name: CI
 on:
   pull_request:
     branches: [main, 'release/**']
-  # PRs may merge with an out-of-date base. Test the integrated tree on Windows.
+  # PRs may merge with an out-of-date base. Test integrated build changes on Windows.
   push:
     branches: [main, 'release/**']
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # A docs-only push must never cancel a pending or running build for a prior push.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'latest' }}
   cancel-in-progress: true
 
 permissions:
@@ -20,53 +21,93 @@ jobs:
     name: Detect build changes
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     outputs:
       build: ${{ steps.filter.outputs.build }}
     steps:
-      - name: Check out the PR test merge commit and its parents
-        if: github.event_name == 'pull_request'
-        id: merge-commit
+      - name: Check out the tested revision
+        if: github.event_name != 'workflow_dispatch'
+        id: tested-revision
         continue-on-error: true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 2
+          # A push can contain multiple commits. Fetch its full history to find before.
+          fetch-depth: ${{ github.event_name == 'push' && '0' || '2' }}
           persist-credentials: false
       - name: Check whether the change can affect the build or tests
         id: filter
         env:
-          CHECKOUT_OUTCOME: ${{ steps.merge-commit.outcome }}
+          CHECKOUT_OUTCOME: ${{ steps.tested-revision.outcome }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
         run: |
           set -euo pipefail
           build=true
+          base=
           files="$RUNNER_TEMP/jistats-changed-files"
-          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+          if [ "$CHECKOUT_OUTCOME" = success ]; then
+            case "$GITHUB_EVENT_NAME" in
+              pull_request)
+                # Diff against the test merge commit's base parent, even on a rerun.
+                if git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null; then
+                  base="$GITHUB_SHA^1"
+                fi
+                ;;
+              push)
+                base="$PUSH_BEFORE"
+                ;;
+            esac
+          fi
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             reason="$GITHUB_EVENT_NAME run"
-          # Diff against the merge commit's base parent, even on a rerun.
           # Disable rename detection to classify both paths of a rename.
-          elif [ "$CHECKOUT_OUTCOME" = success ] &&
-            git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null &&
-            git diff --no-ext-diff --no-renames --name-only -z "$GITHUB_SHA^1" "$GITHUB_SHA" -- > "$files"; then
+          elif [ -n "$base" ] &&
+            git diff --no-ext-diff --no-renames --name-only -z "$base" "$GITHUB_SHA" -- > "$files"; then
             build=false
             while IFS= read -r -d '' file; do
               case "$file" in
-                # Test fixtures and the CI definition itself always need the build.
-                docs/fixtures/* | .github/workflows/ci.yml | scripts/run_sqlite_quality_gate.ps1)
-                  build=true ;;
-                # Documentation, repository metadata, and scripts that CI does not run.
-                *.md | docs/* | .github/* | scripts/* | LICENSE | .gitignore | .clang-format | .clang-tidy | assets/logo.png)
+                # Keep all files in test payload directories as build inputs.
+                docs/fixtures/kimi/synthetic_local_runtime/* | docs/fixtures/openai/chatgpt-export-redacted/*)
+                  ;;
+                *.md)
                   continue ;;
-                *)
-                  build=true ;;
+                docs/fixtures/* | .github/workflows/ci.yml | scripts/run_sqlite_quality_gate.ps1)
+                  ;;
+                docs/*)
+                  continue ;;
+                # Keep the existing PR-only exemption for non-build metadata and scripts.
+                .github/* | scripts/* | LICENSE | .gitignore | .clang-format | .clang-tidy | assets/logo.png)
+                  if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+                    continue
+                  fi
+                  ;;
               esac
+              build=true
               printf -v reason '%q' "$file"
               break
             done < "$files"
           else
-            reason="could not determine the changed files for the PR test merge commit"
+            reason="could not determine the changed files for the tested revision"
+          fi
+          if [ "$build" = false ] && [ "$GITHUB_EVENT_NAME" = push ]; then
+            # The previous push must have passed on this branch. Its success
+            # either comes from Windows or carries forward an earlier pass.
+            if ! previous_run=$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f event=push -f branch="$GITHUB_REF_NAME" -f head_sha="$PUSH_BEFORE" \
+              --jq '.workflow_runs | max_by(.run_number) | select(.status == "completed" and .conclusion == "success") | .html_url') ||
+              [ -z "$previous_run" ]; then
+              build=true
+              reason="no successful CI run for the previous branch tip"
+            fi
           fi
           if [ "$build" = true ]; then
             message="Build and tests required ($reason)."
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then
+            message="Documentation-only push; reusing Windows validation from $previous_run."
           else
             message="No build or test inputs changed; skipping the Windows and Linux builds."
           fi

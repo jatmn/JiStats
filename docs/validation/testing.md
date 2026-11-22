@@ -23,7 +23,9 @@ ctest --test-dir build -C Debug --output-on-failure
 
 [tests/CMakeLists.txt](../../tests/CMakeLists.txt) registers `JiStatsTests` and sets its working directory so migrations and fixture paths resolve. For a focused run, use a Catch2 filter such as `[openai]`, `[schema][migration]`, or `[taskbar]` with `build\bin\Debug\JiStatsTests.exe`.
 
-Run [the SQLite gate script](../../scripts/run_sqlite_quality_gate.ps1) locally. The [CI workflow](../../.github/workflows/ci.yml) runs the Windows SQLite gate and a Linux MinGW-w64 cross-build for build-affecting pull requests targeting `main` or `release/**` and for manual runs. It classifies PR paths against the test merge commit. Documentation and repository metadata can skip both builds. Changes under `docs/fixtures/` trigger both because tests read those fixtures. Pushes to either protected branch run the Windows gate on the integrated tree. The required `CI passed` check reports the combined result.
+Run [the SQLite gate script](../../scripts/run_sqlite_quality_gate.ps1) locally. The [CI workflow](../../.github/workflows/ci.yml) runs the Windows SQLite gate and a Linux MinGW-w64 cross-build for build-affecting pull requests targeting `main` or `release/**` and for manual runs.
+
+Pull requests classify paths against the test merge commit. Documentation, including Markdown notes in the fixture archive, and certain repository metadata can skip both builds. Edits to fixture payloads, the CI workflow, or the gate script still trigger both builds. Pushes to either protected branch compare the previous and new tips. A documentation-only push can reuse Windows validation after the previous tip's CI run succeeds on the same branch. A failed, pending, or missing run triggers a fresh Windows gate. If CI cannot determine the changed paths, it runs the applicable builds. The required `CI passed` check reports the combined result, including documentation-only runs.
 
 ## Pull request lint
 
