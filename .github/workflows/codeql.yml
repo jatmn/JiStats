@@ -1,0 +1,92 @@
+name: CodeQL analysis
+
+on:
+  pull_request:
+    branches: [main, 'release/**']
+  push:
+    branches: [main, 'release/**']
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect CodeQL changes
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: ${{ github.event_name == 'push' && '0' || '2' }}
+          persist-credentials: false
+      - name: Identify documentation-only changes
+        id: filter
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$PUSH_BEFORE"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] &&
+            git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null; then
+            base="$GITHUB_SHA^1"
+          fi
+
+          # Compare the complete tested diff. GitHub's trigger path filters can
+          # omit files in large changes. Count both sides of any rename.
+          files="$RUNNER_TEMP/jistats-codeql-changes"
+          if [ -z "$base" ] ||
+            ! git diff --no-ext-diff --no-renames --name-only -z "$base" "$GITHUB_SHA" -- > "$files"; then
+            exit 0
+          fi
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              docs/fixtures/kimi/synthetic_local_runtime/* | docs/fixtures/openai/chatgpt-export-redacted/*)
+                exit 0 ;;
+              *.md)
+                continue ;;
+              *)
+                exit 0 ;;
+            esac
+          done < "$files"
+          echo 'docs_only=true' >> "$GITHUB_OUTPUT"
+          echo 'No CodeQL inputs changed. Skipping analysis.' >> "$GITHUB_STEP_SUMMARY"
+
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    needs: changes
+    # Run scheduled/manual scans and scan when detection cannot prove docs-only.
+    if: >-
+      ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, c-cpp, javascript-typescript]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          category: /language:${{ matrix.language }}
+          # Allow analysis during the cutover while default setup owns uploads.
+          upload: ${{ vars.CODEQL_UPLOAD_DISABLED == 'true' && 'never' || 'always' }}

@@ -39,6 +39,16 @@ git-clang-format-18 --binary clang-format-18 --diff "$(git merge-base origin/mai
 
 Use [the Windows clang gate script](../../scripts/run_clang_quality_gate.ps1) for full-tree formatting and `clang-tidy` analysis.
 
+## CodeQL scanning
+
+The [CodeQL workflow](../../.github/workflows/codeql.yml) scans C/C++, JavaScript/TypeScript, and GitHub Actions on same-repository pull requests and pushes for `main` and `release/**`. It skips the analysis jobs when the tested diff contains only Markdown documentation. Markdown inside the synthetic Kimi runtime and redacted ChatGPT export payloads still triggers scans. CodeQL also scans weekly, on manual dispatch, and when a diff cannot be verified.
+
+During the transition, the Actions repository variable `CODEQL_UPLOAD_DISABLED=true` lets the new workflow finish its analyses while GitHub-managed default setup publishes results. After the workflow lands on `main`:
+
+1. Disable GitHub-managed default setup in **Settings → Advanced Security → CodeQL analysis**. See [GitHub's setup transition instructions](https://docs.github.com/en/code-security/reference/code-scanning/troubleshoot-analysis-errors/results-different-than-expected).
+2. Delete `CODEQL_UPLOAD_DISABLED` under **Settings → Secrets and variables → Actions → Variables** so the repository workflow publishes results.
+3. Enable the repository workflow if GitHub lists it as disabled, then dispatch **CodeQL analysis** on `main` and confirm that all three languages publish results.
+
 ## Native UI coverage
 
 Verify tray icon lifecycle, tooltip and menu interaction, taskbar placement, Explorer recovery, and sleep/resume in a live session when the change touches them. Win32 sends `WM_CREATE` during `CreateWindowExW`. Initialize the presenter window handle before calling helpers that require it during `WM_CREATE`.
