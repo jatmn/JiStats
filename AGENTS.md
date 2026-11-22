@@ -33,6 +33,13 @@ cmake --build build --config Debug
 ctest --test-dir build -C Debug --output-on-failure
 ~~~
 
+On Linux, cross-compile the same Windows executables with MinGW-w64 (see [README.md](README.md)). The cross build checks compilation and linking only. Run the tests on Windows.
+
+~~~bash
+cmake -S . -B build-mingw -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake -DJISTATS_BUILD_TESTS=ON
+cmake --build build-mingw
+~~~
+
 - Use [docs/test-strategy.md](docs/test-strategy.md) to choose verification for the change and record what ran and any blockers in the handoff.
 - For storage, schema, or SQLite persistence changes, run the [SQLite-enabled quality gate](docs/sqlite-storage-quality-gate.md). Run [scripts/run_sqlite_quality_gate.ps1](scripts/run_sqlite_quality_gate.ps1) locally or dispatch the [Windows CI workflow](.github/workflows/ci.yml).
 - Use the [manual taskbar checks](docs/taskbar-manual-validation.md) when changing Windows shell behavior.

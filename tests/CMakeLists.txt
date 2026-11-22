@@ -97,14 +97,14 @@ target_compile_definitions(JiStatsTests PRIVATE JISTATS_ENABLE_TEST_HOOKS=1)
 if(WIN32)
     target_link_libraries(JiStatsTests PRIVATE
         comctl32
-        Comdlg32
+        comdlg32
         d3d11
         dxgi
         user32
         gdi32
         gdiplus
         shell32
-        Advapi32
+        advapi32
         ws2_32
         winhttp
     )
@@ -112,7 +112,12 @@ if(WIN32)
         WIN32_LEAN_AND_MEAN
         NOMINMAX
     )
-    target_compile_options(JiStatsTests PRIVATE /utf-8 /W4 /EHsc /FS)
+    if(MSVC)
+        target_compile_options(JiStatsTests PRIVATE /utf-8 /W4 /EHsc /FS)
+    elseif(MINGW)
+        target_link_libraries(JiStatsTests PRIVATE shlwapi)
+        target_sources(JiStatsTests PRIVATE ${CMAKE_SOURCE_DIR}/src/platform/MinGwCompat.cpp)
+    endif()
 endif()
 
 # Output to bin/ alongside main executable

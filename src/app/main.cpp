@@ -12,7 +12,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
-#include <shobjidl_core.h>
+#include <shobjidl.h>
 #endif
 
 namespace {

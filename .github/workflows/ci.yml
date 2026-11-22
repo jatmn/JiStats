@@ -1,9 +1,10 @@
 name: CI
 
+# Every change reaches main or release/** through a pull request, so CI runs on
+# pull requests and does not repeat the same build after the merge. Use
+# workflow_dispatch to run the full build on any branch.
 on:
   pull_request:
-    branches: [main, 'release/**']
-  push:
     branches: [main, 'release/**']
   workflow_dispatch:
 
@@ -15,10 +16,72 @@ permissions:
   contents: read
 
 jobs:
-  sqlite-quality-gate:
-    name: CI passed
+  changes:
+    name: Detect build changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+    steps:
+      - name: Check whether the change can affect the build or tests
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+          build=false
+          reason=""
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            build=true
+            reason="$EVENT_NAME run"
+          elif [ "${CHANGED_FILES:-0}" -ge 3000 ]; then
+            # The pull request files API lists at most 3000 files.
+            build=true
+            reason="$CHANGED_FILES changed files"
+          else
+            files=$(gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/files" \
+              --jq '.[] | .filename, (.previous_filename // empty)')
+            while IFS= read -r file; do
+              [ -n "$file" ] || continue
+              case "$file" in
+                # Test fixtures and the CI definition itself always need the build.
+                docs/fixtures/* | .github/workflows/ci.yml | scripts/run_sqlite_quality_gate.ps1)
+                  build=true ;;
+                # Documentation, repository metadata, and scripts that CI does not run.
+                *.md | docs/* | .github/* | scripts/* | LICENSE | .gitignore | .clang-format | .clang-tidy | assets/logo.png)
+                  continue ;;
+                *)
+                  build=true ;;
+              esac
+              reason="$file"
+              break
+            done <<< "$files"
+          fi
+          if [ "$build" = true ]; then
+            message="Build and tests required ($reason)."
+          else
+            message="No build or test inputs changed; skipping the Windows and Linux builds."
+          fi
+          echo "$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Windows build and tests
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      # Ninja compiles every translation unit in parallel; the Visual Studio
+      # generator compiles each target's files one at a time.
+      CMAKE_GENERATOR: Ninja
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,3 +90,47 @@ jobs:
       - name: Run SQLite quality gate
         shell: powershell
         run: .\scripts\run_sqlite_quality_gate.ps1
+
+  linux-cross:
+    name: Linux cross-build
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install MinGW-w64 and ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix imagemagick ninja-build
+      - name: Configure
+        run: >-
+          cmake -S . -B build-mingw -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake
+          -DCMAKE_BUILD_TYPE=Debug
+          -DJISTATS_BUILD_TESTS=ON
+      - name: Build the app, MiniMax CLI, and tests
+        run: cmake --build build-mingw --parallel
+
+  # The ruleset requires this check. It passes when the build jobs pass or were
+  # skipped because nothing they cover changed, and fails otherwise.
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [changes, windows, linux-cross]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *) exit 1 ;;
+            esac
+          done

@@ -114,6 +114,20 @@ The currently bundled official UPX tool is `tools/upx/upx.exe` version `5.1.1`.
 
 UPX is treated as a packaging tool, not a runtime dependency. If needed, packed variants can still be disabled with `-DJISTATS_ENABLE_UPX=OFF`.
 
+### Building on Linux
+
+JiStats only runs on Windows, but you can build its Windows executables on Linux with MinGW-w64. On Debian or Ubuntu:
+
+```bash
+sudo apt install cmake ninja-build g++-mingw-w64-x86-64-posix imagemagick
+cmake -S . -B build-mingw -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release
+cmake --build build-mingw
+```
+
+`build-mingw/bin/` then holds `JiStats.exe` and `JiStatsMiniMaxCli.exe`; add `-DJISTATS_BUILD_TESTS=ON` for `JiStatsTests.exe`. The executables link the MinGW runtime statically, so you can copy them to a Windows machine without extra DLLs. ImageMagick replaces the Windows-only PowerShell step that builds the app icon. The bundled `tools/upx/upx.exe` only runs on Windows, so packed `-upx` variants need a `upx` on `PATH`.
+
+MSVC remains the reference toolchain, and the tests and SQLite quality gate run on Windows.
+
 ## 📦 Third-Party Components
 
 JiStats currently uses or includes the following third-party components:

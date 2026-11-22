@@ -20,9 +20,12 @@ option(JISTATS_ENABLE_UPX "Compress Release executables with an external unmodif
 set(JISTATS_UPX_EXECUTABLE "" CACHE FILEPATH "Path to an official unmodified UPX executable")
 
 if(JISTATS_ENABLE_UPX)
-    set(JISTATS_LOCAL_UPX_HINTS
-        "${CMAKE_SOURCE_DIR}/tools/upx"
-    )
+    # The bundled tools/upx/upx.exe only runs on a Windows host. Other hosts use an
+    # upx found on PATH, which can still pack Windows executables.
+    set(JISTATS_LOCAL_UPX_HINTS "")
+    if(CMAKE_HOST_WIN32)
+        list(APPEND JISTATS_LOCAL_UPX_HINTS "${CMAKE_SOURCE_DIR}/tools/upx")
+    endif()
 
     if(JISTATS_UPX_EXECUTABLE AND NOT EXISTS "${JISTATS_UPX_EXECUTABLE}")
         message(WARNING "Configured JISTATS_UPX_EXECUTABLE does not exist: ${JISTATS_UPX_EXECUTABLE}")
@@ -57,6 +60,12 @@ if(JISTATS_ENABLE_UPX)
     else()
         message(WARNING "JISTATS_ENABLE_UPX is ON but no unmodified UPX executable was found. Release binaries will not be packed.")
     endif()
+endif()
+
+# MinGW-w64 cross builds from Linux: link the GCC runtime statically so the
+# executables run on Windows without extra DLLs next to them.
+if(MINGW)
+    add_link_options(-static)
 endif()
 
 # Output directories

@@ -225,17 +225,38 @@ try {
 ]===]
     )
 
-    add_custom_command(
-        OUTPUT ${JISTATS_GENERATED_ICON}
-        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
-            -File ${JISTATS_ICON_SCRIPT}
-            -InputPng ${CMAKE_SOURCE_DIR}/assets/icon2.png
-            -OutputIco ${JISTATS_GENERATED_ICON}
-        DEPENDS
-            ${CMAKE_SOURCE_DIR}/assets/icon2.png
-            ${JISTATS_ICON_SCRIPT}
-        VERBATIM
-    )
+    if(CMAKE_HOST_WIN32)
+        add_custom_command(
+            OUTPUT ${JISTATS_GENERATED_ICON}
+            COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                -File ${JISTATS_ICON_SCRIPT}
+                -InputPng ${CMAKE_SOURCE_DIR}/assets/icon2.png
+                -OutputIco ${JISTATS_GENERATED_ICON}
+            DEPENDS
+                ${CMAKE_SOURCE_DIR}/assets/icon2.png
+                ${JISTATS_ICON_SCRIPT}
+            VERBATIM
+        )
+    else()
+        # Cross-compiling from Linux or macOS: System.Drawing is Windows-only, so
+        # build the same icon sizes with ImageMagick instead.
+        find_program(JISTATS_IMAGEMAGICK_EXECUTABLE NAMES magick convert)
+        if(NOT JISTATS_IMAGEMAGICK_EXECUTABLE)
+            message(FATAL_ERROR "Building the Windows app icon on a non-Windows host requires ImageMagick (magick or convert).")
+        endif()
+        add_custom_command(
+            OUTPUT ${JISTATS_GENERATED_ICON}
+            COMMAND "${CMAKE_COMMAND}"
+                "-DJISTATS_IMAGEMAGICK_EXECUTABLE=${JISTATS_IMAGEMAGICK_EXECUTABLE}"
+                "-DJISTATS_ICON_INPUT=${CMAKE_SOURCE_DIR}/assets/icon2.png"
+                "-DJISTATS_ICON_OUTPUT=${JISTATS_GENERATED_ICON}"
+                -P "${CMAKE_SOURCE_DIR}/cmake/GenerateAppIcon.cmake"
+            DEPENDS
+                ${CMAKE_SOURCE_DIR}/assets/icon2.png
+                ${CMAKE_SOURCE_DIR}/cmake/GenerateAppIcon.cmake
+            VERBATIM
+        )
+    endif()
 
     file(TO_NATIVE_PATH "${JISTATS_GENERATED_ICON}" JISTATS_GENERATED_ICON_NATIVE)
     string(REPLACE "\\" "\\\\" JISTATS_GENERATED_ICON_ESCAPED "${JISTATS_GENERATED_ICON_NATIVE}")
@@ -283,8 +304,12 @@ add_executable(JiStatsMiniMaxCli ${JISTATS_MINIMAX_CLI_SOURCES})
 # Target properties
 set_target_properties(JiStats PROPERTIES
     OUTPUT_NAME "JiStats"
-    VERSION ${PROJECT_VERSION}
 )
+# VERSION sets the PE image version on Windows hosts. CMake on other hosts would
+# instead name the file JiStats.exe-<version> behind a symlink.
+if(CMAKE_HOST_WIN32)
+    set_target_properties(JiStats PROPERTIES VERSION ${PROJECT_VERSION})
+endif()
 
 # Include directories
 target_include_directories(JiStats PRIVATE
@@ -319,35 +344,45 @@ endif()
 if(WIN32)
     set_target_properties(JiStats PROPERTIES
         WIN32_EXECUTABLE ON
-        LINK_FLAGS "/MANIFEST:NO"
     )
     target_link_libraries(JiStats PRIVATE
         comctl32
-        Comdlg32
+        comdlg32
         d3d11
         dxgi
         gdiplus
         user32
         gdi32
         shell32
-        Advapi32
+        advapi32
         winhttp
     )
     target_compile_definitions(JiStats PRIVATE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
     )
-    target_compile_options(JiStats PRIVATE /utf-8 /W4 /EHsc /FS)
 
     target_link_libraries(JiStatsMiniMaxCli PRIVATE
-        Advapi32
+        advapi32
         winhttp
     )
     target_compile_definitions(JiStatsMiniMaxCli PRIVATE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
     )
-    target_compile_options(JiStatsMiniMaxCli PRIVATE /utf-8 /W4 /EHsc /FS)
+
+    if(MSVC)
+        set_target_properties(JiStats PROPERTIES LINK_FLAGS "/MANIFEST:NO")
+        target_compile_options(JiStats PRIVATE /utf-8 /W4 /EHsc /FS)
+        target_compile_options(JiStatsMiniMaxCli PRIVATE /utf-8 /W4 /EHsc /FS)
+    elseif(MINGW)
+        # MSVC links Shlwapi through #pragma comment; MinGW ignores that pragma.
+        target_link_libraries(JiStats PRIVATE shlwapi)
+        # Use the wWinMain entry point that MSVC selects automatically.
+        target_link_options(JiStats PRIVATE -municode)
+        target_sources(JiStats PRIVATE platform/MinGwCompat.cpp)
+        target_sources(JiStatsMiniMaxCli PRIVATE platform/MinGwCompat.cpp)
+    endif()
 endif()
 
 function(jistats_enable_upx_for_target target_name)
