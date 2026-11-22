@@ -387,14 +387,8 @@ TEST_CASE("DashboardPresenter handles native close safely", "[dashboard_presente
     REQUIRE(waitForCondition([&presenter]() {
         return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences);
     }));
-    const std::vector<std::string> expectedPreferenceTabs = {
-        "General",
-        "OpenAI",
-        "MiniMax",
-        "Claude Code",
-        "Kilo Code",
-        "Kimi Code"
-    };
+    const std::vector<std::string> expectedPreferenceTabs = {"General",   "OpenAI",    "MiniMax",      "Claude Code",
+                                                             "Kilo Code", "Kimi Code", "Grok / Cursor"};
     CHECK(presenter.getPreferencesTabLabelsForTesting() == expectedPreferenceTabs);
     REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::HelpAbout));
     REQUIRE(waitForCondition([&presenter]() {

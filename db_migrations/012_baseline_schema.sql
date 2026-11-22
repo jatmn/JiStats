@@ -399,7 +399,9 @@ INSERT OR IGNORE INTO providers (provider_key, display_name, enabled) VALUES
     ('minimax', 'MiniMax', 1),
     ('claude_code', 'Claude Code', 1),
     ('kimi', 'Kimi Code', 1),
-    ('hicap-ai', 'HICAP Ai', 1);
+    ('hicap-ai', 'HICAP Ai', 1),
+    ('grok', 'Grok', 1),
+    ('cursor', 'Cursor', 1);
 
 -- Insert default settings
 INSERT OR IGNORE INTO settings (key, value) VALUES

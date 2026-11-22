@@ -86,6 +86,7 @@ struct QuotaResponse {
     std::string secondaryWindowType; // e.g. a second rolling or weekly window
     std::string providerSurface; // normalized provenance label when known
     std::string rawResponse;
+    bool unavailable = false; // The configured account cannot supply quota.
 };
 
 // Provider capability

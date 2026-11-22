@@ -210,6 +210,17 @@ SchemaManager::BaselineResult SchemaManager::reconcileBaseline(bool writable) {
         repair += "INSERT INTO providers (provider_key, display_name, enabled) VALUES ('kimi', 'Kimi Code', 1);";
     }
 
+    const auto subscriptions =
+        storage.execute("SELECT COUNT(*) FROM main.providers WHERE provider_key IN ('grok', 'cursor');");
+    if (!subscriptions.success()) {
+        pImpl->lastError = "Cannot inspect subscription provider seeds: " + subscriptions.error();
+        return BaselineResult::Failed;
+    }
+    if (subscriptions.getInt(0, 0) != 2) {
+        repair += "INSERT OR IGNORE INTO providers (provider_key, display_name, enabled) "
+                  "VALUES ('grok', 'Grok', 1), ('cursor', 'Cursor', 1);";
+    }
+
     if (!repair.empty()) {
         if (!writable) {
             return BaselineResult::NeedsWrite;

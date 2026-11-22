@@ -356,7 +356,7 @@ TEST_CASE("OpenAI Codex rate-limit fixture parsing extracts primary bucket metad
     REQUIRE(snapshot.reachedType.empty());
     REQUIRE(snapshot.limitId.empty());
     REQUIRE(snapshot.planType.empty());
-    REQUIRE_FALSE(snapshot.rawResponse.empty());
+    REQUIRE(snapshot.rawResponse.empty());
 }
 
 TEST_CASE("OpenAI Codex rate-limit fixture parsing preserves reached type", "[openai][fixtures][codex]") {
@@ -479,7 +479,7 @@ TEST_CASE("OpenAI fetchQuota maps the newest local Codex rollout snapshot into q
     CHECK(quota.remaining == 72);
     CHECK(quota.windowType == "interval");
     CHECK(quota.providerSurface == "openai_subscription_codex_local");
-    CHECK_THAT(quota.rawResponse, Catch::Matchers::ContainsSubstring("\"rate_limits\""));
+    CHECK(quota.rawResponse.empty());
 }
 
 TEST_CASE("OpenAI fetchQuota reports rollout discovery failures without falling back to scaffolds", "[openai][quota][codex]") {
@@ -597,6 +597,31 @@ TEST_CASE("OpenAI Codex token-usage rollout parsing handles multiple token_count
     REQUIRE(snapshots[2].totalTokens == 450);
 }
 
+TEST_CASE("Codex records requests once when ledger and context counters overlap", "[openai][fixtures][codex]") {
+    TempFixtureFile fixture(R"json(
+{"type":"session_meta","payload":{"id":"child"}}
+{"type":"turn_context","payload":{}}
+{"timestamp":"2026-04-20T12:00:00.1Z","type":"token_usage_record","payload":{"thread_id":"parent","response_id":"copied","usage":{"input_tokens":999,"output_tokens":1}}}
+{"timestamp":"2026-04-20T12:00:01.1Z","type":"token_usage_record","payload":{"thread_id":"child","response_id":"first","usage":{"input_tokens":120,"cached_input_tokens":40,"output_tokens":30}}}
+{"timestamp":"2026-04-20T12:00:01.2Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"output_tokens":30},"total_token_usage":{"input_tokens":120,"output_tokens":30}}}}
+{"timestamp":"2026-04-20T12:00:01.3Z","type":"token_usage_record","payload":{"response_id":"first","usage":{"input_tokens":120,"output_tokens":30}}}
+{"timestamp":"2026-04-20T12:00:01.4Z","type":"token_usage_record","payload":{"response_id":"compaction","usage":{"input_tokens":40,"output_tokens":10}}}
+{"type":"turn_context","payload":{}}
+{"timestamp":"2026-04-20T12:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"output_tokens":5},"total_token_usage":{"input_tokens":20,"output_tokens":5}}}}
+{"timestamp":"2026-04-20T12:01:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"output_tokens":5},"total_token_usage":{"input_tokens":20,"output_tokens":5}}}}
+{"timestamp":"2026-04-20T12:01:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":1000}}}}
+)json");
+    const auto records = OpenAIAdapter::parseCodexTokenUsageFromRolloutFile(fixture.path());
+    REQUIRE(records.size() == 3);
+    CHECK(records[0].totalTokens == 150);
+    CHECK(records[0].cachedInputTokens == 40);
+    CHECK(records[0].requestId == "response:first");
+    CHECK(records[1].totalTokens == 50);
+    CHECK(records[1].eventTime == records[0].eventTime);
+    CHECK(records[2].totalTokens == 25);
+    CHECK_FALSE(records[2].requestId.empty());
+}
+
 TEST_CASE("OpenAI Codex token-usage rollout parsing skips events without valid timestamps", "[openai][fixtures][codex]") {
     TempFixtureFile fixture(
         R"json({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}},"rate_limits":null}})json"
@@ -640,7 +665,7 @@ TEST_CASE("OpenAI Codex token-usage collection aggregates and sorts across files
 
     TempFixtureDirectory fixtureDirectory;
     fixtureDirectory.makeFile(
-        std::filesystem::path(year) / month / day / "rollout-later.jsonl",
+        std::filesystem::path("2020") / "01" / "01" / "rollout-later.jsonl",
         std::string(R"json({"timestamp":")json") + ts2 +
             R"json(","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":150,"total_tokens":450}},"rate_limits":null}})json");
     fixtureDirectory.makeFile(

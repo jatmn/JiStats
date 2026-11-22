@@ -251,12 +251,14 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
 
     auto providers = storage.execute("SELECT provider_key FROM providers ORDER BY id;");
     REQUIRE(providers.success());
-    REQUIRE(providers.rowCount() == 5);
+    REQUIRE(providers.rowCount() == 7);
     CHECK(providers.getString(0, 0) == "openai");
     CHECK(providers.getString(1, 0) == "minimax");
     CHECK(providers.getString(2, 0) == "claude_code");
     CHECK(providers.getString(3, 0) == "kimi");
     CHECK(providers.getString(4, 0) == "hicap-ai");
+    CHECK(providers.getString(5, 0) == "grok");
+    CHECK(providers.getString(6, 0) == "cursor");
 
     auto runtime = storage.execute("SELECT id FROM runtime_state;");
     REQUIRE(runtime.success());
@@ -293,6 +295,28 @@ TEST_CASE("StorageService preserves version 12 database settings on reopen", "[s
     CHECK(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     storage.close();
     CHECK((readDatabaseFile(tempDb) == before));
+}
+
+TEST_CASE("StorageService adds missing subscription providers on an existing version 12 database",
+          "[schema][migration]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage.execute("DELETE FROM providers WHERE provider_key = 'grok';").success());
+    REQUIRE(storage.execute("UPDATE providers SET enabled = 0 WHERE provider_key = 'cursor';").success());
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    const auto providers =
+        storage.execute("SELECT provider_key, enabled FROM providers WHERE provider_key IN ('grok', 'cursor') "
+                        "ORDER BY provider_key;");
+    REQUIRE(providers.success());
+    REQUIRE(providers.rowCount() == 2);
+    CHECK(providers.getString(0, 0) == "cursor");
+    CHECK_FALSE(providers.getBool(0, 1));
+    CHECK(providers.getString(1, 0) == "grok");
+    CHECK(providers.getBool(1, 1));
 }
 
 TEST_CASE("StorageService reconciles either historical version 12 schema in place", "[schema][migration]") {

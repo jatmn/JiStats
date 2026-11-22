@@ -38,6 +38,7 @@ struct CodexTokenUsageSnapshot {
     long long reasoningOutputTokens = 0;
     long long totalTokens = 0;
     std::string sourcePath;
+    std::string requestId; // Empty for cumulative-only rollouts.
 };
 
 class OpenAIAdapter : public IProviderAdapter {

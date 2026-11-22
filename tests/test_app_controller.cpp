@@ -1643,7 +1643,7 @@ TEST_CASE("AppController About dialog reflects the current about-content contrac
     CHECK(aboutBody.find("Version:") != std::string::npos);
     CHECK(aboutBody.find("Status: Early implementation") != std::string::npos);
     CHECK(aboutBody.find("Provider scope:") != std::string::npos);
-    CHECK(aboutBody.find("OpenAI / Codex + MiniMax + Claude Code + Kimi Code") != std::string::npos);
+    CHECK(aboutBody.find("OpenAI / Codex, MiniMax, Claude Code, Kimi Code, Grok, and Cursor") != std::string::npos);
     CHECK(aboutBody.find("All provider integrations are optional and disabled by default until enabled in Settings.") != std::string::npos);
     CHECK(aboutBody.find("OpenAI and MiniMax ship with subscription-level support in v1.0.") != std::string::npos);
     CHECK(aboutBody.find("OpenAI API-platform import and broader MiniMax PAYG support remain follow-on refinement.") != std::string::npos);

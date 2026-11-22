@@ -2,7 +2,7 @@
 
 ![JiStats logo](assets/logo.png)
 
-JiStats is a local-first Windows 11 desktop app for monitoring AI provider quota, recent activity, and usage history. It supports OpenAI / Codex, MiniMax, Claude Code, and Kimi Code. Enable the integrations you use in Settings.
+JiStats is a local-first Windows 11 desktop app for monitoring AI provider quota, recent activity, and usage history. It supports OpenAI / Codex, MiniMax, Claude Code, Kimi Code, and subscription quota for Grok and Cursor. Enable the integrations you use in Settings.
 
 - [Quick start](docs/quick-start.md) covers getting and launching the portable app.
 - [Provider support](docs/capability-matrix.md) explains the quota and history each integration can show.

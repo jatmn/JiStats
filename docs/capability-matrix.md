@@ -1,6 +1,6 @@
 # Provider support
 
-All four provider tracking toggles start off. Enable the providers you use in **File → Settings**. [Codex SQLite model attribution](providers/openai.md#codex-sqlite-privacy-boundary) can run with OpenAI subscription tracking off.
+All provider tracking toggles start off. Enable the providers you use in **File → Settings**. [Codex SQLite model attribution](providers/openai.md#codex-sqlite-privacy-boundary) can run with OpenAI subscription tracking off.
 
 | Integration | Quota in the app | Activity and history | Setup |
 | --- | --- | --- | --- |
@@ -8,6 +8,8 @@ All four provider tracking toggles start off. Enable the providers you use in **
 | [MiniMax](providers/minimax.md) | Provider-reported remaining quota for Coding Plan and Token Plan | Quota snapshots collected by JiStats | Add and validate the key for the selected subscription surface. |
 | [Claude Code](providers/claude-kimi.md#claude-code) | Local aggregates support activity summaries. Provider-exact quota is unavailable. | Approved local stats and settings | Enable Claude Code with a local stats cache available. |
 | [Kimi Code](providers/claude-kimi.md#kimi-code) | Provider-reported subscription percentages when usable OAuth is available | Approved local runtime and activity metadata | Enable Kimi Code. JiStats reads the Kimi client's OAuth credential file and writes rotated credentials back when refreshing them. |
+| [Grok](providers/grok-cursor.md) | Remaining subscription allowance and the reported reset time | Saved quota snapshots | Sign in with the Grok CLI, then turn on Grok tracking. |
+| [Cursor](providers/grok-cursor.md) | Included subscription usage when the account reports a percentage | Saved quota snapshots | Set `CURSOR_API_KEY` or `CURSOR_AUTH_TOKEN` for JiStats, then turn on Cursor tracking. |
 
 Codex rollout pressure applies to the Codex window recorded in the source. General ChatGPT subscription quota is unknown. ChatGPT exports enrich historical activity. OpenAI organization usage and cost are a [separate advanced path](providers/openai-api-platform.md). MiniMax PAYG per-request usage was validated separately. Aggregate PAYG history and runtime integration remain deferred.
 

@@ -139,6 +139,7 @@ public:
     std::string apiKey;
     std::string groupId;
     unsigned int timeoutMs = 30000;
+    bool redirectsDisabled = false;
     std::string lastError;
     std::string userAgent = "JiStats/1.0";
     std::string contentType = "application/json";
@@ -161,6 +162,10 @@ void HttpClient::setGroupId(const std::string& groupId) {
 
 void HttpClient::setTimeout(unsigned int timeoutMs) {
     pImpl->timeoutMs = timeoutMs;
+}
+
+void HttpClient::disableRedirects() {
+    pImpl->redirectsDisabled = true;
 }
 
 void HttpClient::setUserAgent(const std::string& userAgent) {
@@ -232,6 +237,15 @@ HttpResponse HttpClient::get(const std::string& url) {
         response.error = getLastErrorMessage("Failed to open request");
         pImpl->lastError = response.error;
         return response;
+    }
+
+    if (pImpl->redirectsDisabled) {
+        DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        if (!WinHttpSetOption(request.get(), WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy))) {
+            response.error = "Failed to disable HTTP redirects";
+            pImpl->lastError = response.error;
+            return response;
+        }
     }
 
     std::wstring headers;
@@ -309,6 +323,15 @@ HttpResponse HttpClient::post(const std::string& url, const std::string& body) {
         response.error = getLastErrorMessage("Failed to open request");
         pImpl->lastError = response.error;
         return response;
+    }
+
+    if (pImpl->redirectsDisabled) {
+        DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        if (!WinHttpSetOption(request.get(), WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy))) {
+            response.error = "Failed to disable HTTP redirects";
+            pImpl->lastError = response.error;
+            return response;
+        }
     }
 
     std::wstring headers;

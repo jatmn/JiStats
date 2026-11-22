@@ -133,19 +133,17 @@ void seedUsageEvent(
     REQUIRE(storage.insertUsageEvents({event}));
 }
 
-void seedCodexUsageEvent(
-    StorageService& storage,
-    std::time_t eventTime,
-    long long totalTokens,
-    const std::string& rawReference = "codex://rollout/current") {
+void seedCodexUsageEvent(StorageService& storage, std::time_t eventTime, long long totalTokens,
+                         const std::string& rawReference = "codex://rollout/current",
+                         const std::string& requestId = {}) {
     PersistedUsageEvent event;
     event.providerId = requireProviderId(storage, "openai");
     event.accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
     event.eventTime = eventTime;
     event.sourceType = "codex_local_rollout";
-    event.sourceRunId = "codex_token_usage";
+    event.sourceRunId = requestId.empty() ? "codex_token_usage" : requestId;
     event.modelKey = "codex";
-    event.requestType = "codex_turn";
+    event.requestType = requestId.empty() ? "codex_turn" : "codex_request";
     event.inputTokens = totalTokens / 2;
     event.outputTokens = totalTokens - event.inputTokens;
     event.totalTokens = totalTokens;
@@ -435,6 +433,38 @@ TEST_CASE("AnalysisQueryEngine keeps Codex throughput separate from scoped usage
     const auto currentDaySummary = findDailySummary(analysis.dailySummaries, "2026-04-20");
     REQUIRE(currentDaySummary.has_value());
     CHECK(currentDaySummary->activityCount == 1);
+}
+
+TEST_CASE("Analysis uses the same Codex request events for totals and chart buckets", "[analysis][codex]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const std::string rollout = "codex://rollout/current";
+    seedCodexUsageEvent(storage, now - 120, 100);
+    seedCodexUsageEvent(storage, now - 60, 200);
+    seedCodexUsageEvent(storage, now, 250);
+    seedCodexUsageEvent(storage, now, 30, rollout, "response:one");
+    seedCodexUsageEvent(storage, now, 20, rollout, "response:two");
+    seedCodexUsageEvent(storage, now, 20, rollout, "response:two");
+    seedCodexUsageEvent(storage, now, 20, "codex://rollout/copied", "response:two");
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("openai", "OpenAI", "openai.runtime_status")};
+    AnalysisQueryEngine engine(storage);
+    const auto analysis = engine.buildViewModel(dashboard, DashboardPreferences{}, now);
+
+    REQUIRE(analysis.codexThroughput.hasData);
+    CHECK(analysis.codexThroughput.tokensLast1h == 150);
+    CHECK(analysis.codexThroughput.promptsLast1h == 3);
+    REQUIRE(analysis.codexHourlyHistory.hasData);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    const auto& minute = analysis.codexHourlyHistory.points.back();
+    CHECK(minute.snapshotTime == now);
+    CHECK(minute.tokensPerMinute == Catch::Approx(50));
+    CHECK(minute.promptsPerMinute == Catch::Approx(2));
 }
 
 TEST_CASE("AnalysisQueryEngine limits Codex throughput chart history to the active thirty-minute window", "[analysis][query_engine][analysis_query_engine][codex]") {

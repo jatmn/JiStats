@@ -21,7 +21,7 @@ If JiStats warns that it rejected a development database, exit JiStats. Move the
 
 ## Enable providers
 
-Open **File → Settings**. All four provider tracking toggles start off. See the [provider matrix](capability-matrix.md) for setup.
+Open **File → Settings**. All provider tracking toggles start off. See the [provider matrix](capability-matrix.md) for setup.
 
 ## View and export history
 

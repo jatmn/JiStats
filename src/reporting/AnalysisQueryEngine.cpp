@@ -564,9 +564,8 @@ void applyProviderSurface(SourceFlags& flags, const std::string& providerSurface
         return;
     }
 
-    if (value == "minimax_subscription_coding_plan" ||
-        value == "minimax_subscription_token_plan" ||
-        value == "kimi_subscription_api") {
+    if (value == "minimax_subscription_coding_plan" || value == "minimax_subscription_token_plan" ||
+        value == "kimi_subscription_api" || value == "grok_subscription_api" || value == "cursor_subscription_api") {
         flags.api = true;
     }
 }
@@ -1969,7 +1968,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             historyWindowStart > 86400 ? historyWindowStart - 86400 : 0;
 
         std::string sql =
-            "SELECT ue.event_time_utc, ue.total_tokens, ue.raw_reference "
+            "SELECT ue.event_time_utc, ue.total_tokens, ue.raw_reference, ue.request_type, ue.source_run_id "
             "FROM usage_events ue "
             "JOIN providers p ON p.id = ue.provider_id "
             "JOIN accounts a ON a.id = ue.account_id "
@@ -1980,53 +1979,73 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             formatTimeUtcIso(throughputNow)};
         appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
         appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");
-        sql += " ORDER BY ue.raw_reference ASC, ue.event_time_utc ASC;";
+        sql += " ORDER BY ue.event_time_utc ASC, ue.id ASC;";
 
         QueryResult result = storage_->execute(sql, params);
-        if (result.success() && result.rowCount() > 1) {
-            struct TokenEvent {
-                std::time_t eventTime = 0;
-                long long totalTokens = 0;
-                std::string rawReference;
-            };
-            std::vector<TokenEvent> events;
-            events.reserve(result.rowCount());
+        if (result.success() && result.rowCount() > 0) {
+            std::map<std::string, std::time_t> firstRequestByRollout;
             for (size_t row = 0; row < result.rowCount(); ++row) {
-                const auto parsedTime = parseUtcIso(result.getString(row, 0));
-                if (!parsedTime.has_value()) {
-                    continue;
+                if (result.getString(row, 3) == "codex_request") {
+                    if (const auto time = parseUtcIso(result.getString(row, 0))) {
+                        firstRequestByRollout.try_emplace(result.getString(row, 2), *time);
+                    }
                 }
-                TokenEvent evt;
-                evt.eventTime = *parsedTime;
-                evt.totalTokens = result.getInt64(row, 1);
-                evt.rawReference = result.getString(row, 2);
-                events.push_back(std::move(evt));
             }
 
             struct TokenWindowTotals {
                 long long totalTokenDelta = 0;
                 long long promptDeltaCount = 0;
             };
+            struct LegacyCounter {
+                std::time_t time;
+                long long tokens;
+            };
+            std::map<std::string, LegacyCounter> previousCounters;
+            std::set<std::string> countedResponseIds;
+            std::map<std::time_t, TokenWindowTotals> usageAt;
+            std::size_t legacySampleCount = 0;
+            bool legacyEstimated = false;
+            for (size_t row = 0; row < result.rowCount(); ++row) {
+                const auto time = parseUtcIso(result.getString(row, 0));
+                if (!time) {
+                    continue;
+                }
+                const auto tokens = result.getInt64(row, 1);
+                if (result.getString(row, 3) == "codex_request") {
+                    const auto id = result.getString(row, 4);
+                    if (id.rfind("response:", 0) == 0 && !countedResponseIds.insert(id).second) {
+                        continue;
+                    }
+                    auto& usage = usageAt[*time];
+                    usage.totalTokenDelta += tokens;
+                    ++usage.promptDeltaCount;
+                    continue;
+                }
+
+                const auto rollout = result.getString(row, 2);
+                const auto firstRequest = firstRequestByRollout.find(rollout);
+                if (firstRequest != firstRequestByRollout.end() && *time >= firstRequest->second) {
+                    continue;
+                }
+                ++legacySampleCount;
+                auto& usage = usageAt[*time];
+                auto [previous, inserted] = previousCounters.try_emplace(rollout, LegacyCounter{*time, tokens});
+                if (!inserted) {
+                    legacyEstimated = legacyEstimated || *time - previous->second.time > 300;
+                    if (tokens > previous->second.tokens) {
+                        usage.totalTokenDelta += tokens - previous->second.tokens;
+                        ++usage.promptDeltaCount;
+                    }
+                    previous->second = {*time, tokens};
+                }
+            }
 
             auto computeWindowTotals = [&](std::time_t windowStart, std::time_t windowEnd) {
                 TokenWindowTotals totals;
-                for (size_t i = 1; i < events.size(); ++i) {
-                    if (events[i].rawReference != events[i - 1].rawReference) {
-                        continue;
-                    }
-                    if (events[i].eventTime < windowStart || events[i].eventTime > windowEnd) {
-                        continue;
-                    }
-                    const double timeDelta = static_cast<double>(events[i].eventTime - events[i - 1].eventTime);
-                    if (timeDelta <= 0.0) {
-                        continue;
-                    }
-                    const long long tokenDelta = events[i].totalTokens - events[i - 1].totalTokens;
-                    if (tokenDelta < 0) {
-                        continue;
-                    }
-                    totals.totalTokenDelta += tokenDelta;
-                    ++totals.promptDeltaCount;
+                for (auto position = usageAt.lower_bound(windowStart);
+                     position != usageAt.end() && position->first <= windowEnd; ++position) {
+                    totals.totalTokenDelta += position->second.totalTokenDelta;
+                    totals.promptDeltaCount += position->second.promptDeltaCount;
                 }
                 return totals;
             };
@@ -2065,21 +2084,25 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             analysis.codexThroughput.averageDailyPrompts = totals30d.promptDeltaCount / 30;
             analysis.codexThroughput.averageMonthlyTokens = totalsMonth.totalTokenDelta / monthElapsedDays;
             analysis.codexThroughput.averageMonthlyPrompts = totalsMonth.promptDeltaCount / monthElapsedDays;
-            analysis.codexThroughput.hasData = true;
-
-            bool sameSource = true;
-            bool largeGap = false;
-            for (size_t i = 1; i < events.size(); ++i) {
-                if (events[i].rawReference != events[0].rawReference) {
-                    sameSource = false;
-                }
-                const std::time_t gap = events[i].eventTime - events[i - 1].eventTime;
-                if (gap > 300) {
-                    largeGap = true;
-                }
-            }
+            analysis.codexThroughput.hasData = totals30d.promptDeltaCount > 0 || legacySampleCount > 1;
             analysis.codexThroughput.confidenceLabel =
-                (sameSource && !largeGap) ? "LocalExact" : "Estimated";
+                (legacyEstimated || previousCounters.size() > 1) ? "Estimated" : "LocalExact";
+
+            std::map<std::time_t, TokenWindowTotals> minutes;
+            for (auto position = usageAt.lower_bound(window30mStart); position != usageAt.end(); ++position) {
+                const auto minute = position->first - position->first % 60;
+                auto& totals = minutes[minute];
+                totals.totalTokenDelta += position->second.totalTokenDelta;
+                totals.promptDeltaCount += position->second.promptDeltaCount;
+            }
+            for (const auto& [minute, totals] : minutes) {
+                AnalysisCodexMinutePoint point;
+                point.snapshotTime = minute;
+                point.tokensPerMinute = static_cast<double>(totals.totalTokenDelta);
+                point.promptsPerMinute = static_cast<double>(totals.promptDeltaCount);
+                analysis.codexHourlyHistory.points.push_back(point);
+            }
+            analysis.codexHourlyHistory.hasData = !minutes.empty();
         }
     }
 
@@ -2119,46 +2142,6 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
 
     populateModelUsageChart("openai", "OpenAI Codex Usage by Model", analysis.openAiCodexModelUsage);
     populateModelUsageChart("hicap-ai", "HICAP Codex Usage by Model", analysis.hicapCodexModelUsage);
-
-    // 24-hour per-minute history for dashboard throughput chart.
-    {
-        const std::time_t chartWindowStart = std::max<std::time_t>(0, now - 1800);
-
-        std::string sql =
-            "SELECT "
-            "  strftime('%Y-%m-%dT%H:', ue.event_time_utc) || "
-            "  printf('%02d', CAST(strftime('%M', ue.event_time_utc) AS INTEGER) / 1) || ':00Z' AS minute_bucket, "
-            "  COALESCE(MAX(ue.total_tokens) - MIN(ue.total_tokens), 0) AS tokens_in_minute, "
-            "  COUNT(DISTINCT ue.raw_reference) AS prompts_in_minute "
-            "FROM usage_events ue "
-            "JOIN providers p ON p.id = ue.provider_id "
-            "JOIN accounts a ON a.id = ue.account_id "
-            "WHERE ue.source_type = 'codex_local_rollout' "
-            "  AND ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
-        std::vector<std::string> params{
-            formatTimeUtcIso(chartWindowStart),
-            formatTimeUtcIso(now)};
-        appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
-        appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");
-        sql += " GROUP BY minute_bucket ORDER BY minute_bucket ASC;";
-
-        QueryResult result = storage_->execute(sql, params);
-        if (result.success() && result.rowCount() > 0) {
-            analysis.codexHourlyHistory.points.reserve(result.rowCount());
-            for (size_t row = 0; row < result.rowCount(); ++row) {
-                const auto parsedTime = parseUtcIso(result.getString(row, 0));
-                if (!parsedTime.has_value()) {
-                    continue;
-                }
-                AnalysisCodexMinutePoint pt;
-                pt.snapshotTime = *parsedTime;
-                pt.tokensPerMinute = static_cast<double>(result.getInt64(row, 1));
-                pt.promptsPerMinute = static_cast<double>(result.getInt(row, 2));
-                analysis.codexHourlyHistory.points.push_back(std::move(pt));
-            }
-            analysis.codexHourlyHistory.hasData = !analysis.codexHourlyHistory.points.empty();
-        }
-    }
 
     long long importedBackfillCheckpoints = 0;
     long long mismatchCheckpoints = 0;

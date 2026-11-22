@@ -15,6 +15,7 @@ set(JISTATS_SOURCES
     db/SettingsService.cpp
     db/QueryResult.cpp
     providers/ProviderManager.cpp
+    providers/SubscriptionQuotaAdapter.cpp
     providers/minimax/MiniMaxAdapter.cpp
     providers/minimax/MiniMaxLiveCapture.cpp
     providers/openai/OpenAIAdapter.cpp
@@ -55,6 +56,7 @@ set(JISTATS_HEADERS
     include/db/SettingsService.hpp
     include/db/QueryResult.hpp
     include/providers/ProviderManager.hpp
+    include/providers/SubscriptionQuotaAdapter.hpp
     include/providers/IProviderAdapter.hpp
     include/providers/minimax/MiniMaxAdapter.hpp
     include/providers/minimax/MiniMaxLiveCapture.hpp

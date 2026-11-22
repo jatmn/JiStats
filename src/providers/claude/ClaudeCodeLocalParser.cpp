@@ -334,32 +334,29 @@ std::vector<ActivityEvent> ClaudeCodeLocalParser::toActivityEvents(const ClaudeC
     return events;
 }
 
+namespace {
+
+std::filesystem::path resolveClaudeConfigDirectory() {
+    if (const auto configured = tryGetEnvironmentVariable("CLAUDE_CONFIG_DIR"); !configured.empty()) {
+        return std::filesystem::path(configured);
+    }
+    std::string home = tryGetEnvironmentVariable("USERPROFILE");
+    if (home.empty()) {
+        home = tryGetEnvironmentVariable("HOME");
+    }
+    return home.empty() ? std::filesystem::path{} : std::filesystem::path(home) / ".claude";
+}
+
+} // namespace
+
 std::string ClaudeCodeLocalParser::resolveDefaultStatsCachePath() {
-    std::string homeEnv = tryGetEnvironmentVariable("USERPROFILE");
-    if (homeEnv.empty()) {
-        homeEnv = tryGetEnvironmentVariable("HOME");
-    }
-    if (homeEnv.empty()) {
-        return {};
-    }
-    std::filesystem::path path(homeEnv);
-    path /= ".claude";
-    path /= "stats-cache.json";
-    return path.string();
+    const auto directory = resolveClaudeConfigDirectory();
+    return directory.empty() ? std::string{} : (directory / "stats-cache.json").string();
 }
 
 std::string ClaudeCodeLocalParser::resolveDefaultSettingsPath() {
-    std::string homeEnv = tryGetEnvironmentVariable("USERPROFILE");
-    if (homeEnv.empty()) {
-        homeEnv = tryGetEnvironmentVariable("HOME");
-    }
-    if (homeEnv.empty()) {
-        return {};
-    }
-    std::filesystem::path path(homeEnv);
-    path /= ".claude";
-    path /= "settings.json";
-    return path.string();
+    const auto directory = resolveClaudeConfigDirectory();
+    return directory.empty() ? std::string{} : (directory / "settings.json").string();
 }
 
 bool ClaudeCodeLocalParser::importLocalActivity(

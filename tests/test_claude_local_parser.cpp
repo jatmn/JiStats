@@ -90,6 +90,25 @@ TEST_CASE("Claude settings parsing extracts model and channel", "[claude][parser
     REQUIRE(result.autoUpdatesChannel == "stable");
 }
 
+TEST_CASE("Claude recovery does not attribute lifetime totals to a day", "[claude][parser]") {
+    TempFixtureFile fixture(R"json({
+      "lastComputedDate": "2025-01-02",
+      "modelUsage": {"claude-sonnet": {"inputTokens": 100, "outputTokens": 50}}
+    })json");
+    ClaudeCodeAdapter adapter;
+    adapter.setMockStatsCachePath(fixture.path());
+
+    const auto undated = adapter.fetchUsage(0, 0);
+    REQUIRE(undated.success);
+    REQUIRE(undated.events.size() == 1);
+    CHECK(undated.events.front().totalTokens == 150);
+
+    const auto day = undated.events.front().eventTime;
+    const auto recovery = adapter.fetchUsage(day - 86400, day + 86400);
+    REQUIRE(recovery.success);
+    CHECK(recovery.events.empty());
+}
+
 TEST_CASE("Claude parser returns error for missing file", "[claude][parser]") {
     auto result = ClaudeCodeLocalParser::parseStatsCache("/nonexistent/path/stats-cache.json");
     REQUIRE(!result.success);

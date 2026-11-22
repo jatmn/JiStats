@@ -41,6 +41,12 @@ std::string displaySourceLabel(const std::string& providerSurface) {
     if (providerSurface == "claude_code_local_stats") {
         return "Claude Local";
     }
+    if (providerSurface == "grok_subscription_api") {
+        return "Grok Subscription";
+    }
+    if (providerSurface == "cursor_subscription_api") {
+        return "Cursor Subscription";
+    }
     if (providerSurface == "kimi_subscription_api") {
         return "Kimi Subscription";
     }
