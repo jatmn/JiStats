@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { isAuthorizedReview } from './pullfrog-review-check.mjs';
@@ -99,4 +100,14 @@ test('fails immediately for access errors and rate limits', async (t) => {
     });
     assert.equal(fetch.mock.callCount(), index + 1);
   }
+});
+
+test('requires verified author on the automatic review step', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/pullfrog.yml', import.meta.url), 'utf8');
+  const [, automatic] = workflow.split('\n  auto-review:\n');
+  assert.ok(automatic, 'Expected the automatic review job');
+  const [, step] = automatic.split('\n      - name: Review the pull request\n');
+  assert.ok(step, 'Expected the automatic Pullfrog review step');
+  assert.equal(step.split('\n')[0].trim(), "if: steps.authorize.outputs.authorized == 'true'");
+  assert.ok(step.includes('prompt: ${{ inputs.prompt }}'));
 });
