@@ -6158,19 +6158,39 @@ public:
             return row.connectivity.status == "offline";
         });
         const std::time_t carriedDismissal = hasOfflineRows ? latestOfflineNoticeDismissal() : 0;
-        const bool preserveExistingDismissals = !updates.providerApiConfirmedRecovery && !hasOfflineRows;
+        // Save offline rows first so a carried dismissal is stored before the
+        // row that held it is overwritten.
+        bool offlineRowsSaved = true;
         for (auto& row : updates.rows) {
             PersistedConnectivityState& connectivity = row.connectivity;
-            const bool isOffline = connectivity.status == "offline";
-            if (isOffline || preserveExistingDismissals) {
+            if (connectivity.status != "offline") {
+                continue;
+            }
+            const auto existing = storageService.getConnectivityState(
+                connectivity.providerId, connectivity.accountId);
+            const bool wasOffline = existing.has_value() && existing->status == "offline";
+            connectivity.nextRetryAt =
+                now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
+            connectivity.noticeDismissedAt = carriedDismissal;
+            if (!storageService.upsertConnectivityState(connectivity)) {
+                offlineRowsSaved = false;
+            }
+        }
+        if (!offlineRowsSaved) {
+            JISTATS_LOG_WARN(LogCategory::Db, "Failed to save offline connectivity; keeping the saved notice dismissal");
+        }
+
+        const bool preserveExistingDismissals =
+            (!updates.providerApiConfirmedRecovery && !hasOfflineRows) || !offlineRowsSaved;
+        for (auto& row : updates.rows) {
+            PersistedConnectivityState& connectivity = row.connectivity;
+            if (connectivity.status == "offline") {
+                continue;
+            }
+            if (preserveExistingDismissals) {
                 const auto existing = storageService.getConnectivityState(
                     connectivity.providerId, connectivity.accountId);
-                if (isOffline) {
-                    const bool wasOffline = existing.has_value() && existing->status == "offline";
-                    connectivity.nextRetryAt =
-                        now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
-                    connectivity.noticeDismissedAt = carriedDismissal;
-                } else if (existing.has_value()) {
+                if (existing.has_value()) {
                     // A local result can end only its own provider's outage.
                     // Omitted providers keep the dismissal until they recover.
                     const bool recoveredOwnOutage = !updates.anyOfflineProvider &&

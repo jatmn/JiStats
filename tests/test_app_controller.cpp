@@ -2373,6 +2373,101 @@ TEST_CASE("AppController keeps an offline dismissal across a provider handoff an
     restarted.shutdown();
 }
 
+TEST_CASE("AppController keeps an offline dismissal when the handoff write fails", "[app][runtime][offline_notice]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
+    const std::time_t now = std::time(nullptr);
+    auto miniMax = std::make_shared<ControlledQuotaProviderAdapter>(
+        "minimax", "MiniMax", makeQuotaResponse(now, 120, 1000, "daily", "minimax_subscription_coding_plan"),
+        std::shared_future<void>{}, 1, makeFailedQuotaResponse("network unreachable"));
+    auto openai = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeFailedQuotaResponse("network unreachable"),
+        std::shared_future<void>{}, 1,
+        makeQuotaResponse(now, 25, 100, "interval", "openai_subscription_codex_local"));
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(openai);
+    providerManager->addProvider(miniMax);
+    ScopedTrayTestHandler handler([](TrayController::TestOperation,
+                                     TrayStatus,
+                                     const std::string&,
+                                     std::string&) -> std::optional<bool> {
+        return true;
+    });
+
+    std::promise<void> reachedPublication;
+    auto publicationReached = reachedPublication.get_future();
+    AppController app;
+    std::promise<void> releasePublication;
+    auto publicationReleased = releasePublication.get_future().share();
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setDisableTaskbarForTesting(true);
+    app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
+        if (publicationReleased.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            reachedPublication.set_value();
+            publicationReleased.wait();
+        }
+    });
+    REQUIRE(app.init());
+    // Hold the deferred refresh in which MiniMax recovers and OpenAI goes offline.
+    REQUIRE(publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
+    REQUIRE(app.clickDashboardOfflineDismissForTesting());
+    REQUIRE(waitForCondition([&app]() {
+        return !app.isDashboardOfflineNoticeVisibleForTesting();
+    }, std::chrono::seconds(5)));
+    const auto dismissed = app.getConnectivityStateForTesting("minimax");
+    REQUIRE(dismissed.has_value());
+    REQUIRE(dismissed->status == "offline");
+    REQUIRE(dismissed->noticeDismissedAt > 0);
+
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        const int openaiAccountId =
+            requireAccountId(storage, requireProviderId(storage, "openai"), "openai.runtime_status");
+        REQUIRE(storage.execute(
+            "CREATE TRIGGER reject_openai_offline_row BEFORE INSERT ON connectivity_state "
+            "WHEN NEW.status = 'offline' AND NEW.account_id = " + std::to_string(openaiAccountId) + " "
+            "BEGIN SELECT RAISE(ABORT, 'test rejects the handoff write'); END;").success());
+    }
+
+    releasePublication.set_value();
+    app.refreshRuntimeForTesting();
+    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
+    app.shutdown();
+
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        const int miniMaxProviderId = requireProviderId(storage, "minimax");
+        const auto source = storage.getConnectivityState(
+            miniMaxProviderId, requireAccountId(storage, miniMaxProviderId, "minimax.runtime_status"));
+        REQUIRE(source.has_value());
+        CHECK(source->status == "online");
+        CHECK(source->noticeDismissedAt == dismissed->noticeDismissedAt);
+        REQUIRE(storage.execute("DROP TRIGGER reject_openai_offline_row;").success());
+    }
+
+    AppController restarted;
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(providerManager);
+    restarted.setDisableTaskbarForTesting(true);
+    REQUIRE(restarted.init());
+    restarted.refreshRuntimeForTesting();
+    CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
+    CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
+    const auto carried = restarted.getConnectivityStateForTesting("openai");
+    REQUIRE(carried.has_value());
+    CHECK(carried->status == "offline");
+    CHECK(carried->noticeDismissedAt == dismissed->noticeDismissedAt);
+    restarted.shutdown();
+}
+
 TEST_CASE("AppController keeps an offline dismissal when the newly offline provider has no saved row", "[app][runtime][offline_notice]") {
     requireSqlite();
 
