@@ -6154,48 +6154,30 @@ public:
             return row.connectivity.status == "offline";
         });
         const std::time_t carriedDismissal = hasOfflineRows ? latestOfflineNoticeDismissal() : 0;
-
-        std::vector<std::optional<PersistedConnectivityState>> existingRows;
-        existingRows.reserve(updates.rows.size());
-        for (const auto& row : updates.rows) {
-            existingRows.push_back(storageService.getConnectivityState(
-                row.connectivity.providerId, row.connectivity.accountId));
-        }
-
-        // A provider that was offline in the dismissed outage and now returns a
-        // fetched result has recovered through its own path, even when that path is local.
-        bool confirmedRecovery = updates.providerApiConfirmedRecovery;
-        if (!confirmedRecovery && !hasOfflineRows) {
-            const std::time_t episodeDismissal = latestOfflineNoticeDismissal();
-            for (size_t index = 0; !confirmedRecovery && episodeDismissal > 0 && index < updates.rows.size(); ++index) {
-                const auto& existing = existingRows[index];
-                confirmedRecovery = updates.rows[index].fetchedRecovery &&
-                    existing.has_value() &&
-                    existing->status == "offline" &&
-                    existing->noticeDismissedAt == episodeDismissal;
-            }
-        }
-
-        const bool preserveExistingDismissals = !confirmedRecovery && !hasOfflineRows;
-        for (size_t index = 0; index < updates.rows.size(); ++index) {
-            PersistedConnectivityState& connectivity = updates.rows[index].connectivity;
+        const bool preserveExistingDismissals = !updates.providerApiConfirmedRecovery && !hasOfflineRows;
+        for (auto& row : updates.rows) {
+            PersistedConnectivityState& connectivity = row.connectivity;
             const bool isOffline = connectivity.status == "offline";
             if (isOffline || preserveExistingDismissals) {
-                const auto& existing = existingRows[index];
+                const auto existing = storageService.getConnectivityState(
+                    connectivity.providerId, connectivity.accountId);
                 if (isOffline) {
                     const bool wasOffline = existing.has_value() && existing->status == "offline";
                     connectivity.nextRetryAt =
                         now + (wasOffline ? kRetryDelayEscalatedSeconds : kRetryDelaySeconds);
                     connectivity.noticeDismissedAt = carriedDismissal;
                 } else if (existing.has_value()) {
-                    connectivity.noticeDismissedAt = existing->noticeDismissedAt;
+                    // A local result can end only its own provider's outage.
+                    // Omitted providers keep the dismissal until they recover.
+                    const bool recoveredOwnOutage = row.fetchedRecovery && existing->status == "offline";
+                    connectivity.noticeDismissedAt = recoveredOwnOutage ? 0 : existing->noticeDismissedAt;
                 }
             }
             storageService.upsertConnectivityState(connectivity);
         }
 
-        // Confirmed recovery ends the saved episode, including for omitted providers.
-        if (confirmedRecovery) {
+        // Provider API evidence ends the saved episode, including for omitted providers.
+        if (updates.providerApiConfirmedRecovery) {
             const auto result = storageService.execute(
                 "UPDATE connectivity_state SET notice_dismissed_at_utc = NULL, "
                 "updated_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "

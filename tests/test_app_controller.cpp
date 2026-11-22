@@ -2373,7 +2373,7 @@ TEST_CASE("AppController keeps an offline dismissal across a provider handoff an
     restarted.shutdown();
 }
 
-TEST_CASE("AppController clears saved offline dismissal on live recovery after restart", "[app][runtime][offline_notice]") {
+TEST_CASE("AppController keeps an omitted provider's dismissal when a local provider recovers after restart", "[app][runtime][offline_notice]") {
     requireSqlite();
 
     TempTestDatabase dbPath;
@@ -2444,19 +2444,25 @@ TEST_CASE("AppController clears saved offline dismissal on live recovery after r
     REQUIRE(beforeRecovery.has_value());
     CHECK(beforeRecovery->noticeDismissedAt == dismissed->noticeDismissedAt);
 
+    // OpenAI has no provider quota API, so its recovery ends only its own outage.
     releasePublication.set_value();
     restarted.refreshRuntimeForTesting();
     REQUIRE(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Current);
+    const auto recoveredOpenAI = restarted.getConnectivityStateForTesting("openai");
+    REQUIRE(recoveredOpenAI.has_value());
+    CHECK(recoveredOpenAI->status == "online");
+    CHECK(recoveredOpenAI->noticeDismissedAt == 0);
     const auto afterRecovery = restarted.getConnectivityStateForTesting("minimax");
     REQUIRE(afterRecovery.has_value());
-    CHECK(afterRecovery->noticeDismissedAt == 0);
+    CHECK(afterRecovery->status == "offline");
+    CHECK(afterRecovery->noticeDismissedAt == dismissed->noticeDismissedAt);
 
     preferences = restarted.getDashboardViewModelForTesting().preferences;
     preferences.miniMaxSubscriptionTrackingEnabled = true;
     restarted.applyDashboardPreferencesForTesting(preferences);
     CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK(restarted.isDashboardOfflineNoticeVisibleForTesting());
-    CHECK(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
+    CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
+    CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
     restarted.shutdown();
 }
 
