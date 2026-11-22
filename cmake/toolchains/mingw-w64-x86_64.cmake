@@ -20,6 +20,20 @@ foreach(tool CMAKE_C_COMPILER CMAKE_CXX_COMPILER CMAKE_RC_COMPILER)
     endif()
 endforeach()
 
+# GCC reports the target runtime location even in a relocated installation.
+if(NOT CMAKE_FIND_ROOT_PATH AND NOT CMAKE_SYSROOT)
+    execute_process(
+        COMMAND ${CMAKE_C_COMPILER} -print-file-name=libmingw32.a
+        OUTPUT_VARIABLE _mingw_runtime
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT IS_ABSOLUTE "${_mingw_runtime}" OR NOT EXISTS "${_mingw_runtime}")
+        message(FATAL_ERROR "Could not locate the MinGW-w64 runtime. Set CMAKE_FIND_ROOT_PATH to the MinGW-w64 target prefix.")
+    endif()
+    get_filename_component(_mingw_lib_dir "${_mingw_runtime}" DIRECTORY)
+    get_filename_component(CMAKE_FIND_ROOT_PATH "${_mingw_lib_dir}/.." ABSOLUTE)
+endif()
+
 # Search the target environment for libraries and headers, and the host for tools.
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
