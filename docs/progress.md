@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- Refreshed the SHA-256-verified SQLite, spdlog (including bundled fmt), and Catch2 versions in [CMake](../CMakeLists.txt) and synced the [third-party notices](../THIRD_PARTY_NOTICES.md). Updated both Pullfrog action references and the owner command payload to 0.1.141. The [Linux CMake/Ninja build](../README.md#building-on-linux) passed CTest with bundled SQLite (125 cases, 920 assertions). The MinGW Release build produced the app, opt-in CLI and test executables, and UPX 5.3.0 verified the packed app. The workflow lint and seven Pullfrog authorization tests passed locally. CI covers the full Windows test run.
+
 ### Roadmap audit
 
 The audit covers [main at 326dcd4](https://github.com/jatmn/JiStats/tree/326dcd46dd29ee23a01c7204934105d66d24df9a). The [phase audit](plan.md#implementation-audit) links the product claims to their code and tests.

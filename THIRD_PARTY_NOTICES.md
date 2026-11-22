@@ -4,19 +4,19 @@ JiStats includes third-party components that remain licensed under their own ter
 
 ## SQLite
 
-- Version: 3.53.0, compiled into the executables unless `JISTATS_USE_SYSTEM_SQLITE` is enabled
+- Version: 3.54.1, compiled into the executables unless `JISTATS_USE_SYSTEM_SQLITE` is enabled
 - Upstream: [SQLite copyright and public-domain dedication](https://www.sqlite.org/copyright.html)
 
 ## spdlog
 
-- Version: 1.15.1, compiled into the executables
+- Version: 1.17.0, compiled into the executables
 - Upstream: https://github.com/gabime/spdlog
 - License: MIT
 
 ```text
 The MIT License (MIT)
 
-Copyright (c) 2016 Gabi Melman.
+Copyright (c) 2016 - present, Gabi Melman and spdlog contributors.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -39,15 +39,15 @@ THE SOFTWARE.
 
 ## fmt (bundled inside spdlog)
 
-- Version: 11.1.3, compiled into the executables through spdlog
+- Version: 12.1.0, compiled into the executables through spdlog
 - Upstream: https://github.com/fmtlib/fmt
-- License: MIT with an exception that allows redistributing embedded object code without the notice. See the [fmt license](https://github.com/fmtlib/fmt/blob/11.1.3/LICENSE).
+- License: MIT with an exception that allows redistributing embedded object code without the notice. See the [fmt license](https://github.com/fmtlib/fmt/blob/12.1.0/LICENSE).
 
 ## Catch2
 
-- Version: 3.7.1, used only by the `JiStatsTests` executable and not included in release binaries
+- Version: 3.16.1, used only by the `JiStatsTests` executable and not included in release binaries
 - Upstream: https://github.com/catchorg/Catch2
-- License: [Boost Software License 1.0](https://github.com/catchorg/Catch2/blob/v3.7.1/LICENSE.txt)
+- License: [Boost Software License 1.0](https://github.com/catchorg/Catch2/blob/v3.16.1/LICENSE.txt)
 
 ## MinGW-w64 and winpthreads
 
