@@ -33,8 +33,11 @@ public:
     std::optional<int> getRejectedVersion() const;
 
   private:
-    bool prepareBaseline(int& current);
-    bool reconcileBaseline();
+    enum class BaselineResult { Ready, NeedsWrite, Failed };
+
+    BaselineResult runBaselineTransaction(int& current, bool writable);
+    BaselineResult prepareBaseline(int& current, bool writable);
+    BaselineResult reconcileBaseline(bool writable);
     bool migrateToVersion(int version);
     std::string loadMigration(int version) const;
 

@@ -65,20 +65,14 @@ bool SchemaManager::migrate() {
     pImpl->lastError.clear();
     pImpl->rejectedVersion.reset();
 
-    // Keep version detection and baseline writes in the same SQLite snapshot.
-    if (!storage.beginTransaction()) {
-        pImpl->lastError = "Failed to begin schema inspection transaction";
-        return false;
-    }
-
     int current = 0;
-    if (!prepareBaseline(current)) {
-        storage.rollbackTransaction();
-        return false;
+    auto baseline = runBaselineTransaction(current, false);
+    if (baseline == BaselineResult::NeedsWrite) {
+        // End the read snapshot before acquiring a write lock, then recheck under that lock.
+        // Another instance may have completed the same repair while we waited.
+        baseline = runBaselineTransaction(current, true);
     }
-    if (!storage.commitTransaction()) {
-        storage.rollbackTransaction();
-        pImpl->lastError = "Failed to commit baseline transaction";
+    if (baseline != BaselineResult::Ready) {
         return false;
     }
 
@@ -96,24 +90,46 @@ bool SchemaManager::migrate() {
     return true;
 }
 
-bool SchemaManager::prepareBaseline(int& current) {
+SchemaManager::BaselineResult SchemaManager::runBaselineTransaction(int& current, bool writable) {
+    const auto mode = writable ? StorageService::TransactionMode::Immediate : StorageService::TransactionMode::Deferred;
+    if (!storage.beginTransaction(mode)) {
+        pImpl->lastError =
+            writable ? "Failed to begin baseline write transaction" : "Failed to begin schema inspection transaction";
+        return BaselineResult::Failed;
+    }
+
+    const auto result = prepareBaseline(current, writable);
+    if (result == BaselineResult::Failed) {
+        storage.rollbackTransaction();
+        return result;
+    }
+    if (!storage.commitTransaction()) {
+        storage.rollbackTransaction();
+        pImpl->lastError = "Failed to commit baseline transaction";
+        return BaselineResult::Failed;
+    }
+
+    return result;
+}
+
+SchemaManager::BaselineResult SchemaManager::prepareBaseline(int& current, bool writable) {
     const auto catalog =
         storage.execute("SELECT type FROM main.sqlite_master WHERE name = 'schema_version' COLLATE NOCASE "
                         "AND type IN ('table', 'view');");
     if (!catalog.success()) {
         pImpl->lastError = "Cannot inspect schema version table: " + catalog.error();
-        return false;
+        return BaselineResult::Failed;
     }
 
     if (catalog.rowCount() != 0) {
         if (catalog.getString(0, 0) != "table") {
             pImpl->lastError = "Cannot read schema version: schema_version is not a table";
-            return false;
+            return BaselineResult::Failed;
         }
         const auto version = storage.execute("SELECT version FROM main.schema_version ORDER BY version DESC LIMIT 1;");
         if (!version.success()) {
             pImpl->lastError = "Cannot read schema version: " + version.error();
-            return false;
+            return BaselineResult::Failed;
         }
 
         if (version.rowCount() != 0) {
@@ -122,36 +138,40 @@ bool SchemaManager::prepareBaseline(int& current) {
             const auto parsed = std::from_chars(value.data(), end, current);
             if (parsed.ec != std::errc() || parsed.ptr != end || current < 1) {
                 pImpl->lastError = "Invalid database schema version";
-                return false;
+                return BaselineResult::Failed;
             }
             if (current < kBaselineVersion) {
                 pImpl->rejectedVersion = current;
                 pImpl->lastError = "Database schema version " + std::to_string(current) +
                                    " predates the supported baseline (version " + std::to_string(kBaselineVersion) +
                                    ")";
-                return false;
+                return BaselineResult::Failed;
             }
-            return current != kBaselineVersion || reconcileBaseline();
+            return current == kBaselineVersion ? reconcileBaseline(writable) : BaselineResult::Ready;
         }
+    }
+
+    if (!writable) {
+        return BaselineResult::NeedsWrite;
     }
 
     const auto result = storage.execute(kBaselineSchemaSql);
     if (!result.success()) {
         pImpl->lastError = "Cannot initialize baseline: " + result.error();
-        return false;
+        return BaselineResult::Failed;
     }
     current = kBaselineVersion;
-    return true;
+    return BaselineResult::Ready;
 }
 
-bool SchemaManager::reconcileBaseline() {
+SchemaManager::BaselineResult SchemaManager::reconcileBaseline(bool writable) {
     // The historical loader selected only one of the two migrations numbered 010.
     std::string repair;
     for (const std::string table : {"usage_rollups_hourly", "usage_rollups_daily"}) {
         const auto columns = storage.execute("PRAGMA main.table_info(" + table + ");");
         if (!columns.success() || columns.rowCount() == 0) {
             pImpl->lastError = "Cannot inspect baseline table " + table;
-            return false;
+            return BaselineResult::Failed;
         }
         for (const char* column : {"local_request_count", "imported_request_count", "api_request_count",
                                    "unknown_request_count", "backfilled_request_count"}) {
@@ -175,7 +195,7 @@ bool SchemaManager::reconcileBaseline() {
                         "'idx_export_runs_kind_requested'));");
     if (!objects.success()) {
         pImpl->lastError = "Cannot inspect recovery and export schema: " + objects.error();
-        return false;
+        return BaselineResult::Failed;
     }
     if (objects.getInt(0, 0) != 4) {
         repair += kRecoveryAndExportSql;
@@ -184,20 +204,23 @@ bool SchemaManager::reconcileBaseline() {
     const auto kimi = storage.execute("SELECT 1 FROM main.providers WHERE provider_key = 'kimi';");
     if (!kimi.success()) {
         pImpl->lastError = "Cannot inspect Kimi provider seed: " + kimi.error();
-        return false;
+        return BaselineResult::Failed;
     }
     if (kimi.rowCount() == 0) {
         repair += "INSERT INTO providers (provider_key, display_name, enabled) VALUES ('kimi', 'Kimi Code', 1);";
     }
 
     if (!repair.empty()) {
+        if (!writable) {
+            return BaselineResult::NeedsWrite;
+        }
         const auto result = storage.execute(repair);
         if (!result.success()) {
             pImpl->lastError = "Cannot reconcile historical version 12 schema: " + result.error();
-            return false;
+            return BaselineResult::Failed;
         }
     }
-    return true;
+    return BaselineResult::Ready;
 }
 
 bool SchemaManager::migrateToVersion(int version) {

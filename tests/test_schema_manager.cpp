@@ -2,12 +2,16 @@
 #include "db/SchemaManager.hpp"
 #include "db/SettingsService.hpp"
 #include "db/StorageService.hpp"
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <utility>
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
 
@@ -87,6 +91,16 @@ bool indexExists(StorageService& storage, const std::string& indexName) {
     return result.success() && result.rowCount() == 1;
 }
 
+void removeHistoricalAnalysisSchema(StorageService& storage) {
+    REQUIRE(storage.execute("DROP TABLE recovery_checkpoints; DROP TABLE export_runs;").success());
+    for (const std::string table : {"usage_rollups_hourly", "usage_rollups_daily"}) {
+        for (const char* column : {"local_request_count", "imported_request_count", "api_request_count",
+                                   "unknown_request_count", "backfilled_request_count"}) {
+            REQUIRE(storage.execute("ALTER TABLE " + table + " DROP COLUMN " + column + ";").success());
+        }
+    }
+}
+
 std::string readDatabaseFile(const TempTestDatabase& db) {
     std::ifstream input(db.path(), std::ios::binary);
     REQUIRE(input.is_open());
@@ -94,6 +108,39 @@ std::string readDatabaseFile(const TempTestDatabase& db) {
 }
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+struct ConcurrentBaselineOpen {
+    std::atomic<int> inspections{0};
+    std::atomic<bool> timedOut{false};
+    std::promise<void> bothInspected;
+    std::shared_future<void> ready = bothInspected.get_future();
+};
+
+thread_local ConcurrentBaselineOpen* baselineOpen = nullptr;
+
+int installBaselineInspectionGate(sqlite3* db, char**, const sqlite3_api_routines*) {
+    if (!baselineOpen) {
+        return SQLITE_OK;
+    }
+    return sqlite3_trace_v2(
+        db, SQLITE_TRACE_STMT,
+        [](unsigned, void*, void* statement, void*) {
+            const auto* sql = sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
+            if (baselineOpen && sql &&
+                std::string_view(sql) == "SELECT 1 FROM main.providers WHERE provider_key = 'kimi';") {
+                // Each opener already holds a read snapshot. Synchronize only its first inspection.
+                auto* gate = std::exchange(baselineOpen, nullptr);
+                if (++gate->inspections == 2) {
+                    gate->bothInspected.set_value();
+                }
+                if (gate->ready.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+                    gate->timedOut = true;
+                }
+            }
+            return 0;
+        },
+        nullptr);
+}
+
 bool denySchemaVersionRead = false;
 
 int installSchemaVersionReadFailure(sqlite3* db, char**, const sqlite3_api_routines*) {
@@ -271,13 +318,7 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
         REQUIRE(storage.execute("DELETE FROM providers WHERE provider_key = 'kimi';").success());
     }
     SECTION("Only the Kimi migration ran") {
-        REQUIRE(storage.execute("DROP TABLE recovery_checkpoints; DROP TABLE export_runs;").success());
-        for (const std::string table : {"usage_rollups_hourly", "usage_rollups_daily"}) {
-            for (const char* column : {"local_request_count", "imported_request_count", "api_request_count",
-                                       "unknown_request_count", "backfilled_request_count"}) {
-                REQUIRE(storage.execute("ALTER TABLE " + table + " DROP COLUMN " + column + ";").success());
-            }
-        }
+        removeHistoricalAnalysisSchema(storage);
         REQUIRE(storage.execute("UPDATE providers SET enabled = 0 WHERE provider_key = 'kimi';").success());
     }
     REQUIRE(
@@ -332,6 +373,51 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     REQUIRE(storage.init(tempDb.path()));
     storage.close();
     CHECK((readDatabaseFile(tempDb) == repaired));
+}
+
+TEST_CASE("StorageService supports overlapping opens during historical baseline repair", "[schema][migration]") {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    SettingsService settings(storage);
+    REQUIRE(settings.setString("ui.last_selected_provider_id", "minimax"));
+    removeHistoricalAnalysisSchema(storage);
+    storage.close();
+
+    ConcurrentBaselineOpen gate;
+    const auto extension = reinterpret_cast<void (*)()>(installBaselineInspectionGate);
+    REQUIRE(sqlite3_auto_extension(extension) == SQLITE_OK);
+
+    const auto open = [&] {
+        baselineOpen = &gate;
+        StorageService connection;
+        if (!connection.init(tempDb.path())) {
+            return connection.getLastError();
+        }
+        const auto repair = connection.execute("SELECT local_request_count FROM usage_rollups_hourly LIMIT 0;");
+        SettingsService reopenedSettings(connection);
+        if (!repair.success() || !tableExists(connection, "export_runs") ||
+            reopenedSettings.getString("ui.last_selected_provider_id") != std::optional<std::string>("minimax")) {
+            return std::string("The opened database did not expose the repaired schema and original settings");
+        }
+        return std::string{};
+    };
+
+    auto first = std::async(std::launch::async, open);
+    auto second = std::async(std::launch::async, open);
+    const auto firstError = first.get();
+    const auto secondError = second.get();
+    sqlite3_cancel_auto_extension(extension);
+
+    REQUIRE(gate.inspections.load() == 2);
+    REQUIRE_FALSE(gate.timedOut.load());
+    INFO("First open: " << firstError << ", second open: " << secondError);
+    CHECK(firstError.empty());
+    CHECK(secondError.empty());
+#else
+    requireSqlite();
+#endif
 }
 
 TEST_CASE("StorageService does not bootstrap after a failed version read", "[schema][migration]") {

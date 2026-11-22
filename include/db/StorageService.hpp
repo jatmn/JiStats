@@ -276,10 +276,12 @@ public:
     
     // Execute a query with parameters
     QueryResult execute(const std::string& sql, const std::vector<std::string>& params);
-    
-    // Begin transaction
-    bool beginTransaction();
-    
+
+    enum class TransactionMode { Deferred, Immediate };
+
+    // An immediate transaction must acquire the write lock before any reads.
+    bool beginTransaction(TransactionMode mode = TransactionMode::Deferred);
+
     // Commit transaction
     bool commitTransaction();
     

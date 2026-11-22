@@ -669,12 +669,12 @@ QueryResult StorageService::execute(const std::string& sql, const std::vector<st
     return result;
 }
 
-bool StorageService::beginTransaction() {
+bool StorageService::beginTransaction(TransactionMode mode) {
     if (pImpl->inTransaction) {
-        return true;
+        return mode == TransactionMode::Deferred;
     }
-    
-    auto result = execute("BEGIN TRANSACTION;");
+
+    auto result = execute(mode == TransactionMode::Immediate ? "BEGIN IMMEDIATE;" : "BEGIN TRANSACTION;");
     if (result.success()) {
         pImpl->inTransaction = true;
         return true;
