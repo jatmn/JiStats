@@ -161,7 +161,7 @@ jobs:
     name: Run cross-built tests on Windows
     needs: linux-cross
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: ${{ inputs.repeat_offline_notice_tests && 15 || 5 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -176,7 +176,7 @@ jobs:
           REPEAT_OFFLINE_NOTICE_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.repeat_offline_notice_tests }}
         shell: pwsh
         run: |
-          function Invoke-WindowsTests([string[]] $testArguments, [int] $diagnosticDelay) {
+          function Invoke-WindowsTests([string[]] $testArguments, [int] $timeoutMs) {
             $options = @{
               FilePath = (Resolve-Path '.\build-mingw\bin\JiStatsTests.exe').Path
               NoNewWindow = $true
@@ -184,14 +184,22 @@ jobs:
             }
             if ($testArguments) { $options.ArgumentList = $testArguments }
             $process = Start-Process @options
-            if (!$process.WaitForExit($diagnosticDelay)) {
+            if (!$process.WaitForExit($timeoutMs)) {
               Write-Host "Collecting Windows test thread stacks for PID $($process.Id)"
-              gdb --batch --nx --quiet -iex 'set auto-load off' -iex 'set debuginfod enabled off' -p $process.Id -ex 'set print frame-arguments none' -ex 'thread apply all bt 40' -ex detach
+              $initFile = Join-Path $env:RUNNER_TEMP 'jistats-init.gdb'
+              $stackFile = Join-Path $env:RUNNER_TEMP 'jistats-stacks.gdb'
+              @('set auto-load off', 'set debuginfod enabled off') | Set-Content $initFile -Encoding ascii
+              @('set print frame-arguments none', 'thread apply all bt 40', 'detach') | Set-Content $stackFile -Encoding ascii
+              try {
+                gdb --batch --nx --quiet -ix $initFile --se=build-mingw/bin/JiStatsTests.exe -p $process.Id -x $stackFile
+              } finally {
+                if (!$process.HasExited) { $process.Kill() }
+              }
+              throw "Windows tests exceeded the $timeoutMs ms deadline."
             }
-            $process.WaitForExit()
             if ($process.ExitCode -ne 0) { exit $process.ExitCode }
           }
-          Invoke-WindowsTests @() 300000
+          Invoke-WindowsTests @() 270000
           if ($env:REPEAT_OFFLINE_NOTICE_TESTS -ne 'true') { exit 0 }
           foreach ($attempt in 1..8) {
             Write-Host "Checking offline notice restart timing, pass $attempt"
