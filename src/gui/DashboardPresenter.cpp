@@ -284,8 +284,7 @@ std::string localizeDisplayTimestamp(const std::string& value) {
 }
 
 #ifdef _WIN32
-bool tryGetMonitorWorkArea(const RECT& referenceRect, RECT& workArea) {
-    const HMONITOR monitor = MonitorFromRect(&referenceRect, MONITOR_DEFAULTTONEAREST);
+bool tryGetMonitorWorkArea(HMONITOR monitor, RECT& workArea) {
     if (monitor == nullptr) {
         return false;
     }
@@ -298,6 +297,10 @@ bool tryGetMonitorWorkArea(const RECT& referenceRect, RECT& workArea) {
 
     workArea = info.rcWork;
     return true;
+}
+
+bool tryGetMonitorWorkArea(const RECT& referenceRect, RECT& workArea) {
+    return tryGetMonitorWorkArea(MonitorFromRect(&referenceRect, MONITOR_DEFAULTTONEAREST), workArea);
 }
 
 void clampRectToWorkArea(RECT& rect, const RECT& workArea) {
@@ -1433,21 +1436,28 @@ public:
         return rect;
     }
 
+    SIZE dashboardMinimumSize(HWND hwnd, const RECT& workArea) const {
+        SIZE minimum{scaledPixels(kMinWidth, hwnd), scaledPixels(kMinHeight, hwnd)};
+        if (!IsRectEmpty(&workArea)) {
+            minimum.cx = std::min(minimum.cx, workArea.right - workArea.left);
+            minimum.cy = std::min(minimum.cy, workArea.bottom - workArea.top);
+        }
+        return minimum;
+    }
+
     void fitInitialDashboardBounds(HWND hwnd) {
         RECT bounds{};
-        MONITORINFO monitor{};
-        monitor.cbSize = sizeof(monitor);
+        RECT workArea{};
         if (!GetWindowRect(hwnd, &bounds) ||
-            !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            !tryGetMonitorWorkArea(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), workArea)) {
             return;
         }
 
         const RECT original = bounds;
-        const LONG minWidth = scaledPixels(kMinWidth, hwnd);
-        const LONG minHeight = scaledPixels(kMinHeight, hwnd);
-        bounds.right = bounds.left + std::max(bounds.right - bounds.left, minWidth);
-        bounds.bottom = bounds.top + std::max(bounds.bottom - bounds.top, minHeight);
-        clampRectToWorkArea(bounds, monitor.rcWork);
+        const auto minimum = dashboardMinimumSize(hwnd, workArea);
+        bounds.right = bounds.left + std::max(bounds.right - bounds.left, minimum.cx);
+        bounds.bottom = bounds.top + std::max(bounds.bottom - bounds.top, minimum.cy);
+        clampRectToWorkArea(bounds, workArea);
         if (!EqualRect(&bounds, &original)) {
             SetWindowPos(hwnd, nullptr, bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -3048,14 +3058,16 @@ public:
             const int inset = px(16);
             const int innerWidth = cardWidth - inset * 2;
             const int left = margin + inset;
-            const int cardHeight = selectedMainTab == 1 ? viewportHeight - px(18) : px(286);
+            const int analysisCardHeight = std::clamp(viewportHeight - px(8), 0, px(286));
+            const int cardHeight = selectedMainTab == 1 ? std::max(0, viewportHeight - px(18)) : analysisCardHeight;
             otherPageCard = {margin, px(4), margin + cardWidth, px(4) + cardHeight};
             MoveWindow(providersGroup, left, px(18), innerWidth, px(24), FALSE);
             MoveWindow(providerList, left, px(52), innerWidth, std::max(0, cardHeight - px(62)), FALSE);
             configureProviderListColumns();
             MoveWindow(analysisLaunchTitle, left, px(19), innerWidth, px(28), FALSE);
-            MoveWindow(analysisLaunchInfo, left, px(57), innerWidth, px(170), FALSE);
-            MoveWindow(analysisLaunchButton, left, px(238), px(200), px(32), FALSE);
+            const int buttonTop = std::max(px(52), analysisCardHeight - px(48));
+            MoveWindow(analysisLaunchInfo, left, px(57), innerWidth, std::max(0, buttonTop - px(68)), FALSE);
+            MoveWindow(analysisLaunchButton, left, buttonTop, px(200), px(32), FALSE);
         }
         syncMainTabVisibility(model);
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
@@ -5432,8 +5444,10 @@ public:
             return 0;
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
-            info->ptMinTrackSize.x = scaledPixels(kMinWidth, hwnd);
-            info->ptMinTrackSize.y = scaledPixels(kMinHeight, hwnd);
+            RECT workArea{};
+            tryGetMonitorWorkArea(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), workArea);
+            const auto minimum = dashboardMinimumSize(hwnd, workArea);
+            info->ptMinTrackSize = {minimum.cx, minimum.cy};
             return 0;
         }
         case WM_DPICHANGED: {
@@ -6399,7 +6413,9 @@ public:
         return dashboardColor(colors[index % std::size(colors)], COLOR_WINDOWTEXT);
     }
 
-    void drawModelMarker(HDC dc, POINT center, size_t series, int size = 5) {
+    static constexpr int kModelMarkerRadius = 5;
+
+    void drawModelMarker(HDC dc, POINT center, size_t series, int size = kModelMarkerRadius) {
         const int saved = SaveDC(dc);
         const COLORREF color = modelSeriesColor(series);
         SelectObject(dc, GetStockObject(DC_PEN));
@@ -6541,6 +6557,81 @@ public:
         }
     }
 
+    void drawContrastModelMarkers(HDC dc, const RECT& plot, const std::vector<std::vector<POINT>>& seriesPoints) {
+        struct Marker {
+            POINT anchor;
+            POINT center;
+            size_t series;
+        };
+        std::vector<Marker> markers;
+        const LONG markerGap = 2L * scaledPixels(kModelMarkerRadius) + 2;
+        const auto isClear = [&](POINT center) {
+            return std::none_of(markers.begin(), markers.end(), [&](const Marker& marker) {
+                return std::abs(center.x - marker.center.x) < markerGap &&
+                       std::abs(center.y - marker.center.y) < markerGap;
+            });
+        };
+
+        // Favor a point that can be distinguished from the other series, including on short traces.
+        const size_t shared = seriesPoints.size();
+        std::map<std::pair<LONG, LONG>, size_t> owners;
+        for (size_t index = 0; index < seriesPoints.size(); ++index) {
+            for (const auto point : seriesPoints[index]) {
+                auto [entry, inserted] = owners.try_emplace(std::make_pair(point.x, point.y), index);
+                if (!inserted && entry->second != index) {
+                    entry->second = shared;
+                }
+            }
+        }
+        for (size_t index = 0; index < seriesPoints.size(); ++index) {
+            const auto& points = seriesPoints[index];
+            if (points.empty()) {
+                continue;
+            }
+            const auto distinct = std::find_if(points.rbegin(), points.rend(),
+                                               [&](POINT point) { return owners.at({point.x, point.y}) == index; });
+            const POINT anchor = distinct == points.rend() ? points.back() : *distinct;
+            POINT center = anchor;
+            // Keep the sample at its actual position. Move only its marker when the shapes would overlap.
+            const LONG span = plot.right - plot.left;
+            for (LONG offset = markerGap; !isClear(center) && offset <= span; offset += markerGap) {
+                const POINT left{anchor.x - offset, anchor.y};
+                const POINT right{anchor.x + offset, anchor.y};
+                if (left.x >= plot.left && isClear(left)) {
+                    center = left;
+                } else if (right.x <= plot.right && isClear(right)) {
+                    center = right;
+                }
+            }
+            markers.push_back({anchor, center, index});
+        }
+
+        // Reserve every series identifier before adding the repeated markers on longer traces.
+        const int spacing = scaledPixels(32);
+        for (size_t index = 0; index < seriesPoints.size(); ++index) {
+            LONG nextX = plot.left;
+            for (const auto point : seriesPoints[index]) {
+                if (point.x >= nextX && isClear(point)) {
+                    markers.push_back({point, point, index});
+                    nextX = point.x + spacing;
+                }
+            }
+        }
+        const int saved = SaveDC(dc);
+        SelectObject(dc, GetStockObject(DC_PEN));
+        SetDCPenColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        for (const auto& marker : markers) {
+            if (marker.anchor.x != marker.center.x) {
+                MoveToEx(dc, marker.anchor.x, marker.anchor.y, nullptr);
+                LineTo(dc, marker.center.x, marker.center.y);
+            }
+        }
+        RestoreDC(dc, saved);
+        for (const auto& marker : markers) {
+            drawModelMarker(dc, marker.center, marker.series);
+        }
+    }
+
     void drawModelUsageChart(HDC dc, const RECT& rect, const AnalysisProviderModelUsageChart& chart, int hoverSeries,
                              int hoverPoint) {
         const int saved = SaveDC(dc);
@@ -6557,11 +6648,10 @@ public:
         DrawTextW(dc, L"Tokens per 5-minute bucket", -1, &units, DT_SINGLELINE | DT_NOPREFIX);
         drawChartTimeLabels(dc, rect, plot.bounds, plot.first, plot.last);
 
-        std::vector<std::pair<POINT, size_t>> markers;
-        const int markerSpacing = scaledPixels(32);
+        std::vector<std::vector<POINT>> seriesPoints(chart.series.size());
         for (size_t index = 0; index < chart.series.size(); ++index) {
             const auto& series = chart.series[index];
-            std::vector<POINT> points;
+            auto& points = seriesPoints[index];
             points.reserve(series.points.size());
             for (const auto& point : series.points) {
                 points.push_back(plot.position(point.bucketStartUtc, point.totalTokens));
@@ -6569,18 +6659,15 @@ public:
             if (points.size() > 1) {
                 drawChartSeries(dc, points, modelSeriesColor(index));
             }
-            if (points.size() == 1 || dashboardHighContrast) {
-                LONG nextMarkerX = plot.bounds.left;
-                for (const auto& point : points) {
-                    if (point.x >= nextMarkerX) {
-                        markers.emplace_back(point, index);
-                        nextMarkerX = point.x + markerSpacing;
-                    }
+        }
+        if (dashboardHighContrast) {
+            drawContrastModelMarkers(dc, plot.bounds, seriesPoints);
+        } else {
+            for (size_t index = 0; index < seriesPoints.size(); ++index) {
+                if (seriesPoints[index].size() == 1) {
+                    drawModelMarker(dc, seriesPoints[index].front(), index);
                 }
             }
-        }
-        for (const auto& [point, index] : markers) {
-            drawModelMarker(dc, point, index);
         }
 
         if (hoverSeries >= 0 && static_cast<size_t>(hoverSeries) < chart.series.size()) {
