@@ -26,21 +26,10 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 
 ## Build and verify
 
-Use Visual Studio 2026 with MSVC and run commands from the repository root. See [README.md](README.md) for Release builds and packaging.
+From Linux, run the portable tests before pushing code changes. For Windows-facing changes, also cross-build the app, CLI and full test executable with MinGW-w64. Both command sequences and dependencies are in the [Linux build instructions](README.md#building-on-linux). Add `-DJISTATS_BUILD_TESTS=ON` to the cross-build configuration to include the full suite.
 
-~~~powershell
-cmake -S . -B build -G "Visual Studio 18 2026" -DJISTATS_BUILD_TESTS=ON
-cmake --build build --config Debug
-ctest --test-dir build -C Debug --output-on-failure
-~~~
-
-On Linux, cross-compile the same Windows executables with MinGW-w64 (see [README.md](README.md)). The cross build checks compilation and linking only. Run the tests on Windows.
-
-~~~bash
-cmake -S . -B build-mingw -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake -DJISTATS_BUILD_TESTS=ON
-cmake --build build-mingw
-~~~
+The PR workflow executes the cross-built suite on a hosted Windows runner. A local Visual Studio installation is optional. For an MSVC build or Release packaging, see the [Windows instructions](README.md#building-on-windows).
 
 - Use the [verification guide](docs/validation/testing.md) to choose verification for the change and record what ran and any blockers in the handoff.
-- For storage, schema, or SQLite persistence changes, run the [SQLite-enabled quality gate](docs/validation/sqlite-quality-gate.md). Run [scripts/run_sqlite_quality_gate.ps1](scripts/run_sqlite_quality_gate.ps1) locally or dispatch the [Windows CI workflow](.github/workflows/ci.yml).
+- For storage, schema, or SQLite persistence changes, run the [SQLite-enabled quality gate](docs/validation/sqlite-quality-gate.md). Run the bundled-SQLite portable tests on Linux and check the full Windows suite in CI. The [PowerShell gate](scripts/run_sqlite_quality_gate.ps1) and [manual CI dispatch](.github/workflows/ci.yml) also exercise MSVC.
 - Use the [manual taskbar checks](docs/validation/desktop.md#taskbar-checks) when changing Windows shell behavior.

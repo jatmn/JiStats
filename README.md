@@ -11,22 +11,18 @@ JiStats is a local-first Windows 11 desktop app for monitoring AI provider quota
 
 ## Build and packaging
 
-Build the native C++17 app with Visual Studio 2026 and MSVC. From the repository root:
-
-```powershell
-cmake -S . -B build -G "Visual Studio 18 2026" -DJISTATS_BUILD_TESTS=ON
-pwsh -File .\scripts\build_release.ps1
-```
-
-The helper stops running JiStats, MiniMax CLI, and test binaries before building to release file locks. Use `-Target JiStats` to build only the desktop app. Release outputs are in `build/bin/Release/`.
-
-- `JiStats.exe` is the desktop app. `JiStatsMiniMaxCli.exe` and `JiStatsTests.exe` are developer tools.
-- With `JISTATS_ENABLE_UPX=ON`, Release builds also produce `JiStats-upx.exe` using the bundled UPX 5.1.1. Use `-DJISTATS_ENABLE_UPX=OFF` at configure time to omit packed variants.
-- The portable executable embeds the SQLite baseline. Include the license files described below with the bundle. Follow the [release checklist](docs/release-checklist.md) for package smoke testing.
-
 ### Building on Linux
 
-JiStats only runs on Windows, but you can build its Windows executables on Linux with MinGW-w64. On Debian or Ubuntu:
+To run the portable Catch2 tests directly on Debian or Ubuntu, install the native C++ toolchain, CMake and Ninja. This exercises the same sources used by the Windows app, including quota mirroring, observation persistence and bundled SQLite migrations.
+
+```bash
+sudo apt install build-essential cmake ninja-build
+cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
+cmake --build build-linux
+ctest --test-dir build-linux --output-on-failure
+```
+
+To build the Windows app and CLI on Linux, use a separate build directory with MinGW-w64 and ImageMagick.
 
 ```bash
 sudo apt install cmake ninja-build g++-mingw-w64-x86-64-posix imagemagick
@@ -38,7 +34,22 @@ cmake --build build-mingw
 
 Cross-builds use bundled SQLite by default. With bundled or statically linked SQLite, you can copy the executables to Windows without extra DLLs. To use `-DJISTATS_USE_SYSTEM_SQLITE=ON`, install SQLite built for Windows x64 into the MinGW target prefix or set `CMAKE_FIND_ROOT_PATH` to the Windows dependency prefix. If the build links a shared SQLite package, copy that package's SQLite DLL (typically `sqlite3.dll`) alongside the executables. Configure in a fresh build directory if CMake previously cached Linux SQLite paths.
 
-MSVC remains the reference toolchain, and the tests and SQLite quality gate run on Windows.
+On code pull requests, GitHub Actions runs the portable tests on Linux and the full cross-built test executable on Windows. Contributors can push from Linux without a local Windows build. See the [verification guide](docs/validation/testing.md).
+
+### Building on Windows
+
+For the reference MSVC Release build, run these commands from the repository root on Windows. The Visual Studio C++ Build Tools and Windows SDK are sufficient for command-line builds.
+
+```powershell
+cmake -S . -B build -G "Visual Studio 18 2026" -DJISTATS_BUILD_TESTS=ON
+pwsh -File .\scripts\build_release.ps1
+```
+
+The helper stops running JiStats, MiniMax CLI, and test binaries before building to release file locks. Use `-Target JiStats` to build only the desktop app. Release outputs are in `build/bin/Release/`.
+
+- `JiStats.exe` is the desktop app. `JiStatsMiniMaxCli.exe` and `JiStatsTests.exe` are developer tools.
+- With `JISTATS_ENABLE_UPX=ON`, Release builds also produce `JiStats-upx.exe` using the bundled UPX 5.1.1. Use `-DJISTATS_ENABLE_UPX=OFF` at configure time to omit packed variants.
+- For a portable bundle, include the license files described below. Follow the [release checklist](docs/release-checklist.md) for package smoke testing.
 
 ## 📦 Third-Party Components
 

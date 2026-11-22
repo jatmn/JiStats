@@ -39,6 +39,8 @@ Update the tracker when work changes state. At handoff, record what changed, the
 
 ## Recently completed
 
+- Linux developers can run the portable Catch2 suite with CMake and Ninja. Code PRs cross-build all Windows executables and run the full suite on a hosted Windows runner. See the [build instructions](../README.md#building-on-linux) and [CI verification guide](validation/testing.md#continuous-integration).
+
 - Organized the documentation around the [index](README.md) and consolidated duplicate provider, runtime, and UI contracts.
 - Audited provider-fed data paths, Codex throughput and SQLite import, Analysis, and fixtures against the source. The audit below records what landed and the remaining verification boundaries.
 - Completed the dedicated Analysis workspace and shared export scope, the low-resource tray/taskbar work, and the portable packaging baseline. Reopen any of these lanes when new evidence shows a concrete regression.

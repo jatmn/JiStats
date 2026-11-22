@@ -118,7 +118,7 @@ jobs:
   windows:
     name: Windows build and tests
     needs: changes
-    if: needs.changes.outputs.build == 'true'
+    if: github.event_name != 'pull_request' && needs.changes.outputs.build == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -135,7 +135,7 @@ jobs:
         run: .\scripts\run_sqlite_quality_gate.ps1
 
   linux-cross:
-    name: Linux cross-build
+    name: Linux tests and Windows cross-build
     needs: changes
     if: github.event_name != 'push' && needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
@@ -148,6 +148,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix imagemagick ninja-build
+      - name: Run portable tests with bundled SQLite
+        run: |
+          cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
+          cmake --build build-linux --parallel
+          ctest --test-dir build-linux --output-on-failure
       - name: Configure
         run: >-
           cmake -S . -B build-mingw -G Ninja
@@ -156,13 +161,39 @@ jobs:
           -DJISTATS_BUILD_TESTS=ON
       - name: Build the app, MiniMax CLI, and tests
         run: cmake --build build-mingw --parallel
+      - name: Upload the test executable for Windows
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-tests
+          path: build-mingw/bin/JiStatsTests.exe
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  windows-runtime:
+    name: Run cross-built tests on Windows
+    needs: linux-cross
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-tests
+          path: build-mingw/bin
+      # Run from the checkout root so the suite can read fixtures and migrations.
+      - run: .\build-mingw\bin\JiStatsTests.exe
 
   # The ruleset requires this check. It passes when the build jobs pass or were
   # skipped because nothing they cover changed, and fails otherwise.
   ci-passed:
     name: CI passed
     if: always()
-    needs: [changes, windows, linux-cross]
+    needs: [changes, windows, linux-cross, windows-runtime]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

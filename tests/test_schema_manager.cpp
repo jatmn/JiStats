@@ -26,6 +26,7 @@ using JiStats::TestSupport::requireSqlite;
 
 namespace {
 
+#ifdef _WIN32
 class ScopedEnvironmentVariable {
 public:
     ScopedEnvironmentVariable(const char* name, const std::string& value)
@@ -61,6 +62,7 @@ private:
     std::optional<std::string> originalValue_;
     bool hadOriginal_ = false;
 };
+#endif
 
 bool tableExists(StorageService& storage, const std::string& tableName) {
     auto result = storage.execute(
@@ -466,6 +468,7 @@ TEST_CASE("StorageService rejects databases older than the baseline", "[schema][
     CHECK((readDatabaseFile(tempDb) == before));
 }
 
+#ifdef _WIN32
 TEST_CASE("StorageService redirects the default database to LOCALAPPDATA",
           "[schema][storage]") {
     requireSqlite();
@@ -480,3 +483,4 @@ TEST_CASE("StorageService redirects the default database to LOCALAPPDATA",
     CHECK(resolvedPath == (localAppData.path() / "JiStats" / "jistats.db"));
     CHECK(std::filesystem::exists(resolvedPath));
 }
+#endif
