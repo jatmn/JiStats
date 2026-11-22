@@ -4,29 +4,50 @@ JiStats includes third-party components that remain licensed under their own ter
 
 ## SQLite
 
-- Component: `third_party/sqlite/`
+- Version: 3.53.0, compiled into the executables unless `JISTATS_USE_SYSTEM_SQLITE` is enabled
 - Upstream: [SQLite copyright and public-domain dedication](https://www.sqlite.org/copyright.html)
-
-## Catch2
-
-- Component: `third_party/catch2/`
-- Upstream license: Boost Software License 1.0
-- Copyright: Catch2 Authors
-- Local license file: `third_party/catch2/LICENSE.txt`
 
 ## spdlog
 
-- Component: `third_party/spdlog/`
-- Upstream license: MIT
-- Copyright: Gabi Melman
-- Local license file: `third_party/spdlog/LICENSE`
+- Version: 1.15.1, compiled into the executables
+- Upstream: https://github.com/gabime/spdlog
+- License: MIT
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2016 Gabi Melman.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
 
 ## fmt (bundled inside spdlog)
 
-- Component: `third_party/spdlog/include/spdlog/fmt/bundled/`
-- Upstream license: MIT
-- Copyright: Victor Zverovich
-- Local license file: `third_party/spdlog/include/spdlog/fmt/bundled/fmt.license.rst`
+- Version: 11.1.3, compiled into the executables through spdlog
+- Upstream: https://github.com/fmtlib/fmt
+- License: MIT with an exception that allows redistributing embedded object code without the notice. See the [fmt license](https://github.com/fmtlib/fmt/blob/11.1.3/LICENSE).
+
+## Catch2
+
+- Version: 3.7.1, used only by the `JiStatsTests` executable and not included in release binaries
+- Upstream: https://github.com/catchorg/Catch2
+- License: [Boost Software License 1.0](https://github.com/catchorg/Catch2/blob/v3.7.1/LICENSE.txt)
 
 ## MinGW-w64 and winpthreads
 
@@ -41,12 +62,10 @@ The [MinGW-w64 releases](https://github.com/mingw-w64/mingw-w64/tags) provide bo
 
 ## UPX (optional release packing tool)
 
-- Component: bundled build/distribution tool under `tools/upx/`
-- Upstream project: `https://github.com/upx/upx`
-- Bundled official version: `5.1.1`
+UPX is not stored in this repository or linked into JiStats. The optional `-upx` release variants are packed with an external UPX executable.
+
+- Upstream project: https://github.com/upx/upx
 - Upstream license: GPL v2 or later, with the UPX special exception for compressed executables
-- Local license files: `tools/upx/LICENSE` and `tools/upx/COPYING`
-- Corresponding source for the bundled executable: [UPX 5.1.1 source archive](tools/upx/upx-5.1.1-src.tar.xz)
 - Distribution note: if you ship UPX-packed JiStats binaries, use an official unmodified UPX release and ship the matching upstream `LICENSE` and `COPYING` texts with that distribution.
 
-Distributors should ship this file together with the root `LICENSE` and the upstream third-party license texts above.
+Distributors should ship this file together with the root `LICENSE` and the toolchain and UPX license texts listed above.

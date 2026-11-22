@@ -41,7 +41,7 @@ For full-tree formatting and static analysis on Windows, install `mingw-w64-ucrt
 
 ## CodeQL scanning
 
-The [repository CodeQL workflow](../../.github/workflows/codeql.yml) scans C/C++, JavaScript/TypeScript, and GitHub Actions on same-repository pull requests and pushes for `main` and `release/**`. It skips the analysis jobs when the tested diff contains only Markdown documentation. Markdown inside the synthetic Kimi runtime and redacted ChatGPT export payloads still triggers scans. The workflow also scans weekly, on manual dispatch, and when a diff cannot be verified.
+The [repository CodeQL workflow](../../.github/workflows/codeql.yml) scans C/C++, JavaScript/TypeScript, and GitHub Actions on same-repository pull requests and pushes for `main` and `release/**`. It skips the analysis jobs when the tested diff contains only Markdown documentation. Markdown inside the synthetic Kimi runtime and redacted ChatGPT export payloads still triggers scans. The workflow also scans weekly, on manual dispatch, and when a diff cannot be verified. The C/C++ job runs without a build, so it first configures CMake to download the pinned dependency headers into `build-codeql/` and excludes that directory from the scan.
 
 The repository workflow publishes results to **Security and quality → Code scanning**. To scan a branch on demand, select **Run workflow** on the **CodeQL analysis** page in GitHub Actions.
 

@@ -79,11 +79,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Buildless extraction resolves includes from the workspace. Configure
+      # CMake to download the pinned dependency headers there, but scan only
+      # first-party sources.
+      - name: Fetch C++ dependency headers
+        if: matrix.language == 'c-cpp'
+        run: cmake -S . -B build-codeql -DJISTATS_BUILD_TESTS=ON
       - name: Initialize CodeQL
         uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           languages: ${{ matrix.language }}
           build-mode: none
+          config: |
+            paths-ignore:
+              - build-codeql
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
