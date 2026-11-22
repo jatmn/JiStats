@@ -23,7 +23,7 @@ while IFS= read -r -d '' change && IFS= read -r -d '' file; do
     read -r _ mode _ blob _ <<<"$change"
     [[ $mode == 100644 || $mode == 100755 ]] || continue
     case "${file,,}" in
-        *.c|*.cc|*.cpp|*.cxx|*.c++|*.h|*.hh|*.hpp|*.hxx|*.h++|*.inc|*.cppm|*.ccm|*.cxxm|*.c++m) ;;
+        *.c|*.cc|*.cp|*.cpp|*.cxx|*.c++|*.h|*.hh|*.hpp|*.hxx|*.h++|*.inc|*.cppm|*.ccm|*.cxxm|*.c++m) ;;
         *) continue ;;
     esac
 
