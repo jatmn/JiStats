@@ -1,5 +1,6 @@
 #include "providers/openai/OpenAIAdapter.hpp"
 #include "core/JsonParser.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>

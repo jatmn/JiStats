@@ -72,7 +72,7 @@ Current cross-component coverage includes:
 The repo now has a dedicated SQLite-enabled verification lane:
 
 - script: `scripts/run_sqlite_quality_gate.ps1`
-- GitHub Actions: [CI](../.github/workflows/ci.yml) runs on pull requests and pushes targeting `main` and `release/**`. It can also be dispatched manually.
+- GitHub Actions: [CI](../.github/workflows/ci.yml) runs this gate on Windows and a MinGW-w64 cross-build on Linux for pull requests targeting `main` and `release/**`, and for manual runs. On pull requests, it uses the test merge commit to skip both builds for documentation, repository metadata, or scripts that CI does not use. Changes under `docs/fixtures/` run both builds because the tests read those fixtures. Pushes to `main` and `release/**` run the Windows gate on the integrated tree. The required `CI passed` check reports the combined result.
 
 This is the current highest-signal automated storage/migration gate because it configures a clean bundled-SQLite build, builds `JiStatsTests`, and runs the full suite through `ctest`.
 

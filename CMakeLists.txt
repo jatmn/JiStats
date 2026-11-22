@@ -20,36 +20,23 @@ option(JISTATS_ENABLE_UPX "Compress Release executables with an external unmodif
 set(JISTATS_UPX_EXECUTABLE "" CACHE FILEPATH "Path to an official unmodified UPX executable")
 
 if(JISTATS_ENABLE_UPX)
-    set(JISTATS_LOCAL_UPX_HINTS
-        "${CMAKE_SOURCE_DIR}/tools/upx"
-    )
-
     if(JISTATS_UPX_EXECUTABLE AND NOT EXISTS "${JISTATS_UPX_EXECUTABLE}")
         message(WARNING "Configured JISTATS_UPX_EXECUTABLE does not exist: ${JISTATS_UPX_EXECUTABLE}")
         set(JISTATS_UPX_EXECUTABLE "" CACHE FILEPATH "Path to an official unmodified UPX executable" FORCE)
     endif()
 
     if(NOT JISTATS_UPX_EXECUTABLE)
-        set(JISTATS_LOCAL_UPX_EXE "")
-        foreach(JISTATS_LOCAL_UPX_HINT IN LISTS JISTATS_LOCAL_UPX_HINTS)
-            if(EXISTS "${JISTATS_LOCAL_UPX_HINT}/upx.exe")
-                set(JISTATS_LOCAL_UPX_EXE "${JISTATS_LOCAL_UPX_HINT}/upx.exe")
-                break()
+        set(JISTATS_BUNDLED_UPX "${CMAKE_SOURCE_DIR}/tools/upx/upx.exe")
+        if(CMAKE_HOST_WIN32 AND EXISTS "${JISTATS_BUNDLED_UPX}")
+            set(JISTATS_UPX_EXECUTABLE "${JISTATS_BUNDLED_UPX}")
+        else()
+            # Search for a host tool separately from the cached user override.
+            find_program(JISTATS_UPX_FROM_PATH NAMES upx NO_CMAKE_FIND_ROOT_PATH)
+            if(JISTATS_UPX_FROM_PATH)
+                set(JISTATS_UPX_EXECUTABLE "${JISTATS_UPX_FROM_PATH}")
             endif()
-        endforeach()
-
-        if(JISTATS_LOCAL_UPX_EXE)
-            set(JISTATS_UPX_EXECUTABLE "${JISTATS_LOCAL_UPX_EXE}" CACHE FILEPATH "Path to an official unmodified UPX executable" FORCE)
+            unset(JISTATS_UPX_FROM_PATH CACHE)
         endif()
-    endif()
-
-    if(NOT JISTATS_UPX_EXECUTABLE)
-        find_program(
-            JISTATS_UPX_EXECUTABLE
-            NAMES upx upx.exe
-            HINTS ${JISTATS_LOCAL_UPX_HINTS}
-            DOC "Path to an official unmodified UPX executable"
-        )
     endif()
 
     if(JISTATS_UPX_EXECUTABLE)
@@ -57,6 +44,12 @@ if(JISTATS_ENABLE_UPX)
     else()
         message(WARNING "JISTATS_ENABLE_UPX is ON but no unmodified UPX executable was found. Release binaries will not be packed.")
     endif()
+endif()
+
+# Link the MinGW runtime statically. Explicit import libraries can still add
+# DLL dependencies.
+if(MINGW)
+    add_link_options(-static)
 endif()
 
 # Output directories
@@ -73,7 +66,14 @@ include_directories(
 # Find SQLite3
 set(JISTATS_SQLITE_TARGET "")
 if(JISTATS_USE_SYSTEM_SQLITE)
-    find_package(SQLite3 REQUIRED)
+    if(MINGW AND CMAKE_CROSSCOMPILING)
+        find_package(SQLite3 QUIET)
+        if(NOT SQLite3_FOUND)
+            message(FATAL_ERROR "SQLite3 for the MinGW-w64 target was not found. Install it in the target prefix or use bundled SQLite with -DJISTATS_USE_SYSTEM_SQLITE=OFF.")
+        endif()
+    else()
+        find_package(SQLite3 REQUIRED)
+    endif()
     set(JISTATS_SQLITE_TARGET SQLite::SQLite3)
     add_compile_definitions(JISTATS_USE_SYSTEM_SQLITE=1)
 else()

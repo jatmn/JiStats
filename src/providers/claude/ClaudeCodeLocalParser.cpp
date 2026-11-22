@@ -2,6 +2,7 @@
 #include "core/JsonParser.hpp"
 #include "db/StorageService.hpp"
 #include "observation/ObservationPersistenceBridge.hpp"
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
