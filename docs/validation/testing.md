@@ -31,11 +31,13 @@ Pull requests classify paths against the test merge commit. Documentation, inclu
 
 The [Lint workflow](../../.github/workflows/lint.yml) checks changed first-party C and C++ lines under `src/`, `include/`, and `tests/` with LLVM 18 and `.clang-format`. It runs `actionlint` when workflows change.
 
-To preview formatting changes, substitute the pull request's target branch for `origin/main` if needed.
+To check committed changes locally, run this from the repository root in Bash with Git and the native LLVM 18 `clang-format-18` binary on your path. Substitute the pull request's target branch for `origin/main` if needed.
 
 ```bash
-git-clang-format-18 --binary clang-format-18 --diff "$(git merge-base origin/main HEAD)" HEAD -- src/ include/ tests/
+bash scripts/check_changed_format.sh "$(git merge-base origin/main HEAD)"
 ```
+
+Set `JISTATS_CLANG_FORMAT` to the LLVM 18 executable if it has a different name or location. The check reports source locations that need formatting.
 
 Use [the Windows clang gate script](../../scripts/run_clang_quality_gate.ps1) for full-tree formatting and `clang-tidy` analysis.
 

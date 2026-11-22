@@ -23,9 +23,7 @@ jobs:
           # The pull_request checkout is a merge commit. Its first parent is the base.
           fetch-depth: 2
       - name: Check first-party C and C++ formatting
-        run: |
-          clang-format-18 --style=file:.clang-format --assume-filename=src/format-check.cpp --dump-config >/dev/null
-          git-clang-format-18 --binary clang-format-18 --diff HEAD^1 HEAD -- src/ include/ tests/
+        run: bash scripts/check_changed_format.sh HEAD^1
       - name: Lint GitHub Actions workflows
         run: |
           workflows=$(git diff --name-only HEAD^1 HEAD -- .github/workflows/)
