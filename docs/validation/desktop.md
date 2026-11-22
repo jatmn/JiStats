@@ -10,6 +10,18 @@ Use a Windows 11 desktop session and a build of the candidate. Record the revisi
 - Check the offline notice, its retry and dismiss actions, and the persistent status through recovery. Verify that Analysis range controls reflect the effective persisted scope and that manual export uses that scope when relevant.
 - For MiniMax Settings, exercise the [credential scenarios](../providers/minimax.md#credential-behavior-to-preserve).
 
+### Fresh packaged database
+
+In a separate isolated Windows profile with no existing JiStats database, launch the packaged executable from the directory containing `db_migrations/`. Leave all integrations disabled so provider activity cannot create the Kimi row. Exit JiStats and open the new `%LOCALAPPDATA%\JiStats\jistats.db` read-only in a SQLite client. Run:
+
+```sql
+SELECT
+    EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'export_runs') AS has_export_runs,
+    EXISTS(SELECT 1 FROM providers WHERE provider_key = 'kimi') AS has_kimi_provider;
+```
+
+Record both results. Both must be `1` before marking the package verified. The two `010` migrations create the export table and seed Kimi separately, so the recorded schema version can reach `12` with either effect missing.
+
 ## Taskbar checks
 
 - Enable, disable, and re-enable the overlay. Check compact width, readable text, color bands and low-quota emphasis, and placement around the clock, notification area, and TrafficMonitor if present.

@@ -10,7 +10,7 @@ Release signoff is open. The [roadmap](plan.md) defines the intended scope. The 
 | Static analysis and formatting | Resolve the [clang gate](../scripts/run_clang_quality_gate.ps1) findings or record the release decision on the backlog. The recorded pass found formatting violations in 101 repo-owned files and tidy findings in 58 translation units. |
 | Coverage and integration | Confirm and meet the release thresholds and full-flow integration scope. The previous checklist proposed over 80% unit and over 60% integration coverage, with manual checks complete. |
 | Upgrade | Validate or explicitly defer the broader v0.x upgrade claim against representative real data. Existing migration and settings-preservation tests cover specific paths. See [migration behavior](reference/storage.md#migration-behavior). |
-| Release package | Assemble and smoke-test the portable bundle, including migrations and licenses, with a clean profile and the intended launch directory. Use the [desktop sign-in check](validation/desktop.md#dashboard-and-background-checks) to verify that a pending migration applies at Windows sign-in. |
+| Release package | Assemble and smoke-test the portable bundle, including migrations and licenses, with a clean profile and the intended launch directory. Use the [fresh database check](validation/desktop.md#fresh-packaged-database) to verify both migration `010` effects and the [desktop sign-in check](validation/desktop.md#dashboard-and-background-checks) to verify that a pending migration applies at Windows sign-in. |
 
 The optional OpenAI API-platform freshness probe remains blocked under [A0.2d](progress.md#blocked-backlog). The subscription-first release scope can proceed independently.
 
