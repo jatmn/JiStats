@@ -3,14 +3,11 @@
 #include "db/SettingsService.hpp"
 #include "db/StorageService.hpp"
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <string>
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
-
-#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
-#include <sqlite3.h>
-#endif
 
 using namespace JiStats;
 using JiStats::TestSupport::TempTestDatabase;
@@ -53,6 +50,28 @@ private:
     std::string name_;
     std::optional<std::string> originalValue_;
     bool hadOriginal_ = false;
+};
+
+class ScopedWorkingDirectory {
+public:
+    explicit ScopedWorkingDirectory(const std::filesystem::path& path)
+        : originalPath_(std::filesystem::current_path()) {
+        std::filesystem::current_path(path);
+    }
+
+    ScopedWorkingDirectory(const ScopedWorkingDirectory&) = delete;
+    ScopedWorkingDirectory& operator=(const ScopedWorkingDirectory&) = delete;
+
+    ~ScopedWorkingDirectory() {
+        std::error_code error;
+        std::filesystem::current_path(originalPath_, error);
+        if (error) {
+            std::terminate();
+        }
+    }
+
+private:
+    std::filesystem::path originalPath_;
 };
 
 bool tableExists(StorageService& storage, const std::string& tableName) {
@@ -280,43 +299,44 @@ TEST_CASE("SchemaManager upgrades a version 7 database to version 8 gap markers 
 
 TEST_CASE("SchemaManager upgrades a version 9 database to version 10 analysis persistence metadata when SQLite is available", "[schema][migration]") {
     requireSqlite();
-#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
-    if (sqlite3_libversion_number() < 3035000) {
-        SKIP("SQLite 3.35 or newer is required to construct the version 9 fixture");
+
+    const auto sourceMigrations = std::filesystem::absolute("db_migrations");
+    TempTestDirectory fixture("jistats_schema_v9");
+    const auto fixtureRoot = std::filesystem::absolute(fixture.path());
+    const auto fixtureMigrations = fixtureRoot / "db_migrations";
+    REQUIRE(std::filesystem::create_directory(fixtureMigrations));
+
+    constexpr const char* version9Migrations[] = {
+        "001_initial_schema.sql",
+        "002_add_taskbar_preference.sql",
+        "003_add_activity_events.sql",
+        "004_add_mirror_state_tables.sql",
+        "005_add_runtime_state.sql",
+        "006_add_provider_capabilities.sql",
+        "007_add_usage_rollups.sql",
+        "008_add_gap_markers.sql",
+        "009_add_claude_provider.sql",
+    };
+    for (const char* migration : version9Migrations) {
+        CAPTURE(migration);
+        REQUIRE(std::filesystem::copy_file(sourceMigrations / migration, fixtureMigrations / migration));
     }
-#endif
 
-    TempTestDatabase tempDb;
     StorageService storage;
+    {
+        // SchemaManager discovers migrations relative to the working directory.
+        ScopedWorkingDirectory workingDirectory(fixtureRoot);
+        REQUIRE(storage.init((fixtureRoot / "test.db").string()));
 
-    REQUIRE(storage.init(tempDb.path()));
+        SchemaManager manager(storage);
+        REQUIRE(manager.getCurrentVersion() == 9);
+        REQUIRE_FALSE(manager.needsMigration());
 
-    auto resetResult = storage.execute(
-        "DELETE FROM schema_version WHERE version IN (10, 11, 12);"
-        "DROP TABLE IF EXISTS recovery_checkpoints;"
-        "DROP TABLE IF EXISTS export_runs;");
-    REQUIRE(resetResult.success());
-
-    auto removeHourlyColumns = storage.execute(
-        "ALTER TABLE usage_rollups_hourly DROP COLUMN local_request_count;"
-        "ALTER TABLE usage_rollups_hourly DROP COLUMN imported_request_count;"
-        "ALTER TABLE usage_rollups_hourly DROP COLUMN api_request_count;"
-        "ALTER TABLE usage_rollups_hourly DROP COLUMN unknown_request_count;"
-        "ALTER TABLE usage_rollups_hourly DROP COLUMN backfilled_request_count;");
-    auto removeDailyColumns = storage.execute(
-        "ALTER TABLE usage_rollups_daily DROP COLUMN local_request_count;"
-        "ALTER TABLE usage_rollups_daily DROP COLUMN imported_request_count;"
-        "ALTER TABLE usage_rollups_daily DROP COLUMN api_request_count;"
-        "ALTER TABLE usage_rollups_daily DROP COLUMN unknown_request_count;"
-        "ALTER TABLE usage_rollups_daily DROP COLUMN backfilled_request_count;");
-
-    REQUIRE(removeHourlyColumns.success());
-    REQUIRE(removeDailyColumns.success());
-
-    SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 9);
-    REQUIRE(manager.needsMigration());
-    REQUIRE(manager.migrateToVersion(10));
+        constexpr auto analysisMigration = "010_add_analysis_persistence_metadata.sql";
+        REQUIRE(std::filesystem::copy_file(sourceMigrations / analysisMigration, fixtureMigrations / analysisMigration));
+        REQUIRE(manager.needsMigration());
+        REQUIRE(manager.migrateToVersion(10));
+    }
 
     REQUIRE(tableExists(storage, "recovery_checkpoints"));
     REQUIRE(tableExists(storage, "export_runs"));
