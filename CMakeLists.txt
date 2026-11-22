@@ -46,8 +46,8 @@ if(JISTATS_ENABLE_UPX)
     endif()
 endif()
 
-# MinGW-w64 cross builds from Linux: link the GCC runtime statically so the
-# executables run on Windows without extra DLLs next to them.
+# Link the MinGW runtime statically. Explicit import libraries can still add
+# DLL dependencies.
 if(MINGW)
     add_link_options(-static)
 endif()

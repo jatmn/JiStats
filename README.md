@@ -124,9 +124,9 @@ cmake -S . -B build-mingw -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw
 cmake --build build-mingw
 ```
 
-`build-mingw/bin/` then holds `JiStats.exe` and `JiStatsMiniMaxCli.exe`; add `-DJISTATS_BUILD_TESTS=ON` for `JiStatsTests.exe`. The executables link the MinGW runtime statically, so you can copy them to a Windows machine without extra DLLs. ImageMagick replaces the Windows-only PowerShell step that builds the app icon. The bundled `tools/upx/upx.exe` only runs on Windows, so packed `-upx` variants need a `upx` on `PATH`.
+`build-mingw/bin/` then holds `JiStats.exe` and `JiStatsMiniMaxCli.exe`. Add `-DJISTATS_BUILD_TESTS=ON` for `JiStatsTests.exe`. The executables link the MinGW runtime statically. ImageMagick replaces the Windows-only PowerShell step that builds the app icon. The bundled `tools/upx/upx.exe` only runs on Windows, so packed `-upx` variants need a `upx` on `PATH`.
 
-Cross-builds use bundled SQLite by default. To use `-DJISTATS_USE_SYSTEM_SQLITE=ON`, install SQLite built for Windows x64 into the MinGW target prefix or set `CMAKE_FIND_ROOT_PATH` to the Windows dependency prefix. Configure in a fresh build directory if CMake previously cached Linux SQLite paths.
+Cross-builds use bundled SQLite by default. With bundled or statically linked SQLite, you can copy the executables to Windows without extra DLLs. To use `-DJISTATS_USE_SYSTEM_SQLITE=ON`, install SQLite built for Windows x64 into the MinGW target prefix or set `CMAKE_FIND_ROOT_PATH` to the Windows dependency prefix. If the build links a shared SQLite package, copy that package's SQLite DLL (typically `sqlite3.dll`) alongside the executables. Configure in a fresh build directory if CMake previously cached Linux SQLite paths.
 
 MSVC remains the reference toolchain, and the tests and SQLite quality gate run on Windows.
 
