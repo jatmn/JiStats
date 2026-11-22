@@ -6976,7 +6976,7 @@ bool AppController::init(bool launchInBackground) {
 
         pImpl->dashboardPresenter.setAnalysisPresenter(&pImpl->analysisPresenter);
 
-        const std::time_t now = std::time(nullptr);
+        const std::time_t now = pImpl->currentTime();
         pImpl->markLaunchRecoveryState(now);
 
 #ifndef JISTATS_ENABLE_TEST_HOOKS

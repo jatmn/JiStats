@@ -2771,6 +2771,8 @@ TEST_CASE("AppController handles long-gap mixed provider recovery outcomes witho
 
 TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout snapshot changes",
           "[app][runtime][openai][codex]") {
+    requireSqlite();
+
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
     TempTestDirectory userProfileRoot("jistats_codex_refresh");
@@ -2825,6 +2827,8 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
 }
 
 TEST_CASE("AppController applies taskbar overlay preference toggles without leaving stale taskbar metrics", "[app][runtime]") {
+    requireSqlite();
+
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
@@ -2920,6 +2924,8 @@ TEST_CASE("AppController keeps OpenAI API-platform imported quota rows distinct 
 }
 
 TEST_CASE("AppController suppresses Kimi local-only quota snapshots and relies on activity surfaces instead", "[app][runtime][kimi]") {
+    requireSqlite();
+
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
@@ -2956,6 +2962,8 @@ TEST_CASE("AppController suppresses Kimi local-only quota snapshots and relies o
 }
 
 TEST_CASE("AppController surfaces Kimi provider-exact quota windows as remaining-first taskbar metrics", "[app][runtime][kimi]") {
+    requireSqlite();
+
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
@@ -3198,6 +3206,8 @@ TEST_CASE("AppController background watchers switch to a dormant interval when t
 #endif
 
 TEST_CASE("AppController imports Kimi local runtime snapshots into persisted runtime summaries", "[app][runtime][kimi]") {
+    requireSqlite();
+
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
     TempTestDirectory homeRoot("jistats_kimi_home");
@@ -3368,6 +3378,8 @@ TEST_CASE("AppController local-provider watcher refreshes Kimi activity after lo
 }
 
 TEST_CASE("AppController normalizes quota fields and dashboard summaries to remaining semantics", "[app][runtime]") {
+    requireSqlite();
+
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
@@ -3916,6 +3928,8 @@ TEST_CASE("AppController keeps taskbar overlay on subscription quota when Codex 
 }
 
 TEST_CASE("AppController prefers explicit MiniMax remaining values without regressing OpenAI summaries or taskbar metrics", "[app][runtime]") {
+    requireSqlite();
+
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);

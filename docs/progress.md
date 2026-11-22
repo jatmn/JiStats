@@ -47,7 +47,7 @@ Reviewed the four superseded plans and related Analysis and fixture plans agains
 
 ## 🚧 Active Work
 
-The [release checklist](release-checklist.md#evidence-backed-release-queue) is the active v1.0 queue. Use the Windows SQLite quality gate for automated build and test results. The test cleanup removes redundant cases, isolates temporary fixtures, and extends the controlled quota response test to use the shared SQLite fixture.
+The [release checklist](release-checklist.md#evidence-backed-release-queue) is the active v1.0 queue. Use the Windows SQLite quality gate for automated build and test results. The test cleanup removes redundant cases, isolates temporary fixtures, and extends the controlled quota response test to use the shared SQLite fixture. The review follow-up makes the rollup test use its fixture clock at startup and refresh, and makes the remaining controller cases that seed preferences skip when SQLite is absent.
 
 ## ✅ Recently Completed
 

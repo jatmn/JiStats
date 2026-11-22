@@ -268,7 +268,8 @@ TEST_CASE("AppController prefers rollup-backed quantified summaries when usage r
     REQUIRE(storage.init(dbPath.path()));
 
     const auto ids = seedUsageAccounts(storage);
-    const std::time_t now = utcDayStartForTest(std::time(nullptr)) + 12 * 60 * 60;
+    // Use the previous UTC noon so startup wall time is outside the fixture windows.
+    const std::time_t now = utcDayStartForTest(std::time(nullptr)) - 12 * 60 * 60;
     const std::time_t openaiRecent = now - 120;
     const std::time_t minimaxRecent = now - 20 * 60;
     const std::time_t openaiOlder = now - 3 * 60 * 60;
@@ -299,6 +300,11 @@ TEST_CASE("AppController prefers rollup-backed quantified summaries when usage r
     app.setDatabasePathForTesting(dbPath.path());
     app.setCurrentTimeForTesting(now);
     REQUIRE(app.init());
+
+    const DashboardViewModel startupViewModel = app.getDashboardViewModelForTesting();
+    REQUIRE(startupViewModel.runtimeSummaries.size() == 4);
+    CHECK(startupViewModel.runtimeSummaries[0].detail == "1 request, 200 tokens");
+
     app.refreshRuntimeForTesting();
 
     const DashboardViewModel viewModel = app.getDashboardViewModelForTesting();
