@@ -1,27 +1,27 @@
 # V1.0 release checklist
 
-Release signoff is open. The [roadmap](plan.md) defines the intended scope. The [work tracker](progress.md) owns follow-up work.
+Release signoff is open. The [roadmap](plan.md) defines the intended scope and tracks implementation work. Use this checklist to record the revision, environment, and evidence for the candidate that will ship.
 
 ## Evidence-backed release queue
 
-| Gate | Remaining work |
-| --- | --- |
-| Windows CI | Run the [SQLite quality gate](validation/sqlite-quality-gate.md) on the release candidate. Confirm that CI actually runs the full suite on Windows at the candidate revision. Use manual dispatch if change detection skips the build. |
-| Static analysis and formatting | Resolve the [clang gate](../scripts/run_clang_quality_gate.ps1) findings or record the release decision on the backlog. The recorded pass found formatting violations in 101 repo-owned files and tidy findings in 58 translation units. |
-| Coverage and integration | Confirm and meet the release thresholds and full-flow integration scope. The previous checklist proposed over 80% unit and over 60% integration coverage, with manual checks complete. |
-| SQLite baseline | Verify fresh version 12 initialization and that both historical version 12 layouts reopen with their settings intact. With a disposable copy of a pre-baseline development database, verify the startup warning and check that the file stays unchanged. See [migration behavior](reference/storage.md#migration-behavior). |
-| Release package | Assemble and smoke-test the portable bundle with its licenses and a clean Windows profile. Use the [fresh database check](validation/desktop.md#fresh-packaged-database) and the [desktop sign-in check](validation/desktop.md#dashboard-and-background-checks) to verify the embedded schema outside the portable folder. |
+- [ ] Run the [SQLite quality gate](validation/sqlite-quality-gate.md) on the release candidate. Confirm that the candidate's CI run actually executes the full cross-built suite on Windows. Use manual dispatch if change detection skips the build.
+- [ ] Run the [clang quality gate](../scripts/run_clang_quality_gate.ps1) on the candidate. Resolve findings or record the release decision and any remaining backlog. The earlier run reported formatting violations in 101 repo-owned files and tidy findings in 58 translation units.
+- [ ] Agree on and record the release coverage thresholds and required full-flow integration scenarios. Verify the candidate against both and record the results. Check this item only when each criterion passes or the release owner records an explicit exception and rationale for it. The earlier plan proposed over 80% unit coverage and over 60% integration coverage. The current CI workflow runs tests without enforcing those thresholds.
+- [ ] Verify the packaged SQLite baseline and Windows sign-in launch using a clean profile. Check that both historical v12 layouts reopen with their settings intact. Use a disposable pre-baseline database to verify the startup warning and check that the file stays unchanged. [Packaged database and sign-in checks](validation/desktop.md#fresh-packaged-database) · [Migration behavior](reference/storage.md#migration-behavior)
+- [ ] Run the [Windows desktop checks](validation/desktop.md) for dashboard, tray and taskbar quota, offline retry/dismiss and recovery, Explorer restart, and sleep/resume. Check Analysis scope and manual and scheduled HTML output on the candidate. Record which provider surfaces and layouts were exercised.
+- [ ] Check startup time, local dashboard time, memory, and responsiveness during sync on the candidate. Record the machine, build, and results against the targets below.
 
-The optional OpenAI API-platform freshness probe remains blocked under [A0.2d](progress.md#blocked-backlog). The subscription-first release scope can proceed independently.
+The optional [OpenAI API-platform freshness probe](plan.md#blocked-backlog) remains blocked. The subscription-first release can proceed independently.
 
 ## Recorded verification
 
-The entries below capture earlier evidence. Record the revision and scope of each future candidate check.
+These entries are historical or development evidence. Record the revision and scope of each release-candidate check separately.
 
 | Area | Evidence |
 | --- | --- |
 | Build and tests | Debug, Release, and warning-gated builds passed locally on 2026-04-21. The warning-gated suite recorded 4,623 assertions across 443 cases and passed CTest. Focused reruns covered provider fixtures, offline recovery, settings, migration, and credential paths. |
 | Windows CI | The full cross-built Windows suite passed in [the PR #16 run](https://github.com/jatmn/JiStats/actions/runs/45067254166) at `1205402` and in [the integrated main build](https://github.com/jatmn/JiStats/actions/runs/45068074135) at `eba30e2`. Earlier, [PR #10](https://github.com/jatmn/JiStats/pull/10) replaced a 300 ms timing threshold with a test that holds the provider response while checking persisted state. The replacement passed on main at `9b6d520` in [run 44975908262](https://github.com/jatmn/JiStats/actions/runs/44975908262). The prior assertion had failed at 578 ms and 456 ms in [run 44961330523](https://github.com/jatmn/JiStats/actions/runs/44961330523) and [run 44960685972](https://github.com/jatmn/JiStats/actions/runs/44960685972). |
+| Windows CI at the audit baseline | [Main at `6cd5610`](https://github.com/jatmn/JiStats/actions/runs/45076271119) ran the Linux and Windows jobs. The Windows suite passed 448 cases and 5,189 assertions. [Main at `326dcd4`](https://github.com/jatmn/JiStats/actions/runs/45079671212) passed the aggregate CI check by reusing the predecessor result and skipped both build and test jobs. |
 | First run and packaging | The 2026-04-21 isolated-profile launch created `%LOCALAPPDATA%\JiStats\jistats.db`. Standard and side-by-side UPX Release builds were recorded. The fresh profile used opt-in provider defaults. |
 | Desktop | The [desktop record](validation/desktop.md#recorded-coverage) captures the 2026-04-20 quota display pass and the 2026-04-21 repeated menu/click-away and Explorer-recovery pass. Earlier Analysis smoke exercised scope switching, charting, and responsiveness, and found an effective-range fallback mismatch that was fixed. |
 | Provider evidence | The [2026-04-21 validation record](validation/provider-evidence-2026-04-21.md) covers MiniMax remains and OAuth-backed Kimi quota. Claude Code support is bounded local activity. Codex uses local rollouts for quota. |
@@ -32,9 +32,9 @@ See the [archived release record](https://github.com/jatmn/JiStats/blob/fd934179
 
 ## Before tagging
 
-- [ ] Merge the release candidate to main and pass Windows CI.
-- [ ] Resolve the open gates above and record the final test and evidence scope.
-- [ ] Check version 1.0.0 consistency across the build, manifest, and About.
+- [ ] Close the release blockers in the [V1.0 roadmap](plan.md#v10-implementation-and-signoff). For each other open V1.0 implementation item, record the release owner's explicit deferral and rationale in the roadmap before tagging.
+- [ ] Merge the release candidate to main, complete the queue above on the intended release revision, and record the test and evidence scope.
+- [ ] Confirm version 1.0.0 across the packaged build, manifest, and About. The audited source declares 1.0.0 in CMake and AppController and 1.0.0.0 in the Windows manifest.
 - [ ] Create the initial changelog and verify user docs against the packaged behavior.
 - [ ] Assemble and smoke-test the portable bundle. For MinGW builds, include the [runtime license files from the toolchain used](../THIRD_PARTY_NOTICES.md#mingw-w64-and-winpthreads). For the packed variant, record the exact UPX version and include its matching license and copying texts.
 

@@ -32,4 +32,4 @@ The importer records timestamped user messages as historical activity. Live quot
 
 ## Organization usage and costs
 
-The optional [API-platform validation path](openai-api-platform.md) targets organization usage and costs. Its first live probe reached both endpoints and failed authorization on the required usage scope. See the [work tracker](../progress.md#blocked-backlog) for the dependency.
+The optional [API-platform validation path](openai-api-platform.md) targets organization usage and costs. Its first live probe reached both endpoints and failed authorization on the required usage scope. See the [roadmap checklist](../plan.md#blocked-backlog) for the dependency.
