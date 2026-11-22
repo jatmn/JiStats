@@ -6333,23 +6333,19 @@ public:
         DashboardViewModel& viewModel,
         const DashboardPreferences& preferences,
         std::time_t now) {
-        persistProviderRefreshState(viewModel, now);
-
         bool executedCatchUp = false;
-        bool recoveryStillPending = hasPendingRecovery();
-        if (recoveryStillPending && viewModel.runtimeState != RuntimeState::Offline) {
-            overlayPendingRecoveryState(viewModel);
+        if (viewModel.runtimeState != RuntimeState::Offline && hasPendingRecovery()) {
             executedCatchUp = executePendingCatchUp(now, viewModel, activeProviderManager());
             if (executedCatchUp) {
                 viewModel = buildDashboardViewModel(now);
                 viewModel.preferences = preferences;
             }
-            recoveryStillPending = hasPendingRecovery();
         }
 
+        // Catch-up can replace the quota result used for the notice.
+        persistProviderRefreshState(viewModel, now);
         applyGapAnnotations(viewModel, now);
-        if (recoveryStillPending &&
-            viewModel.runtimeState != RuntimeState::Offline) {
+        if (viewModel.runtimeState != RuntimeState::Offline && hasPendingRecovery()) {
             promotePendingRecoveryState(viewModel);
         }
 

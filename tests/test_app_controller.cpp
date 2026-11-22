@@ -1067,12 +1067,14 @@ public:
         std::string displayName,
         QuotaResponse quotaResponse,
         std::shared_future<void> releaseQuota = {},
-        int firstBlockedFetch = 1)
+        int firstBlockedFetch = 1,
+        std::optional<QuotaResponse> firstQuotaResponse = std::nullopt)
         : providerKey_(std::move(providerKey)),
           displayName_(std::move(displayName)),
           quotaResponse_(std::move(quotaResponse)),
           releaseQuota_(std::move(releaseQuota)),
-          firstBlockedFetch_(firstBlockedFetch) {}
+          firstBlockedFetch_(firstBlockedFetch),
+          firstQuotaResponse_(std::move(firstQuotaResponse)) {}
 
     void setQuotaResponse(QuotaResponse response) {
         std::lock_guard<std::mutex> lock(quotaMutex_);
@@ -1092,6 +1094,9 @@ public:
         ++completedQuotaFetchCount_;
         if (!released) {
             return makeFailedQuotaResponse("Timed out waiting for the test to release quota");
+        }
+        if (fetchNumber == 1 && firstQuotaResponse_.has_value()) {
+            return *firstQuotaResponse_;
         }
         std::lock_guard<std::mutex> lock(quotaMutex_);
         return quotaResponse_;
@@ -1136,6 +1141,7 @@ private:
     QuotaResponse quotaResponse_;
     std::shared_future<void> releaseQuota_;
     const int firstBlockedFetch_;
+    const std::optional<QuotaResponse> firstQuotaResponse_;
     bool enabled_ = true;
     std::atomic<int> quotaFetchCount_{0};
     std::atomic<int> completedQuotaFetchCount_{0};
@@ -2199,6 +2205,66 @@ TEST_CASE("AppController dashboard dismiss and tray retry keep offline notice lo
     CHECK(finalViewModel.runtimeState == RuntimeState::Offline);
     CHECK(finalViewModel.offlineRetryAvailable);
     CHECK(finalViewModel.offlineNoticeVisible);
+
+    app.shutdown();
+}
+
+TEST_CASE("AppController persists dismissal when the quota check after catch-up is offline", "[app][runtime][offline_notice][recovery]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, true, false, false);
+    const std::time_t now = std::time(nullptr);
+    seedRuntimeState(dbPath.path(), now - 3 * 3600, now - 3 * 3600);
+    ScopedTrayTestHandler handler([](TrayController::TestOperation,
+                                     TrayStatus,
+                                     const std::string&,
+                                     std::string&) -> std::optional<bool> {
+        return true;
+    });
+
+    AppController app;
+    std::promise<void> releaseQuota;
+    auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "minimax", "MiniMax", makeFailedQuotaResponse("network unreachable"),
+        releaseQuota.get_future().share(), 3,
+        makeQuotaResponse(now, 120, 1000, "daily", "minimax_subscription_coding_plan"));
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(provider);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setDisableTaskbarForTesting(true);
+
+    REQUIRE(app.init());
+    // The first response allowed catch-up and the second showed the notice.
+    // Hold the deferred startup refresh so it cannot replace the saved result.
+    REQUIRE(waitForCondition([&provider]() {
+        return provider->getQuotaFetchCount() == 3;
+    }, std::chrono::seconds(4)));
+    REQUIRE(provider->getCompletedQuotaFetchCount() == 2);
+    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
+
+    const auto connectivity = app.getConnectivityStateForTesting("minimax");
+    REQUIRE(connectivity.has_value());
+    CHECK(connectivity->status == "offline");
+    CHECK(connectivity->noticeDismissedAt == 0);
+
+    REQUIRE(app.clickDashboardOfflineDismissForTesting());
+    REQUIRE(waitForCondition([&app]() {
+        return !app.isDashboardOfflineNoticeVisibleForTesting();
+    }, std::chrono::seconds(4)));
+    REQUIRE(provider->getCompletedQuotaFetchCount() == 2);
+    const auto dismissed = app.getConnectivityStateForTesting("minimax");
+    REQUIRE(dismissed.has_value());
+    REQUIRE(dismissed->noticeDismissedAt > 0);
+
+    releaseQuota.set_value();
+    app.refreshRuntimeForTesting();
+    const auto refreshed = app.getConnectivityStateForTesting("minimax");
+    REQUIRE(refreshed.has_value());
+    CHECK(refreshed->status == "offline");
+    CHECK(refreshed->noticeDismissedAt == dismissed->noticeDismissedAt);
+    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
 
     app.shutdown();
 }
