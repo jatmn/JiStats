@@ -12,14 +12,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-function Get-EnvValue {
-    param([string]$Name)
-
-    $value = [Environment]::GetEnvironmentVariable($Name, "Process")
-    if ([string]::IsNullOrEmpty($value)) { $value = [Environment]::GetEnvironmentVariable($Name, "User") }
-    if ([string]::IsNullOrEmpty($value)) { $value = [Environment]::GetEnvironmentVariable($Name, "Machine") }
-    return $value
-}
+. (Join-Path $PSScriptRoot "lib/capture_common.ps1")
 
 function Get-ModelPricing {
     param([string]$ModelName)
@@ -132,17 +125,8 @@ if ([string]::IsNullOrEmpty($apiKey)) {
     exit 2
 }
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
-if ([string]::IsNullOrWhiteSpace($OutputDir)) {
-    $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
-    $OutputDir = Join-Path $localAppData 'JiStats/captures/minimax/payg'
-}
-$resolvedOutputDir = if ([System.IO.Path]::IsPathRooted($OutputDir)) {
-    $OutputDir
-} else {
-    Join-Path $repoRoot $OutputDir
-}
-[System.IO.Directory]::CreateDirectory($resolvedOutputDir) | Out-Null
+$resolvedOutputDir = Initialize-CaptureDirectory -OutputDir $OutputDir `
+    -DefaultSubdirectory "minimax/payg" -RepoRoot (Split-Path -Parent $PSScriptRoot)
 
 $timestamp = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-ddTHHmmssZ")
 $headers = @{

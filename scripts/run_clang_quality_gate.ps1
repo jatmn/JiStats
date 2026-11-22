@@ -154,25 +154,14 @@ function Invoke-CmakeConfigure {
 }
 
 function Get-RepoFiles {
-    $roots = @("src", "include", "tests")
-    $extensions = @(".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
+    param([switch]$TranslationUnitsOnly)
 
-    foreach ($root in $roots) {
-        $path = Join-Path $repoRoot $root
-        if (-not (Test-Path -LiteralPath $path)) {
-            continue
-        }
-
-        Get-ChildItem -LiteralPath $path -Recurse -File |
-            Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() } |
-            Sort-Object FullName |
-            ForEach-Object { $_.FullName }
-    }
-}
-
-function Get-TranslationUnits {
     $roots = @("src", "tests")
     $extensions = @(".c", ".cc", ".cpp", ".cxx")
+    if (-not $TranslationUnitsOnly) {
+        $roots = @("src", "include", "tests")
+        $extensions += @(".h", ".hh", ".hpp", ".hxx")
+    }
 
     foreach ($root in $roots) {
         $path = Join-Path $repoRoot $root
@@ -249,7 +238,7 @@ if (-not $SkipTidy) {
     }
 
     $tidyFailures = [System.Collections.Generic.List[string]]::new()
-    foreach ($file in Get-TranslationUnits) {
+    foreach ($file in (Get-RepoFiles -TranslationUnitsOnly)) {
         & clang-tidy `
             "--config-file=$clangTidyConfigPath" `
             "-p" $buildDirPath `

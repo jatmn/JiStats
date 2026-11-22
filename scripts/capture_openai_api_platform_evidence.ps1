@@ -13,14 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-function Get-EnvValue {
-    param([string]$Name)
-
-    $value = [Environment]::GetEnvironmentVariable($Name, "Process")
-    if ([string]::IsNullOrEmpty($value)) { $value = [Environment]::GetEnvironmentVariable($Name, "User") }
-    if ([string]::IsNullOrEmpty($value)) { $value = [Environment]::GetEnvironmentVariable($Name, "Machine") }
-    return $value
-}
+. (Join-Path $PSScriptRoot "lib/capture_common.ps1")
 
 function Invoke-OpenAIApiPlatformRequest {
     param(
@@ -137,21 +130,17 @@ function New-CaptureNotesTemplate {
 "@
 }
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
-if ([string]::IsNullOrWhiteSpace($OutputDir)) {
-    $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
-    $OutputDir = Join-Path $localAppData 'JiStats/captures/openai/api-platform'
-}
-$resolvedOutputDir = if ([System.IO.Path]::IsPathRooted($OutputDir)) {
-    $OutputDir
-} else {
-    Join-Path $repoRoot $OutputDir
-}
-[System.IO.Directory]::CreateDirectory($resolvedOutputDir) | Out-Null
+$resolvedOutputDir = Initialize-CaptureDirectory -OutputDir $OutputDir `
+    -DefaultSubdirectory "openai/api-platform" -RepoRoot (Split-Path -Parent $PSScriptRoot)
 
-$token = Get-EnvValue "OPENAI_ADMIN_KEY"
+$credentialSource = "OPENAI_ADMIN_KEY"
+$token = Get-EnvValue $credentialSource
 if ([string]::IsNullOrEmpty($token)) {
-    $token = Get-EnvValue "OPENAI_API_KEY"
+    $credentialSource = "OPENAI_API_KEY"
+    $token = Get-EnvValue $credentialSource
+}
+if ([string]::IsNullOrEmpty($token)) {
+    $credentialSource = ""
 }
 
 $organization = Get-EnvValue "OPENAI_ORG_ID"
@@ -159,13 +148,6 @@ if ([string]::IsNullOrEmpty($organization)) {
     $organization = Get-EnvValue "OPENAI_ORGANIZATION"
 }
 $projectId = Get-EnvValue "OPENAI_PROJECT_ID"
-
-$credentialSource = ""
-if (-not [string]::IsNullOrEmpty((Get-EnvValue "OPENAI_ADMIN_KEY"))) {
-    $credentialSource = "OPENAI_ADMIN_KEY"
-} elseif (-not [string]::IsNullOrEmpty((Get-EnvValue "OPENAI_API_KEY"))) {
-    $credentialSource = "OPENAI_API_KEY"
-}
 
 $missingRequirements = New-Object System.Collections.Generic.List[string]
 if ([string]::IsNullOrEmpty($token)) {

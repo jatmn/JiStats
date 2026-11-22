@@ -46,17 +46,10 @@ public static class JiStatsTaskbarWin32 {
     public static extern bool IsWindowVisible(IntPtr hWnd);
 
     [DllImport("user32.dll")]
-    public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int x, int y);
 
     [DllImport("user32.dll")]
     public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
-
-    public static IntPtr MakeLParam(short lo, short hi) {
-        return (IntPtr)(((int)hi << 16) | ((int)lo & 0xffff));
-    }
 }
 '@
 
@@ -142,14 +135,21 @@ function Get-WindowRectObject {
 function Invoke-TaskbarClick {
     param(
         [int]$X,
-        [int]$Y
+        [int]$Y,
+        [switch]$RightClick
     )
+
+    $buttonDown, $buttonUp = if ($RightClick) {
+        $MOUSEEVENTF_RIGHTDOWN, $MOUSEEVENTF_RIGHTUP
+    } else {
+        $MOUSEEVENTF_LEFTDOWN, $MOUSEEVENTF_LEFTUP
+    }
 
     [void][JiStatsTaskbarWin32]::SetCursorPos($X, $Y)
     Start-Sleep -Milliseconds 120
-    [JiStatsTaskbarWin32]::mouse_event($MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+    [JiStatsTaskbarWin32]::mouse_event($buttonDown, 0, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 50
-    [JiStatsTaskbarWin32]::mouse_event($MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+    [JiStatsTaskbarWin32]::mouse_event($buttonUp, 0, 0, 0, [UIntPtr]::Zero)
 }
 
 function Get-TaskbarClickAwayPoint {
@@ -184,11 +184,7 @@ function Open-OverlayContextMenu {
     $x = [int](($rect.Left + $rect.Right) / 2)
     $y = [int](($rect.Top + $rect.Bottom) / 2)
 
-    [void][JiStatsTaskbarWin32]::SetCursorPos($x, $y)
-    Start-Sleep -Milliseconds 120
-    [JiStatsTaskbarWin32]::mouse_event($MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [UIntPtr]::Zero)
-    Start-Sleep -Milliseconds 50
-    [JiStatsTaskbarWin32]::mouse_event($MOUSEEVENTF_RIGHTUP, 0, 0, 0, [UIntPtr]::Zero)
+    Invoke-TaskbarClick -X $x -Y $y -RightClick
 }
 
 function Assert-ContextMenuCycle {
