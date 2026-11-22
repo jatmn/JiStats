@@ -49,6 +49,8 @@ Reviewed the four superseded plans and related Analysis and fixture plans agains
 
 The [release checklist](release-checklist.md#evidence-backed-release-queue) is the active v1.0 queue. Use the Windows SQLite quality gate for automated build and test results.
 
+Pullfrog automatic reviews are pending deployment of the [workflow](../.github/workflows/pullfrog.yml) to the default branch. Verify an owner-authored draft and a subsequent push after deployment.
+
 ## ✅ Recently Completed
 
 Keep this section focused on the most recent release-shaping work. Older milestone detail now lives in `docs/plan.md`, the phase-specific docs, and git history.
