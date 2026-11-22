@@ -27,6 +27,7 @@
 #include "platform/WindowsCredentialStore.hpp"
 #include "providers/IProviderAdapter.hpp"
 #include "providers/ProviderManager.hpp"
+#include "providers/claude/ClaudeCodeAdapter.hpp"
 #include "providers/kimi/KimiAdapter.hpp"
 #include "providers/minimax/MiniMaxAdapter.hpp"
 #include "providers/openai/OpenAIExportImport.hpp"
@@ -2459,6 +2460,8 @@ TEST_CASE("AppController clears saved offline dismissal on live recovery after r
 TEST_CASE("AppController preserves saved offline dismissal through inconclusive quota checks", "[app][runtime][offline_notice][kimi]") {
     requireSqlite();
 
+    TempTestDirectory profile("jistats_offline_profile");
+    ScopedEnvironmentVariable userProfile("USERPROFILE", profile.path().string());
     TempTestDatabase dbPath;
     seedStartupPreferences(dbPath.path(), false, false, false, false, false, true);
     {
@@ -2468,8 +2471,11 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     }
     const auto offline = makeFailedQuotaResponse("network unreachable");
     auto kimi = std::make_shared<ControlledQuotaProviderAdapter>("kimi", "Kimi Code", offline);
+    auto claude = std::make_shared<ClaudeCodeAdapter>();
+    claude->setMockStatsCachePath("docs/fixtures/claude/stats-cache.redacted.json");
     auto providerManager = std::make_shared<ProviderManager>();
     providerManager->addProvider(kimi);
+    providerManager->addProvider(claude);
     ScopedTrayTestHandler handler([](TrayController::TestOperation,
                                      TrayStatus,
                                      const std::string&,
@@ -2497,6 +2503,20 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     const auto withoutCredentials = app.getConnectivityStateForTesting("kimi");
     REQUIRE(withoutCredentials.has_value());
     CHECK(withoutCredentials->noticeDismissedAt == dismissed->noticeDismissedAt);
+
+    auto preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.claudeCodeEnabled = true;
+    app.applyDashboardPreferencesForTesting(preferences);
+    const DashboardViewModel localOnly = app.getDashboardViewModelForTesting();
+    CHECK(findProviderStatus(localOnly, "kimi") == nullptr);
+    const auto* localClaude = findProviderStatus(localOnly, "claude_code");
+    REQUIRE(localClaude != nullptr);
+    CHECK(localClaude->state == ProviderState::Live);
+    REQUIRE_FALSE(localClaude->quotas.empty());
+    CHECK(localClaude->quotas.front().used > 0);
+    const auto afterLocalStats = app.getConnectivityStateForTesting("kimi");
+    REQUIRE(afterLocalStats.has_value());
+    CHECK(afterLocalStats->noticeDismissedAt == dismissed->noticeDismissedAt);
 
     kimi->setQuotaResponse(offline);
     app.refreshRuntimeForTesting();

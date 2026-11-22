@@ -6045,11 +6045,14 @@ public:
             return connectivityUpdates;
         }
 
-        // Only a usable result fetched in this refresh can confirm recovery.
+        // Recovery requires quota evidence fetched in this refresh.
         connectivityUpdates.confirmedRecovery =
             std::any_of(viewModel.providers.begin(), viewModel.providers.end(), [&refresh](const auto& provider) {
                 return (provider.state == ProviderState::Live || provider.state == ProviderState::Stale) &&
-                    refresh.fetchedProviderKeys.count(provider.providerKey) != 0;
+                    refresh.fetchedProviderKeys.count(provider.providerKey) != 0 &&
+                    std::any_of(provider.quotas.begin(), provider.quotas.end(), [&provider](const auto& quota) {
+                        return !isLimitlessLocalActivityQuota(provider, quota);
+                    });
             }) &&
             std::none_of(viewModel.providers.begin(), viewModel.providers.end(), [](const auto& provider) {
                 return provider.state == ProviderState::Offline;
