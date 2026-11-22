@@ -2351,6 +2351,21 @@ TEST_CASE("AppController keeps an offline dismissal across a provider handoff an
     CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
     CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
     CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
+
+    auto preferences = restarted.getDashboardViewModelForTesting().preferences;
+    preferences.miniMaxSubscriptionTrackingEnabled = false;
+    restarted.applyDashboardPreferencesForTesting(preferences);
+    REQUIRE(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Current);
+    const auto disabled = restarted.getConnectivityStateForTesting("minimax");
+    REQUIRE(disabled.has_value());
+    CHECK(disabled->status == "offline");
+    CHECK(disabled->noticeDismissedAt == 0);
+
+    preferences.miniMaxSubscriptionTrackingEnabled = true;
+    restarted.applyDashboardPreferencesForTesting(preferences);
+    CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK(restarted.isDashboardOfflineNoticeVisibleForTesting());
+    CHECK(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
     restarted.shutdown();
 }
 

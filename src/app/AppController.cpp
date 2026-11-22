@@ -5922,6 +5922,17 @@ public:
             }
             notificationService.showNotice(buildOfflineNotice(viewModel, now));
         } else if (transition.exitedOffline) {
+            // The episode also ends for providers omitted from the new dashboard.
+            if (storageAvailable && storageService.isOpen()) {
+                const auto result = storageService.execute(
+                    "UPDATE connectivity_state SET notice_dismissed_at_utc = NULL, "
+                    "updated_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                    "WHERE notice_dismissed_at_utc IS NOT NULL AND account_id IN ("
+                    "SELECT id FROM accounts WHERE scope_type = 'runtime');");
+                if (!result.success()) {
+                    JISTATS_LOG_WARN(LogCategory::Db, "Failed to clear the saved offline notice dismissal");
+                }
+            }
             notificationService.clearNotice(NoticeType::Offline);
         } else if (viewModel.runtimeState == RuntimeState::Offline &&
                    lastRuntimeState == RuntimeState::Offline) {
