@@ -58,9 +58,13 @@ Bad evidence examples:
 - `ctest` passed, without proving SQLite was enabled
 - a default build where storage tests quietly took the `SQLite not available` branch
 
+## Linux validation
+
+The [portable test build](../../README.md#building-on-linux) enables bundled SQLite and runs the required schema, storage and rollup cases directly on Linux. PR CI runs the remaining controller and provider integration cases on Windows using the cross-built executable.
+
 ## Windows validation
 
-Run [`scripts/run_sqlite_quality_gate.ps1`](../../scripts/run_sqlite_quality_gate.ps1) from the repository or dispatch [Windows CI](../../.github/workflows/ci.yml). Both routes configure with bundled SQLite and tests enabled, build, and run CTest. Record the commands and outcome in the handoff.
+Follow the [UCRT64 commands](../../README.md#building-on-windows) locally, or dispatch [CI](../../.github/workflows/ci.yml) to build on Linux and run the full test executable on Windows. Both use bundled SQLite. Record the commands and outcome in the handoff.
 
 ## Exit Rule
 

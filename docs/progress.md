@@ -20,7 +20,9 @@ Verify that [Pullfrog automatic reviews](../CONTRIBUTING.md#pullfrog) run on an 
 
 Update the tracker when work changes state. At handoff, record what changed, the revision, the verification commands and results, and any blocker or next step. Keep dated release evidence in the release checklist. Record new decisions with their rationale and link to the current contract.
 
-- Updated [CI build detection](validation/testing.md#windows-commands) to skip native builds for documentation-only PRs and reuse Windows validation for documentation-only pushes with a successful previous push on the same branch. Verified the workflow with `actionlint -color` and exercised its Bash filter against local Git histories and prior push results, including failure, cancellation, and missing proof. The hosted PR run exercises both builds for the workflow change.
+- Fixed an intermittent shutdown hang seen in the [Windows test stack trace](https://github.com/jatmn/JiStats/actions/runs/45066218501/job/137343424464). AppController now sets the stop flag while holding both worker wait mutexes before waking and joining the workers. A controlled shutdown interleaving reproduced the missed wakeup and verified the fix.
+
+- Updated [CI build detection](validation/testing.md#continuous-integration) to skip native builds for documentation-only PRs and reuse Windows validation for documentation-only pushes with a successful previous push on the same branch. Verified the workflow with `actionlint -color` and exercised its Bash filter against local Git histories and prior push results, including failure, cancellation, and missing proof. The hosted PR run exercises both builds for the workflow change.
 
 - Removed the AI credits section from the [README](../README.md) in [PR #17](https://github.com/jatmn/JiStats/pull/17). Verified 12 local links and anchors. `git diff --check 3bee5a1` passed.
 
@@ -38,6 +40,8 @@ Update the tracker when work changes state. At handoff, record what changed, the
 | The v1.0 release uses a portable bundle. | [Portable launch and upgrade](quick-start.md#launch) |
 
 ## Recently completed
+
+- Linux developers can run the portable Catch2 suite with CMake and Ninja. MinGW-w64 builds the Windows release binaries and powers CI for code PRs, protected-branch pushes, and manual runs. The full suite executes on a hosted Windows runner. See the [build instructions](../README.md#building-on-linux) and [CI verification guide](validation/testing.md#continuous-integration).
 
 - Organized the documentation around the [index](README.md) and consolidated duplicate provider, runtime, and UI contracts.
 - Audited provider-fed data paths, Codex throughput and SQLite import, Analysis, and fixtures against the source. The audit below records what landed and the remaining verification boundaries.

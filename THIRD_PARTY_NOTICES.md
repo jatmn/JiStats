@@ -28,6 +28,17 @@ JiStats includes third-party components that remain licensed under their own ter
 - Copyright: Victor Zverovich
 - Local license file: `third_party/spdlog/include/spdlog/fmt/bundled/fmt.license.rst`
 
+## MinGW-w64 and winpthreads
+
+MinGW builds on Linux and MSYS2 statically link the MinGW-w64 runtime and winpthreads into the Windows executables. For each release bundle, copy both complete notice files from the MinGW-w64 source release used to build it. Preserve them alongside the executable, including when packing it with UPX.
+
+| Source path in the matching MinGW-w64 release | Path in the bundle |
+| --- | --- |
+| `COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt` | `licenses/mingw-w64/COPYING.MinGW-w64-runtime.txt` |
+| `mingw-w64-libraries/winpthreads/COPYING` | `licenses/winpthreads/COPYING` |
+
+The [MinGW-w64 releases](https://github.com/mingw-w64/mingw-w64/tags) provide both files. If the distribution supplies patched runtime packages, use the corresponding package sources. For the statically linked GCC libraries, include `COPYING3` and `COPYING.RUNTIME` from the matching GCC source in `licenses/gcc/`. See the [GCC runtime license](https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html).
+
 ## UPX (optional release packing tool)
 
 - Component: bundled build/distribution tool under `tools/upx/`

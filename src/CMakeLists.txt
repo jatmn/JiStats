@@ -311,6 +311,12 @@ set_target_properties(JiStats PROPERTIES
 # instead name the file JiStats.exe-<version> behind a symlink.
 if(CMAKE_HOST_WIN32)
     set_target_properties(JiStats PROPERTIES VERSION ${PROJECT_VERSION})
+elseif(MINGW)
+    # CMake emits a default 0.0 image version after LINK_OPTIONS. Place the
+    # release version after that default without creating a versioned symlink.
+    target_link_libraries(JiStats PRIVATE
+        "-Wl,--major-image-version,${PROJECT_VERSION_MAJOR},--minor-image-version,${PROJECT_VERSION_MINOR}"
+    )
 endif()
 
 # Include directories

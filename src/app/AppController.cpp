@@ -4574,9 +4574,7 @@ public:
 
     bool waitForRefreshWatcherInterval(std::chrono::milliseconds interval) {
         std::unique_lock<std::mutex> lock(refreshWatcherMutex);
-        return refreshWatcherCv.wait_for(lock, interval, [this]() {
-            return shouldStopMiniMaxValidation();
-        });
+        return refreshWatcherCv.wait_for(lock, interval, [this]() { return shuttingDown.load(); });
     }
 
     void queueDeferredStartupRefresh(bool refreshProviderDiscovery, bool importLocalActivity) {
@@ -6663,7 +6661,11 @@ public:
     }
 
     void releaseResources(bool finalShutdownState) {
-        shuttingDown.store(true);
+        {
+            // A worker must either see shutdown or be waiting when we notify it.
+            std::scoped_lock lock(refreshWatcherMutex, interactionWorkMutex);
+            shuttingDown.store(true);
+        }
         refreshWatcherCv.notify_all();
         interactionWorkCv.notify_all();
         joinInteractionWorkThread();

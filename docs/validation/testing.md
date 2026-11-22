@@ -11,21 +11,19 @@ Choose checks for the behavior affected and record the commands, results, and an
 | Native dashboard, tray, or taskbar | Run presenter/controller tests and the relevant [desktop checks](desktop.md). Verify actual Win32 behavior in a Windows desktop session. |
 | Release | Follow the [release checklist](../release-checklist.md). |
 
+## Linux commands
+
+Follow the [Linux build instructions](../../README.md#building-on-linux) for the native test build and the MinGW cross-build. For a focused native run, execute `build-linux/bin/JiStatsTests "[schema][migration]"` from the repository root. The native target covers the portable components listed in [tests/CMakeLists.txt](../../tests/CMakeLists.txt). The Windows target includes the remaining provider, controller, reporting and desktop integration tests.
+
 ## Windows commands
 
-Run from the repository root using Visual Studio 2026 with MSVC.
+Use the [UCRT64 build instructions](../../README.md#building-on-windows) to run the full suite locally. [CTest](../../tests/CMakeLists.txt) sets the working directory for relative fixture paths. For a focused run, launch `build-ucrt/bin/JiStatsTests.exe "[openai]"` from the repository root.
 
-```powershell
-cmake -S . -B build -G "Visual Studio 18 2026" -DJISTATS_BUILD_TESTS=ON
-cmake --build build --config Debug --target JiStatsTests
-ctest --test-dir build -C Debug --output-on-failure
-```
+## Continuous integration
 
-[tests/CMakeLists.txt](../../tests/CMakeLists.txt) registers `JiStatsTests` and sets its working directory so relative fixture paths resolve. For a focused run, use a Catch2 filter such as `[openai]`, `[schema][migration]`, or `[taskbar]` with `build\bin\Debug\JiStatsTests.exe`.
+For build-affecting pull requests to `main` or `release/**`, Linux runs the portable tests and cross-compiles all three Windows executables. A hosted Windows runner downloads that run's `JiStatsTests.exe` and executes the full suite from the checkout root. The required `CI passed` check includes both jobs. CI compares the PR test merge commit with its base parent. Documentation and certain repository metadata can skip the builds. Test payloads still trigger them, including Markdown inside the Kimi synthetic runtime and ChatGPT export payload directories.
 
-Run [the SQLite gate script](../../scripts/run_sqlite_quality_gate.ps1) locally. The [CI workflow](../../.github/workflows/ci.yml) runs the Windows SQLite gate and a Linux MinGW-w64 cross-build for build-affecting pull requests targeting `main` or `release/**` and for manual runs.
-
-Pull requests classify paths against the test merge commit. Documentation, including Markdown notes in the fixture archive, and certain repository metadata can skip both builds. Edits to fixture payloads, the CI workflow, or the gate script still trigger both builds. Pushes to either protected branch compare the previous and new tips. A documentation-only push can reuse Windows validation after the previous tip's CI run succeeds on the same branch. A failed, pending, or missing run triggers a fresh Windows gate. If CI cannot determine the changed paths, it runs the applicable builds. The required `CI passed` check reports the combined result, including documentation-only runs.
+Protected-branch pushes compare the previous and new tips. Documentation-only pushes can reuse a successful CI run on the previous tip of the same branch. A failed, pending or missing predecessor run, or an unreadable diff, triggers the Linux build and full Windows suite. Dispatch [CI](../../.github/workflows/ci.yml) to run both jobs on a selected branch.
 
 ## Pull request lint
 
@@ -39,7 +37,7 @@ bash scripts/check_changed_format.sh "$(git merge-base origin/main HEAD)"
 
 Set `JISTATS_CLANG_FORMAT` to the LLVM 18 executable if it has a different name or location. The check reports source locations that need formatting.
 
-Use [the Windows clang gate script](../../scripts/run_clang_quality_gate.ps1) for full-tree formatting and `clang-tidy` analysis.
+For full-tree formatting and static analysis on Windows, install `mingw-w64-ucrt-x86_64-clang-tools-extra` and `mingw-w64-ucrt-x86_64-clang` alongside the UCRT64 build tools. From the UCRT64 shell, run the [clang gate](../../scripts/run_clang_quality_gate.ps1) with `CC=gcc CXX=g++ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_clang_quality_gate.ps1`. Use a fresh build directory when changing compilers.
 
 ## CodeQL scanning
 

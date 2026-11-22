@@ -18,7 +18,7 @@ option(JISTATS_USE_SYSTEM_SQLITE "Use system SQLite" OFF)
 option(JISTATS_ENABLE_UPX "Compress Release executables with an external unmodified UPX tool" ON)
 set(JISTATS_UPX_EXECUTABLE "" CACHE FILEPATH "Path to an official unmodified UPX executable")
 
-if(JISTATS_ENABLE_UPX)
+if(WIN32 AND JISTATS_ENABLE_UPX)
     if(JISTATS_UPX_EXECUTABLE AND NOT EXISTS "${JISTATS_UPX_EXECUTABLE}")
         message(WARNING "Configured JISTATS_UPX_EXECUTABLE does not exist: ${JISTATS_UPX_EXECUTABLE}")
         set(JISTATS_UPX_EXECUTABLE "" CACHE FILEPATH "Path to an official unmodified UPX executable" FORCE)
@@ -115,13 +115,19 @@ else()
     set(JISTATS_HAS_SPDLOG OFF)
 endif()
 
-# Add subdirectories
-add_subdirectory(src)
-
 if(JISTATS_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+if(NOT WIN32)
+    if(NOT JISTATS_BUILD_TESTS)
+        message(FATAL_ERROR "JiStats targets Windows. On Linux, set JISTATS_BUILD_TESTS=ON for portable tests or use cmake/toolchains/mingw-w64-x86_64.cmake for Windows binaries.")
+    endif()
+    return()
+endif()
+
+add_subdirectory(src)
 
 if(JISTATS_BUILD_EXAMPLES)
     add_subdirectory(examples)
