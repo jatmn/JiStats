@@ -186,12 +186,23 @@ jobs:
             $process = Start-Process @options
             if (!$process.WaitForExit($timeoutMs)) {
               Write-Host "Collecting Windows test thread stacks for PID $($process.Id)"
-              $initFile = Join-Path $env:RUNNER_TEMP 'jistats-init.gdb'
-              $stackFile = Join-Path $env:RUNNER_TEMP 'jistats-stacks.gdb'
-              @('set auto-load off', 'set debuginfod enabled off') | Set-Content $initFile -Encoding ascii
-              @('set print frame-arguments none', 'thread apply all bt 40', 'detach') | Set-Content $stackFile -Encoding ascii
               try {
-                gdb --batch --nx --quiet -ix $initFile --se=build-mingw/bin/JiStatsTests.exe -p $process.Id -x $stackFile
+                $initFile = Join-Path $env:RUNNER_TEMP 'jistats-init.gdb'
+                $stackFile = Join-Path $env:RUNNER_TEMP 'jistats-stacks.gdb'
+                @('set auto-load off', 'set debuginfod enabled off') | Set-Content $initFile -Encoding ascii
+                @('set print frame-arguments none', 'thread apply all bt 40', 'detach') | Set-Content $stackFile -Encoding ascii
+                $startInfo = [System.Diagnostics.ProcessStartInfo]::new('gdb')
+                $startInfo.UseShellExecute = $false
+                foreach ($arg in @('--batch', '--nx', '--quiet', '-ix', $initFile, '--se=build-mingw/bin/JiStatsTests.exe', '-p', $process.Id, '-x', $stackFile)) {
+                  $startInfo.ArgumentList.Add([string]$arg)
+                }
+                $debugger = [System.Diagnostics.Process]::Start($startInfo)
+                if (!$debugger.WaitForExit(15000)) {
+                  Write-Warning 'Stack capture exceeded 15 seconds.'
+                  $debugger.Kill($true)
+                }
+              } catch {
+                Write-Warning "Could not finish stack capture: $_"
               } finally {
                 if (!$process.HasExited) { $process.Kill() }
               }
@@ -199,7 +210,8 @@ jobs:
             }
             if ($process.ExitCode -ne 0) { exit $process.ExitCode }
           }
-          Invoke-WindowsTests @() 270000
+          # Reserve 15 seconds for GDB and 35 seconds for runner setup and cleanup.
+          Invoke-WindowsTests @() 250000
           if ($env:REPEAT_OFFLINE_NOTICE_TESTS -ne 'true') { exit 0 }
           foreach ($attempt in 1..8) {
             Write-Host "Checking offline notice restart timing, pass $attempt"
