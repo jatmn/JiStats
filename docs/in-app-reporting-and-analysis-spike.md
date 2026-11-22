@@ -2,7 +2,7 @@
 
 > **Status**: Historical planning spike; the dedicated Analysis workspace, shared export scope, and the first in-app history/trend/provenance slices are now shipped, and this document remains as design input for future refinements
 > **Purpose**: Capture the product stance behind JiStats' in-app analysis growth so later refinement work keeps HTML export important without making it the only detailed view
-> **Scope**: Product/UX/implementation-planning input only; this document now serves as historical design context plus a refinement backlog rather than an unstarted redesign plan
+> **Scope**: Historical product and UX design context. Follow-ups are tracked in the [work tracker](progress.md).
 
 ## Why This Spike Exists
 
@@ -518,28 +518,13 @@ Current shipped baseline:
 - last sync/import/export metadata is part of the scoped analysis/data-quality path
 - typed recovery/export persistence now backs those summaries
 
-### Slice E: Refinement And Polish
-
-Suggested contents:
-
-- stronger drill-down interactions
-- saved scope defaults
-- better comparison views
-- export preview improvements
-
-Definition of done:
-
-- the in-app analysis experience feels coherent rather than like a stack of unrelated widgets
-
-## Suggested First Shippable Target
+## First Shipped Target
 
 The first meaningful post-export target has already been chosen and shipped:
 
 - an in-app `Analysis` surface with explicit provider/account/date-range scope, daily summary rows, trend visuals, and provenance badges
 
-The remaining target is now:
-
-- refine that shipped Analysis surface so release-signoff, usability, and future comparison/drill-down work build on the current baseline instead of reopening the original shell-founding work
+Potential refinement slices are recorded in the [work tracker](progress.md).
 
 ## Open Design Questions
 
@@ -574,14 +559,6 @@ Use these questions whenever the dashboard/reporting surface grows:
 - Does the HTML export remain a portable artifact rather than the only detailed viewer?
 - Are rollups and retention behavior respected so the UI does not depend on indefinite raw-event storage?
 - Does the overview remain compact enough to serve as the primary live dashboard?
-
-## Recommended Follow-On Tracker Work
-
-After this spike is accepted:
-
-- keep manual/scheduled export treated as landed Phase 6 work unless a concrete regression is found
-- create one follow-on implementation slice for the next Analysis refinement surface, not for the already-shipped first one
-- avoid bundling dashboard redesign, export changes, and data-model expansion into one oversized task
 
 ## Related Files
 

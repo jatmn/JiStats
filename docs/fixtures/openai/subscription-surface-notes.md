@@ -86,4 +86,4 @@ Supporting note:
 - `docs/openai-codex-local-contract-decision.md`
 - `docs/openai-codex-sqlite-helper-evaluation.md`
 - `docs/openai-export-import-contract.md`
-- `docs/fixtures/openai/subscription-augmentation-fixture-plan.md`
+- [Subscription augmentation fixture guide](subscription-augmentation-fixture-guide.md)

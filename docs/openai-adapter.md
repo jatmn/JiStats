@@ -27,6 +27,7 @@ The adapter currently has working support for:
 - parsing the public camelCase Codex rate-limit sample shape
 - parsing a safe redacted local rollout excerpt
 - scanning a rollout directory and selecting the newest valid Codex rollout snapshot
+- normalizing Codex-local pressure through `fetchQuota()` with the provider-surface label `openai_subscription_codex_local`
 - basic provider identity and enable/disable behavior
 
 ## What Is Still Scaffolded
@@ -36,7 +37,6 @@ The main remaining gaps are now around richer modeling and credential verificati
 Today:
 
 - `fetchUsage()` is still a minimal success-path scaffold with no real provider data
-- `fetchQuota()` now uses local Codex rollout discovery, normalizes Codex-local pressure into the generic `QuotaResponse` shape, and carries the explicit provider-surface label `openai_subscription_codex_local`
 - credential validation is still lightweight and not a real production verification flow
 
 That means the adapter is now wired into the app with a real local quota-pressure path and explicit Codex-local provenance, but it is not yet the final runtime shape for broader OpenAI-specific modeling.
@@ -48,7 +48,7 @@ That means the adapter is now wired into the app with a real local quota-pressur
 1. resolve the local Codex rollout directory from `CODEX_HOME/sessions`, `%USERPROFILE%\\.codex\\sessions`, or `HOME/.codex/sessions`
 2. select the newest supported local rollout snapshot
 3. map the chosen bucket into a bounded pressure-style `QuotaResponse`
-4. preserve actionable diagnostics when rollout files are missing, absent, malformed, or unsupported
+4. distinguish a missing directory, a directory with no rollout files, and rollout files with no supported snapshot
 
 The current mapping is intentionally bounded rather than absolute:
 
@@ -59,15 +59,10 @@ The current mapping is intentionally bounded rather than absolute:
 
 This should be read as Codex-local pressure on a 0-100 scale, not as an invented absolute OpenAI subscription quota total.
 
-The remaining provider/runtime follow-up is therefore:
-
-1. decide whether a richer OpenAI-specific runtime shape should replace the temporary 0-100 compatibility mapping
-2. extend provider-surface population beyond the current Codex-local quota path when additional OpenAI sources land
-3. keep rollout diagnostics actionable when files drift or become unsupported
+Provider/runtime follow-ups are recorded in the [work tracker](progress.md).
 
 See also:
 
-- `plans/provider-data-path-plan.md`
+- [Provider data path status](progress.md#plan-audit)
 - `docs/openai-codex-local-contract.md`
 - `docs/openai-runtime-source-label-contract.md`
-- `docs/progress.md`
