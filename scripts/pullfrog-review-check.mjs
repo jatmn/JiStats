@@ -1,5 +1,5 @@
 import { appendFileSync } from 'node:fs';
-import { setTimeout as wait } from 'node:timers/promises';
+import timers from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { OWNER_ID } from './pullfrog-command-check.mjs';
 
@@ -22,7 +22,7 @@ export async function isAuthorizedReview(payload, { apiUrl, repository, token })
   const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
   let lastError;
   for (const delay of [0, 250, 750]) {
-    if (delay > 0) await wait(delay);
+    if (delay > 0) await timers.setTimeout(delay);
     try {
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
       if (response.ok) {

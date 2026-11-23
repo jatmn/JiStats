@@ -12,6 +12,34 @@
 namespace JiStats {
 namespace {
 
+class InitialBaselineTransaction {
+  public:
+    explicit InitialBaselineTransaction(StorageService& storage) : storage_(storage) {}
+
+    ~InitialBaselineTransaction() {
+        if (active_) {
+            storage_.rollbackTransaction();
+        }
+    }
+
+    bool begin() {
+        active_ = storage_.beginTransaction(StorageService::TransactionMode::Immediate);
+        return active_;
+    }
+
+    bool commit() {
+        if (active_ && !storage_.commitTransaction()) {
+            return false;
+        }
+        active_ = false;
+        return true;
+    }
+
+  private:
+    StorageService& storage_;
+    bool active_ = false;
+};
+
 std::optional<std::string> mapCodexProviderToJiStatsProvider(const std::string& modelProvider) {
     if (modelProvider == "openai") return std::string("openai");
     if (modelProvider == "hicap-ai") return std::string("hicap-ai");
@@ -81,7 +109,8 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromDefaultSource(std
     return importFromSource({}, now);
 }
 
-CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std::string& sourcePath, std::time_t now) {
+CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std::string& sourcePath, std::time_t now,
+                                                                      int attributionGeneration) {
     if (now <= 0) now = std::time(nullptr);
     CodexLocalUsageImportResult result;
 
@@ -95,9 +124,25 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
 
     result.rowsRead = static_cast<int>(readResult.threads.size());
 
-    const auto existingSource =
-        storage_.getCodexLocalSource(readResult.sourcePath, readResult.sourceIdentity);
+    // Each consent period starts with independent checkpoints.
+    const std::string sourceIdentity =
+        attributionGeneration > 0 ? readResult.sourceIdentity + "#attribution-" + std::to_string(attributionGeneration)
+                                  : readResult.sourceIdentity;
+    const auto existingSource = storage_.getCodexLocalSource(readResult.sourcePath, sourceIdentity);
     const bool sourceBaselineEstablished = existingSource.has_value();
+    InitialBaselineTransaction initialBaseline(storage_);
+    if (!sourceBaselineEstablished) {
+        if (!storage_.getLastError().empty() || !initialBaseline.begin()) {
+            result.error = "Could not start the Codex source baseline";
+            return result;
+        }
+        // Another instance can establish the baseline while this scan waits for the write lock.
+        // Retry from a fresh source snapshot in that case.
+        if (storage_.getCodexLocalSource(readResult.sourcePath, sourceIdentity) || !storage_.getLastError().empty()) {
+            result.error = "Codex source baseline changed during import";
+            return result;
+        }
+    }
     const std::time_t sourceBaselineAt = existingSource.has_value() && existingSource->firstSeenAt > 0
         ? existingSource->firstSeenAt
         : now;
@@ -105,7 +150,7 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
     PersistedCodexLocalSource source;
     source.sourcePath = readResult.sourcePath;
     source.sourceKind = "codex_state_sqlite";
-    source.sourceIdentity = readResult.sourceIdentity;
+    source.sourceIdentity = sourceIdentity;
     source.firstSeenAt = sourceBaselineEstablished && existingSource->firstSeenAt > 0
         ? existingSource->firstSeenAt
         : now;
@@ -134,17 +179,18 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
             continue;
         }
         const auto providerId = findProviderId(storage_, *providerKey);
-        if (!providerId.has_value()) {
-            ++result.skippedRows;
-            continue;
-        }
-        const auto accountId = ensureLocalCodexAccount(storage_, *providerId, *providerKey);
-        if (!accountId.has_value()) {
+        const auto accountId = providerId ? ensureLocalCodexAccount(storage_, *providerId, *providerKey) : std::nullopt;
+        if (!accountId) {
+            if (!sourceBaselineEstablished) {
+                result.error = "Could not bind a Codex thread to its local account during baseline";
+                return result;
+            }
             ++result.skippedRows;
             continue;
         }
 
-        auto existing = storage_.getCodexThreadImportState(sourceId, row.threadId);
+        auto existing =
+            sourceBaselineEstablished ? storage_.getCodexThreadImportState(sourceId, row.threadId) : std::nullopt;
         PersistedCodexThreadImportState state;
         if (existing.has_value()) {
             state = *existing;
@@ -248,6 +294,11 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
             result.error = storage_.getLastError();
             return result;
         }
+    }
+
+    if (!initialBaseline.commit()) {
+        result.error = storage_.getLastError();
+        return result;
     }
 
     if (minEventTime > 0) {

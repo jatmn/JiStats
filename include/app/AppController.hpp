@@ -82,6 +82,7 @@ public:
     bool isDashboardVisibleForTesting() const;
     bool dispatchTrayEventForTesting(TrayController::TestEvent event);
     bool dispatchDashboardShellCommandForTesting(DashboardShellCommand command);
+    bool selectDashboardPreferencesTabForTesting(int tabIndex);
     bool clickDashboardOfflineRetryForTesting();
     bool clickDashboardOfflineDismissForTesting();
     bool isDashboardShellDialogOpenForTesting(DashboardShellDialog dialog) const;
@@ -99,6 +100,7 @@ public:
     void refreshRuntimeForTesting();
     void setAfterSettingsDequeueForTesting(std::function<void()> callback);
     void setBeforeRuntimePublicationForTesting(std::function<void()> callback);
+    void setBeforeCodexSourceReadForTesting(std::function<void()> callback);
     void applyDashboardPreferencesForTesting(const DashboardPreferences& preferences);
     void setMiniMaxCredentialStoreForTesting(std::shared_ptr<WindowsCredentialStore> store);
     void setMiniMaxValidationResponseForTesting(

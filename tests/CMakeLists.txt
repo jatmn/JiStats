@@ -38,6 +38,7 @@ if(WIN32)
         test_dashboard_presenter.cpp
         test_tray_controller.cpp
         test_app_controller.cpp
+        test_app_controller_offline_notice.cpp
         test_app_observation_persistence.cpp
         test_analysis_presenter.cpp
         test_analysis_query_engine.cpp
@@ -87,6 +88,10 @@ target_include_directories(JiStatsTests PRIVATE
 
 if(JISTATS_SQLITE_TARGET)
     target_link_libraries(JiStatsTests PRIVATE ${JISTATS_SQLITE_TARGET})
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(JiStatsTests PRIVATE JISTATS_TEST_WRAP_SQLITE_STEP=1)
+        target_link_options(JiStatsTests PRIVATE "LINKER:--wrap=sqlite3_step")
+    endif()
 endif()
 
 if(JISTATS_HAS_SPDLOG)
@@ -126,5 +131,5 @@ set_target_properties(JiStatsTests PROPERTIES
 )
 
 # Register with CTest (run from repo root so relative fixture paths work)
-add_test(NAME JiStatsTests COMMAND $<TARGET_FILE:JiStatsTests>)
+add_test(NAME JiStatsTests COMMAND $<TARGET_FILE:JiStatsTests> "*" --order rand)
 set_tests_properties(JiStatsTests PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

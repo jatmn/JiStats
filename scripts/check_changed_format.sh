@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# != 1 ]]; then
-    printf 'Usage: %s <base-commit>\n' "$0" >&2
+if (( $# < 1 || $# > 2 )); then
+    printf 'Usage: %s <base-commit> [head-commit]\n' "$0" >&2
     exit 2
 fi
 
 cd "$(git rev-parse --show-toplevel)"
 base=$(git rev-parse --verify --end-of-options "$1^{commit}")
-head=$(git rev-parse --verify 'HEAD^{commit}')
+head=$(git rev-parse --verify --end-of-options "${2:-HEAD}^{commit}")
+tree=${JISTATS_FORMAT_TREE:-$PWD}
 formatter=${JISTATS_CLANG_FORMAT:-clang-format-18}
 
-"$formatter" --style=file:.clang-format --assume-filename=src/format-check.cpp --dump-config >/dev/null
+"$formatter" --style="file:$tree/.clang-format" --assume-filename=src/format-check.cpp --dump-config >/dev/null
 
 changed_files=$(mktemp)
 trap 'rm -f "$changed_files"' EXIT
@@ -54,7 +55,7 @@ for index in "${!files[@]}"; do
     done <<<"$patch"
 
     if (( ${#ranges[@]} > 0 )) &&
-        ! git cat-file blob "$blob" | "$formatter" --assume-filename="$file" --dry-run --Werror "${ranges[@]}"; then
+        ! git cat-file blob "$blob" | "$formatter" --assume-filename="$tree/$file" --dry-run --Werror "${ranges[@]}"; then
         failed=1
     fi
 done

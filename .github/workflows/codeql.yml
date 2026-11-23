@@ -9,6 +9,10 @@ on:
     - cron: '23 4 * * 1'
   workflow_dispatch:
 
+concurrency:
+  group: codeql-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+
 permissions:
   contents: read
 
@@ -16,8 +20,7 @@ jobs:
   changes:
     name: Detect CodeQL changes
     if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -27,17 +30,14 @@ jobs:
         with:
           filter: blob:none
           ref: ${{ github.sha }}
-          fetch-depth: ${{ github.event_name == 'push' && '0' || '2' }}
+          fetch-depth: 2
           persist-credentials: false
       - name: Identify documentation-only changes
         id: filter
-        env:
-          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          base="$PUSH_BEFORE"
-          if [ "$GITHUB_EVENT_NAME" = pull_request ] &&
-            git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null; then
+          base=
+          if git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null; then
             base="$GITHUB_SHA^1"
           fi
 
