@@ -1649,7 +1649,7 @@ TEST_CASE("AppController applies a custom Analysis edit alongside a Settings cha
     CHECK(settings.getString("ui.analysis_custom_range_start_utc") == "2026-04-01T00:00:00Z");
 }
 
-TEST_CASE("AppController skips new quota requests after an opt-out during refresh", "[app][runtime][polling]") {
+TEST_CASE("AppController skips new quota requests after Settings dequeues an opt-out", "[app][runtime][polling]") {
     requireSqlite();
     TempTestDatabase dbPath;
     seedStartupPreferences(dbPath.path(), false, false, true, false, true);
@@ -1670,7 +1670,15 @@ TEST_CASE("AppController skips new quota requests after an opt-out during refres
 
     ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
                                   std::string&) -> std::optional<bool> { return true; });
+    std::promise<void> settingsDequeued;
+    auto dequeued = settingsDequeued.get_future();
+    std::promise<void> releaseSettings;
+    auto settingsReleased = releaseSettings.get_future();
     AppController app;
+    app.setAfterSettingsDequeueForTesting([&]() {
+        settingsDequeued.set_value();
+        settingsReleased.wait_for(std::chrono::seconds(15));
+    });
     app.setDisableTaskbarForTesting(true);
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providers);
@@ -1688,20 +1696,30 @@ TEST_CASE("AppController skips new quota requests after an opt-out during refres
     auto underway = std::async(std::launch::async, [&]() { app.refreshRuntimeForTesting(); });
     const bool heldBeforeOpenAI =
         waitForCondition([&]() { return first->getQuotaFetchCount() > first->getCompletedQuotaFetchCount(); });
-    auto competing = std::async(std::launch::async, [&]() { app.refreshRuntimeForTesting(); });
 
     SendMessageW(checkbox, BM_SETCHECK, BST_UNCHECKED, 0);
     SendMessageW(GetParent(checkbox), WM_COMMAND, MAKEWPARAM(1102, BN_CLICKED), reinterpret_cast<LPARAM>(checkbox));
+    const bool optOutDequeued = dequeued.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    auto competing = std::async(std::launch::async, [&]() { app.refreshRuntimeForTesting(); });
     releaseFirst.set_value();
     underway.get();
     competing.get();
+
+    // Both refreshes finished while the opt-out was active and the old setting was still persisted.
+    const int fetchedBeforeSettingsSave = openai->getQuotaFetchCount();
+    StorageService storage;
+    const bool opened = storage.init(dbPath.path());
+    SettingsService settings(storage);
+    const auto optedInBeforeSettingsSave =
+        opened ? settings.getBool("runtime.openai_subscription_tracking_enabled") : std::nullopt;
+    releaseSettings.set_value();
     app.shutdown();
 
     CHECK(heldBeforeOpenAI);
-    CHECK(openai->getQuotaFetchCount() == fetchedBeforeOptOut);
-    StorageService storage;
-    REQUIRE(storage.init(dbPath.path()));
-    SettingsService settings(storage);
+    CHECK(optOutDequeued);
+    CHECK(fetchedBeforeSettingsSave == fetchedBeforeOptOut);
+    CHECK(optedInBeforeSettingsSave == true);
+    REQUIRE(opened);
     CHECK(settings.getBool("runtime.openai_subscription_tracking_enabled") == false);
 }
 

@@ -3882,6 +3882,7 @@ public:
     bool taskbarTestModeForTesting = false;
     bool disableCodexTokenImportForTesting = false;
     std::shared_future<void> miniMaxValidationReleaseForTesting;
+    std::function<void()> afterSettingsDequeueForTesting;
     std::function<void()> beforeRuntimePublicationForTesting;
     std::optional<std::time_t> currentTimeForTesting;
 #endif
@@ -4039,6 +4040,11 @@ public:
             }
 
             if (preferences.has_value()) {
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+                if (afterSettingsDequeueForTesting) {
+                    afterSettingsDequeueForTesting();
+                }
+#endif
                 const auto effectivePreferences =
                     refreshProviderRuntimeState(std::time(nullptr), true, true, &*preferences, analysisScope);
                 {
@@ -7587,6 +7593,10 @@ DashboardHtmlExportResult AppController::exportHtmlReportForTesting(const std::s
 
 void AppController::refreshRuntimeForTesting() {
     pImpl->refreshProviderRuntimeState(pImpl->currentTime(), true, true);
+}
+
+void AppController::setAfterSettingsDequeueForTesting(std::function<void()> callback) {
+    pImpl->afterSettingsDequeueForTesting = std::move(callback);
 }
 
 void AppController::setBeforeRuntimePublicationForTesting(std::function<void()> callback) {
