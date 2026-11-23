@@ -548,6 +548,9 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     const auto withoutCredentials = app.getConnectivityStateForTesting("kimi");
     REQUIRE(withoutCredentials.has_value());
     CHECK(withoutCredentials->noticeDismissedAt == dismissed->noticeDismissedAt);
+    CHECK(withoutCredentials->status == dismissed->status);
+    CHECK(withoutCredentials->nextRetryAt == dismissed->nextRetryAt);
+    CHECK(withoutCredentials->lastCheckedAt == dismissed->lastCheckedAt);
 
     auto preferences = app.getDashboardViewModelForTesting().preferences;
     preferences.claudeCodeEnabled = true;

@@ -2877,6 +2877,10 @@ void retainLastKnownDashboardQuota(DashboardViewModel& next, const DashboardView
         if (prior == previous.providers.end()) {
             continue;
         }
+        if (provider.providerKey == "minimax" &&
+            (provider.quotaSource.empty() || provider.quotaSource != prior->quotaSource)) {
+            continue;
+        }
         if (prior->lastKnownQuota) {
             provider.lastKnownQuota = prior->lastKnownQuota;
             continue;
@@ -3749,6 +3753,7 @@ DashboardViewModel buildDashboardViewModelFromResolvedProviderData(
         // Add quota info if we have a matching response
         if (quotaIndex < quotaResponses.size()) {
             const auto& quota = quotaResponses[quotaIndex];
+            status.quotaSource = quota.providerSurface;
             const bool missingLocalPrerequisite = isKnownLocalAvailabilityError(status.providerKey, quota.error);
             if (missingLocalPrerequisite || shouldTreatAsSuppressedLocalKimiQuota(status.providerKey, quota)) {
                 if (status.providerKey == "kimi") {
@@ -6290,6 +6295,9 @@ public:
         bool anyOnlineProvider = false;
         bool anyOfflineProvider = false;
         for (const auto& provider : viewModel.providers) {
+            if (!provider.contributesToRuntimeState) {
+                continue;
+            }
             const auto providerId = findProviderIdByKey(storageService, provider.providerKey);
             const auto runtimeAccountId =
                 ensureRuntimeTrackingAccountId(storageService, provider.providerKey, provider.displayName);

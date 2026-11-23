@@ -293,6 +293,7 @@ TEST_CASE("MiniMax adapter does not fall back to legacy API keys when an active 
 
     const QuotaResponse quota = adapter.fetchQuota();
     REQUIRE_FALSE(quota.success);
+    CHECK(quota.providerSurface == "minimax_subscription_token_plan");
     CHECK(quota.error.find("Credential not found: JiStats/minimax/subscription/token_plan/token_plan.default")
         != std::string::npos);
 }

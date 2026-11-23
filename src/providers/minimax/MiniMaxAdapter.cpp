@@ -446,7 +446,13 @@ UsageResponse MiniMaxAdapter::fetchUsage(std::time_t from, std::time_t to) {
 QuotaResponse MiniMaxAdapter::fetchQuota() {
     QuotaResponse response;
     response.snapshotTime = std::time(nullptr);
-    
+    const auto configuredSurface =
+        MiniMaxAdapter::Impl::providerSurfaceForFamily(MiniMaxAdapter::Impl::canonicalEndpointFamily(
+            pImpl->subscriptionProfile.endpointFamily, pImpl->subscriptionProfile.planKey));
+    if (pImpl->hasActiveSubscriptionProfile()) {
+        response.providerSurface = configuredSurface;
+    }
+
     if (!pImpl->mockQuotaResponse.empty()) {
         std::string tokenError;
         if (!pImpl->resolveBearerToken(tokenError).has_value()) {
@@ -457,10 +463,7 @@ QuotaResponse MiniMaxAdapter::fetchQuota() {
         pImpl->lastResolvedEndpoint = pImpl->resolveQuotaEndpoint();
         pImpl->parseQuotaPayload(pImpl->mockQuotaResponse, response);
         if (response.success) {
-            response.providerSurface = MiniMaxAdapter::Impl::providerSurfaceForFamily(
-                MiniMaxAdapter::Impl::canonicalEndpointFamily(
-                    pImpl->subscriptionProfile.endpointFamily,
-                    pImpl->subscriptionProfile.planKey));
+            response.providerSurface = configuredSurface;
         }
         return response;
     }
@@ -481,7 +484,10 @@ QuotaResponse MiniMaxAdapter::fetchQuota() {
         response = pImpl->fetchQuotaFromEndpoint(MiniMaxAdapter::Impl::TOKEN_PLAN_ENDPOINT, *bearerToken);
         pImpl->lastResolvedEndpoint = MiniMaxAdapter::Impl::TOKEN_PLAN_ENDPOINT;
     }
-    
+
+    if (!response.success && !pImpl->subscriptionProfile.endpointFamily.empty()) {
+        response.providerSurface = configuredSurface;
+    }
     return response;
 }
 

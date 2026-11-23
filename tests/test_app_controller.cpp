@@ -2772,10 +2772,11 @@ TEST_CASE("AppController retains successful Dashboard quota readings through an 
     reading.secondaryRemaining = 62;
 
     auto openai = std::make_shared<ControlledQuotaProviderAdapter>("openai", "OpenAI", reading);
-    auto minimax =
-        makeCurrentQuotaProvider("minimax", "MiniMax", 20, 100, now, "interval", "minimax_subscription_coding_plan");
-    auto manager = makeProviderManager({minimax});
+    auto minimax = std::make_shared<ControlledQuotaProviderAdapter>(
+        "minimax", "MiniMax", makeQuotaResponse(now, 20, 100, "interval", "minimax_subscription_coding_plan"));
+    auto manager = std::make_shared<ProviderManager>();
     manager->addProvider(openai);
+    manager->addProvider(minimax);
 
     AppController app;
     app.setHeadlessForTesting(true);
@@ -2820,6 +2821,26 @@ TEST_CASE("AppController retains successful Dashboard quota readings through an 
         CHECK(summary->secondaryPercentage == 62);
         CHECK(findTaskbarMetric(app.getTaskbarMetricsForTesting(), "openai") == nullptr);
     }
+
+    auto failedMiniMax = makeFailedQuotaResponse("network unreachable");
+    failedMiniMax.providerSurface = "minimax_subscription_coding_plan";
+    minimax->setQuotaResponse(failedMiniMax);
+    app.refreshRuntimeForTesting();
+    const auto samePlan = app.getDashboardViewModelForTesting();
+    const auto* sameMiniMax = findProviderStatus(samePlan, "minimax");
+    REQUIRE(sameMiniMax != nullptr);
+    REQUIRE(sameMiniMax->lastKnownQuota.has_value());
+    CHECK(sameMiniMax->lastKnownQuota->quotas.front().providerSurface == failedMiniMax.providerSurface);
+
+    failedMiniMax.providerSurface = "minimax_subscription_token_plan";
+    minimax->setQuotaResponse(failedMiniMax);
+    app.refreshRuntimeForTesting();
+    const auto switchedPlan = app.getDashboardViewModelForTesting();
+    const auto* switchedMiniMax = findProviderStatus(switchedPlan, "minimax");
+    REQUIRE(switchedMiniMax != nullptr);
+    CHECK(switchedMiniMax->state == ProviderState::Offline);
+    CHECK(switchedMiniMax->quotas.empty());
+    CHECK_FALSE(switchedMiniMax->lastKnownQuota.has_value());
 
     auto preferences = original.preferences;
     preferences.openaiSubscriptionTrackingEnabled = false;

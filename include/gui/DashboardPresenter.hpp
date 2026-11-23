@@ -304,6 +304,7 @@ struct ProviderStatus {
     // Dashboard-only subscription readings retained during an outage.
     std::optional<LastKnownQuotaReading> lastKnownQuota;
     bool contributesToRuntimeState = true;
+    std::string quotaSource;       // Includes the attempted subscription plan when a refresh fails.
     bool locallyDetected = false;  // Whether local artifacts were found at startup
     std::string detectionMessage;  // Human-readable discovery status
 };
