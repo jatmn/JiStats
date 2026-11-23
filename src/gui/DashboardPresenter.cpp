@@ -3037,8 +3037,8 @@ public:
             add(hwnd, L"BUTTON", L"&History...", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, kOpenAnalysisWindowButtonId);
         dashboardSettingsButton =
             add(hwnd, L"BUTTON", L"&Settings...", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, kMenuFileSettingsId);
-        mainTab = add(hwnd, WC_TABCONTROLW, L"",
-                      WS_VISIBLE | WS_TABSTOP | TCS_BUTTONS | TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED, kMainTabId);
+        mainTab =
+            add(hwnd, WC_TABCONTROLW, L"", WS_VISIBLE | WS_TABSTOP | TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED, kMainTabId);
         desktopTheme.styleTab(mainTab);
         const wchar_t* pageLabels[] = {L"Overview", L"Provider Details"};
         for (int index = 0; index < static_cast<int>(std::size(pageLabels)); ++index) {
@@ -5168,8 +5168,7 @@ public:
             case WM_SETTINGCHANGE:
             case WM_SYSCOLORCHANGE:
             case WM_THEMECHANGED:
-                desktopTheme.refresh();
-                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+                desktopTheme.refreshWindow(hwnd, msg);
                 return DefWindowProcW(hwnd, msg, wParam, lParam);
             case WM_CREATE:
                 createPreferencesControls(hwnd);
@@ -5430,8 +5429,7 @@ public:
             case WM_SETTINGCHANGE:
             case WM_SYSCOLORCHANGE:
             case WM_THEMECHANGED:
-                desktopTheme.refresh();
-                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+                desktopTheme.refreshWindow(hwnd, msg);
                 return DefWindowProcW(hwnd, msg, wParam, lParam);
             case WM_CREATE:
                 createShellDialogControls(hwnd, dialog);
@@ -5663,8 +5661,7 @@ public:
         case WM_SETTINGCHANGE:
         case WM_SYSCOLORCHANGE:
         case WM_THEMECHANGED:
-            desktopTheme.refresh();
-            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+            desktopTheme.refreshWindow(hwnd, msg);
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_ERASEBKGND: {
             RECT rect{};

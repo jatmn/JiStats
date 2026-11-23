@@ -10,7 +10,7 @@ Recorded activity, recovery and scheduled export status, and the Codex charts ar
 
 **File** contains Settings, **Import OpenAI Export…**, **Export HTML Report…**, and Exit. **Help** contains View Help and About JiStats.
 
-The Dashboard, Settings, and Analysis share an XP-style beige panel and beveled tabs. Selected tabs have a white face and amber accent. Editable fields, tables, and chart canvases use the Windows data-surface colors. When a Windows contrast theme is active, the panels and tabs use system colors.
+The Dashboard, Settings, and Analysis share a light neutral panel. Each tab uses its native outline, with a white face and amber accent for the selected tab. Editable fields, tables, and chart canvases use the Windows data-surface colors. When a Windows contrast theme is active, the panels and tabs use system colors.
 
 ## Quota, freshness, and confidence
 

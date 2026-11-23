@@ -455,9 +455,12 @@ TEST_CASE("Dashboard, Settings and Analysis share panel and label backgrounds", 
     REQUIRE(settings != nullptr);
     const HWND checkbox = FindWindowExW(settings, nullptr, L"BUTTON", L"Enable taskbar overlay");
     const HWND settingsTab = FindWindowExW(settings, nullptr, WC_TABCONTROLW, nullptr);
+    const HWND intervalField = FindWindowExW(settings, nullptr, L"EDIT", nullptr);
     const HWND history = FindWindowExW(dashboard, nullptr, L"BUTTON", L"&History...");
     REQUIRE(checkbox != nullptr);
     REQUIRE(settingsTab != nullptr);
+    REQUIRE(intervalField != nullptr);
+    REQUIRE_FALSE(IsWindowEnabled(intervalField));
     REQUIRE(history != nullptr);
 
     SendMessageW(history, BM_CLICK, 0, 0);
@@ -482,10 +485,12 @@ TEST_CASE("Dashboard, Settings and Analysis share panel and label backgrounds", 
     REQUIRE(bitmap != nullptr);
     const HGDIOBJ previous = SelectObject(dc, bitmap);
 
-    auto paintPixel = [&](HWND window, UINT message, LPARAM argument, POINT position) {
+    auto paintPixel = [&](HWND window, UINT message, LPARAM argument, POINT position, bool native = false) {
         SetWindowOrgEx(dc, position.x, position.y, nullptr);
         SetPixel(dc, position.x, position.y, RGB(255, 0, 255));
-        const auto result = SendMessageW(window, message, reinterpret_cast<WPARAM>(dc), argument);
+        const auto wParam = reinterpret_cast<WPARAM>(dc);
+        const auto result = native ? DefWindowProcW(window, message, wParam, argument)
+                                   : SendMessageW(window, message, wParam, argument);
         if (message == WM_CTLCOLORSTATIC || message == WM_CTLCOLORBTN) {
             const RECT pixel{position.x, position.y, position.x + 1, position.y + 1};
             FillRect(dc, &pixel, reinterpret_cast<HBRUSH>(result));
@@ -499,6 +504,9 @@ TEST_CASE("Dashboard, Settings and Analysis share panel and label backgrounds", 
     const COLORREF checkboxPanel = paintPixel(settings, WM_CTLCOLORBTN, reinterpret_cast<LPARAM>(checkbox), {0, 0});
     const COLORREF analysisPanel = paintPixel(analysis, WM_ERASEBKGND, 0, {0, 0});
     const COLORREF labelPanel = paintPixel(analysis, WM_CTLCOLORSTATIC, reinterpret_cast<LPARAM>(label), {0, 0});
+    const auto field = reinterpret_cast<LPARAM>(intervalField);
+    const COLORREF fieldPanel = paintPixel(settings, WM_CTLCOLORSTATIC, field, {0, 0});
+    const COLORREF nativeFieldPanel = paintPixel(settings, WM_CTLCOLORSTATIC, field, {0, 0}, true);
     SelectObject(dc, previous);
     DeleteObject(bitmap);
     DeleteDC(dc);
@@ -507,10 +515,11 @@ TEST_CASE("Dashboard, Settings and Analysis share panel and label backgrounds", 
     contrast.cbSize = sizeof(contrast);
     const bool highContrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) &&
                               (contrast.dwFlags & HCF_HIGHCONTRASTON);
-    CHECK(dashboardPanel == (highContrast ? GetSysColor(COLOR_BTNFACE) : RGB(236, 233, 216)));
+    CHECK(dashboardPanel == (highContrast ? GetSysColor(COLOR_BTNFACE) : RGB(246, 248, 251)));
     CHECK(settingsPanel == dashboardPanel);
     CHECK(tabPane == settingsPanel);
     CHECK(checkboxPanel == settingsPanel);
+    CHECK(fieldPanel == nativeFieldPanel);
     CHECK(analysisPanel == dashboardPanel);
     CHECK(labelPanel == analysisPanel);
 }
@@ -1231,6 +1240,7 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
     const HWND tabs = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
     const HWND viewport = FindWindowExW(dashboard, nullptr, L"JiStatsDashboardViewport", nullptr);
     REQUIRE(tabs != nullptr);
+    CHECK_FALSE(GetWindowLongPtrW(tabs, GWL_STYLE) & TCS_BUTTONS);
     REQUIRE(viewport != nullptr);
     const HWND providers = FindWindowExW(viewport, nullptr, WC_LISTVIEWW, nullptr);
     REQUIRE(providers != nullptr);

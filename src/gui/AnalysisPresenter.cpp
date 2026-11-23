@@ -1438,8 +1438,7 @@ class AnalysisPresenter::Impl {
             }
         }
         if (message == WM_SETTINGCHANGE || message == WM_SYSCOLORCHANGE || message == WM_THEMECHANGED) {
-            self.theme.refresh();
-            RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+            self.theme.refreshWindow(window, message);
         }
         if (message == WM_NOTIFY && lParam != 0) {
             const auto& notification = *reinterpret_cast<const NMHDR*>(lParam);

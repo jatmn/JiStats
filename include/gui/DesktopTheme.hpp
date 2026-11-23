@@ -19,6 +19,14 @@ class DesktopTheme {
                        (settings.dwFlags & HCF_HIGHCONTRASTON);
     }
 
+    void refreshWindow(HWND window, UINT message) {
+        refresh();
+        if (message == WM_SYSCOLORCHANGE) {
+            EnumChildWindows(window, notifySystemColorChange, 0);
+        }
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
+
     bool usesHighContrast() const {
         return highContrast;
     }
@@ -28,7 +36,7 @@ class DesktopTheme {
     }
 
     COLORREF panelColor() const {
-        return color(RGB(236, 233, 216), COLOR_BTNFACE);
+        return color(RGB(246, 248, 251), COLOR_BTNFACE);
     }
 
     COLORREF accentColor() const {
@@ -57,6 +65,14 @@ class DesktopTheme {
             return std::nullopt;
         }
         const auto control = reinterpret_cast<HWND>(lParam);
+        if (message == WM_CTLCOLORSTATIC) {
+            // Disabled and read-only edits request a static brush as well.
+            wchar_t controlClass[16]{};
+            GetClassNameW(control, controlClass, static_cast<int>(std::size(controlClass)));
+            if (lstrcmpiW(controlClass, L"Edit") == 0) {
+                return std::nullopt;
+            }
+        }
         const COLORREF background = panelColor();
         SetBkMode(dc, TRANSPARENT);
         SetBkColor(dc, background);
@@ -80,7 +96,6 @@ class DesktopTheme {
             return;
         }
         fill(dc, rect, selected ? color(RGB(255, 255, 255), COLOR_HIGHLIGHT) : panelColor());
-        DrawEdge(dc, &rect, EDGE_RAISED, BF_RECT | BF_ADJUST);
         const int inset = MulDiv(2, GetDpiForWindow(draw.hwndItem), 96);
         if (selected && !highContrast) {
             const RECT accent{rect.left, rect.top, rect.right, rect.top + inset};
@@ -98,7 +113,7 @@ class DesktopTheme {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, GetSysColor(selected && highContrast ? COLOR_HIGHLIGHTTEXT : COLOR_BTNTEXT));
         DrawTextW(dc, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-        if ((draw.itemState & (ODS_FOCUS | ODS_NOFOCUSRECT)) == ODS_FOCUS) {
+        if (GetFocus() == draw.hwndItem && (draw.itemState & (ODS_FOCUS | ODS_NOFOCUSRECT)) == ODS_FOCUS) {
             InflateRect(&rect, -inset, -inset);
             DrawFocusRect(dc, &rect);
         }
@@ -107,6 +122,20 @@ class DesktopTheme {
 
   private:
     bool highContrast = false;
+
+    static BOOL CALLBACK notifySystemColorChange(HWND child, LPARAM) {
+        SendMessageW(child, WM_SYSCOLORCHANGE, 0, 0);
+        wchar_t controlClass[32]{};
+        GetClassNameW(child, controlClass, static_cast<int>(std::size(controlClass)));
+        if (lstrcmpiW(controlClass, WC_LISTVIEWW) == 0) {
+            // List views cache these data-surface colors independently of the system notification.
+            const COLORREF background = GetSysColor(COLOR_WINDOW);
+            ListView_SetBkColor(child, background);
+            ListView_SetTextBkColor(child, background);
+            ListView_SetTextColor(child, GetSysColor(COLOR_WINDOWTEXT));
+        }
+        return TRUE;
+    }
 
     static LRESULT CALLBACK tabBackgroundProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR id,
                                               DWORD_PTR context) {
@@ -137,13 +166,11 @@ class DesktopTheme {
         if (saved == 0) {
             return;
         }
-        if ((GetWindowLongPtrW(window, GWL_STYLE) & TCS_BUTTONS) == 0) {
-            // The tab control still draws the frame and items. Its page fill would cover our panel.
-            RECT pane{};
-            GetClientRect(window, &pane);
-            TabCtrl_AdjustRect(window, FALSE, &pane);
-            ExcludeClipRect(dc, pane.left, pane.top, pane.right, pane.bottom);
-        }
+        // The tab control still draws its frame and items. Its page fill would cover our panel.
+        RECT pane{};
+        GetClientRect(window, &pane);
+        TabCtrl_AdjustRect(window, FALSE, &pane);
+        ExcludeClipRect(dc, pane.left, pane.top, pane.right, pane.bottom);
         DefSubclassProc(window, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(dc), PRF_CLIENT);
         RestoreDC(dc, saved);
     }
