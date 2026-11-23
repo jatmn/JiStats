@@ -1,6 +1,18 @@
 # Contributing to JiStats
 
-Open a pull request against the default branch and describe the behavior you changed, how you validated it, and any checks that still need to run. The repository owner handles merges. Follow [AGENTS.md](AGENTS.md) for the project conventions and [the verification guide](docs/validation/testing.md) for verification.
+The maintainer sets JiStats' [roadmap](docs/plan.md) and decides what to merge. Bug reports and contributions are welcome. Discuss larger proposals early so you can check how they fit the project's direction.
+
+## Project priorities
+
+- JiStats is a native C++17 desktop app for Windows 11. Do not add Python code, scripts, tooling, or dependencies to the repository.
+- The Windows XP-era look is intentional. Preserve that visual style and keep the app responsive and easy to use on Windows 11.
+- Low memory use and speed come first. Keep JiStats lightweight while idle, quick to start, and responsive while collecting data or refreshing the UI. Share relevant before-and-after memory or timing measurements in the pull request when available.
+
+## Reporting bugs and submitting changes
+
+Report bugs in [GitHub Issues](https://github.com/jatmn/JiStats/issues). Include your JiStats version or commit, Windows 11 version, steps to reproduce, and what you expected to happen versus what happened.
+
+Open a pull request against the default branch. Describe the behavior you changed, how you validated it, and any checks that still need to run. Follow [AGENTS.md](AGENTS.md) for project conventions, the [source build instructions](README.md#build-and-packaging) to build JiStats, and the [verification guide](docs/validation/testing.md) to choose checks.
 
 Keep provider captures, credentials, and personal data out of public issues and pull requests. Use synthetic or redacted [fixtures](docs/fixtures/README.md) in tests. Send vulnerability reports through the [security policy](SECURITY.md).
 

@@ -56,6 +56,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 - Refreshed the SHA-256-verified SQLite, spdlog (including bundled fmt), and Catch2 versions in [CMake](../CMakeLists.txt) and synced the [third-party notices](../THIRD_PARTY_NOTICES.md). Updated both Pullfrog action references and the owner command payload to 0.1.141. The [Linux CMake/Ninja build](validation/testing.md#linux-commands) passed CTest with bundled SQLite (125 cases, 920 assertions). The MinGW Release build produced the app, opt-in CLI and test executables, and UPX 5.3.0 verified the packed app. The workflow lint and seven Pullfrog authorization tests passed locally. CI covers the full Windows test run.
 
+- The contributor and agent guides document maintainer-led direction, welcome bug reports and contributions, and set the C++17, Python, Windows 11, XP-era styling, and runtime performance expectations. Local verification covers repository claims, links and anchors, and PR lint. Hosted CI verifies the submitted revision. [Contribution guide](../CONTRIBUTING.md) · [Agent guide](../AGENTS.md)
+
 ### Test failure observation
 
 The observation window runs from 2026-11-23 00:00 UTC through 2026-12-06 23:59 UTC. Record each failure with its run, case and source file. Keep it open until the fix revision and classification are established. An open failure blocks removal of that file. Review the complete file history on December 7 before deciding whether a file only detects change.
