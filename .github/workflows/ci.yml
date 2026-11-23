@@ -184,13 +184,24 @@ jobs:
         with:
           path: .ccache
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
-      - name: Upload the test executable for Windows
+      - name: Prepare Windows test inputs
+        run: |
+          set -euo pipefail
+          [[ $(git rev-parse HEAD) == "$GITHUB_SHA" ]]
+          git archive --format=tar "$GITHUB_SHA" > build-mingw/windows-test-inputs.tar
+          git ls-files -- 'tests/*.cpp' > build-mingw/windows-test-sources.txt
+          printf '%s\n' "$GITHUB_SHA" > build-mingw/windows-test-revision.txt
+      - name: Upload Windows test inputs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-tests
-          path: build-mingw/bin/JiStatsTests.exe
+          path: |
+            build-mingw/bin/JiStatsTests.exe
+            build-mingw/windows-test-inputs.tar
+            build-mingw/windows-test-sources.txt
+            build-mingw/windows-test-revision.txt
           if-no-files-found: error
-          # A Windows-only retry needs the original binary throughout the 30-day rerun window.
+          # A Windows-only retry needs the same inputs throughout the 30-day rerun window.
           retention-days: 30
           overwrite: true
 
@@ -204,7 +215,8 @@ jobs:
     runs-on: ${{ needs.linux-cross.result == 'success' && 'windows-latest' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.repeat_offline_notice_tests && 15 || 5 }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.linux-cross.result != 'success'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           filter: blob:none
           persist-credentials: false
@@ -212,8 +224,16 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: windows-tests
-          path: build-mingw/bin
-      # Run from the checkout root so the suite can read the test fixtures.
+          path: build-mingw
+      - name: Install tested Windows inputs
+        if: needs.linux-cross.result == 'success'
+        shell: pwsh
+        run: |
+          $revision = (Get-Content -Raw -LiteralPath build-mingw/windows-test-revision.txt).Trim()
+          if ($revision -cne $env:GITHUB_SHA) { throw "Unexpected Windows test revision: $revision" }
+          tar.exe -xf build-mingw/windows-test-inputs.tar
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot extract Windows test inputs.' }
+      # Run from the source root so the suite can read the test fixtures.
       - name: Run Windows suite and diagnose intermittent restart stalls
         id: windows-tests
         if: needs.linux-cross.result == 'success'
@@ -260,8 +280,8 @@ jobs:
           # Reserve 15 seconds for GDB and 35 seconds for runner setup and cleanup.
           Invoke-WindowsTests @('*', '--list-tests', '--reporter', 'xml::out=catch-inventory.xml') 250000
           Invoke-WindowsTests @('*', '--order', 'rand', '--durations', 'yes', '--reporter', 'console', '--reporter', 'xml::out=catch-results.xml') 250000
-          $expected = @(git ls-files -- 'tests/*.cpp')
-          if ($LASTEXITCODE -ne 0 -or !$expected) { throw 'Cannot enumerate the Windows test sources.' }
+          $expected = @(Get-Content -LiteralPath build-mingw/windows-test-sources.txt)
+          if (!$expected) { throw 'Cannot enumerate the Windows test sources.' }
           ./scripts/check_test_inventory.ps1 -Inventory catch-inventory.xml -Results catch-results.xml -Output test-file-times.json -ExpectedFiles $expected
           if ($env:REPEAT_OFFLINE_NOTICE_TESTS -ne 'true') { exit 0 }
           foreach ($attempt in 1..8) {
