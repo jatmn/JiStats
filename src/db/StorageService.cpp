@@ -2264,6 +2264,13 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
         }
         snapshot.confidenceTier = result.getString(row, 10);
         snapshot.quotaDimension = result.getString(row, 11);
+        // Early percentage snapshots used a zero-length window when no start was reported.
+        if (snapshot.quotaDimension == "percent" && snapshot.windowStart == snapshot.windowEnd) {
+            snapshot.windowStart = 0;
+            if (snapshot.windowEnd == snapshot.snapshotTime) {
+                snapshot.windowEnd = 0;
+            }
+        }
         snapshot.isReconciled = result.getInt(row, 12) != 0;
         snapshot.basisSummary = result.getString(row, 13);
         snapshot.createdAtUtc = result.getString(row, 14);
@@ -2348,13 +2355,14 @@ bool StorageService::rebuildQuotaSnapshotRollups(
         }
 
         if (aggregate.hasPreviousWindow &&
-            (aggregate.previousWindowStart != snapshot.windowStart ||
-             aggregate.previousWindowEnd != snapshot.windowEnd)) {
+            snapshot.hasWindowChangedSince(aggregate.previousWindowStart, aggregate.previousWindowEnd)) {
             ++aggregate.resetCount;
         }
-        aggregate.previousWindowStart = snapshot.windowStart;
-        aggregate.previousWindowEnd = snapshot.windowEnd;
-        aggregate.hasPreviousWindow = true;
+        if (snapshot.canIdentifyWindow()) {
+            aggregate.previousWindowStart = snapshot.windowStart;
+            aggregate.previousWindowEnd = snapshot.windowEnd;
+            aggregate.hasPreviousWindow = true;
+        }
 
         const auto remainingValue = normalizedQuotaRemainingValue(snapshot);
         if (remainingValue.has_value() &&

@@ -3243,11 +3243,13 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
     if (snapshotTime <= 0) {
         snapshotTime = std::time(nullptr);
     }
-    if (windowEnd <= 0) {
-        windowEnd = snapshotTime;
-    }
-    if (windowStart <= 0) {
-        windowStart = windowEnd;
+    if (!percentageReading) {
+        if (windowEnd <= 0) {
+            windowEnd = snapshotTime;
+        }
+        if (windowStart <= 0) {
+            windowStart = windowEnd;
+        }
     }
 
     std::string sql =
@@ -3276,8 +3278,8 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
         params.push_back(std::to_string(*planId));
     }
     params.push_back(formatTimeUtcIso(snapshotTime));
-    params.push_back(formatTimeUtcIso(windowStart));
-    params.push_back(formatTimeUtcIso(windowEnd));
+    params.push_back(windowStart > 0 ? formatTimeUtcIso(windowStart) : std::string{});
+    params.push_back(windowEnd > 0 ? formatTimeUtcIso(windowEnd) : std::string{});
     params.push_back(std::to_string(std::max<long long>(0, used)));
     if (limit > 0) {
         params.push_back(std::to_string(limit));
@@ -6279,16 +6281,15 @@ public:
 
         // Execute provider-side backfill first to populate usage_events before rollup rebuild
         for (const auto& provider : viewModel.providers) {
+            const auto adapter = activeProviderManager.getProvider(provider.providerKey);
+            if (!adapter || !adapter->isEnabled() || !adapter->supportsUsageHistory()) {
+                continue;
+            }
+
             const auto providerId = findProviderIdByKey(storageService, provider.providerKey);
             const auto runtimeAccountId =
                 ensureRuntimeTrackingAccountId(storageService, provider.providerKey, provider.displayName);
             if (!providerId.has_value() || !runtimeAccountId.has_value()) {
-                continue;
-            }
-
-            // Check if provider supports history fetch and has credentials
-            const auto adapter = activeProviderManager.getProvider(provider.providerKey);
-            if (!adapter || !adapter->isEnabled()) {
                 continue;
             }
 

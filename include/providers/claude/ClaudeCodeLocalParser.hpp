@@ -61,7 +61,8 @@ public:
     static ClaudeCodeLocalParseResult parseStatsCache(const std::string& filePath);
     static ClaudeCodeLocalParseResult parseSettings(const std::string& filePath);
 
-    static std::vector<UsageEvent> toUsageEvents(const ClaudeCodeLocalParseResult& result);
+    static std::vector<UsageEvent> toUsageEvents(const ClaudeCodeLocalParseResult& result,
+                                                 bool includeLifetimeFallback = true);
     static std::vector<ActivityEvent> toActivityEvents(const ClaudeCodeLocalParseResult& result);
 
     static std::string resolveDefaultStatsCachePath();

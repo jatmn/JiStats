@@ -1758,7 +1758,9 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 const auto planIt =
                     planId.has_value() ? planLabels.find(*planId) : planLabels.end();
                 const std::string derivedWindowLabel =
-                    quotaWindowLabelFromSpan(windowStartUtc, windowEndUtc);
+                    quotaDimension == "percent" && (windowStartUtc <= 0 || windowEndUtc <= windowStartUtc)
+                        ? std::string{}
+                        : quotaWindowLabelFromSpan(windowStartUtc, windowEndUtc);
                 const std::string planDisplayName =
                     planIt != planLabels.end() && !planIt->second.first.empty()
                     ? planIt->second.first
@@ -1811,7 +1813,9 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 AnalysisQuotaTrendPoint point;
                 point.label = formatQuotaSnapshotLabel(
                     rollup.latestSnapshotTime > 0 ? rollup.latestSnapshotTime : rollup.periodStart,
-                    std::max<std::time_t>(1, (rollup.latestWindowEnd - rollup.latestWindowStart) + 1));
+                    rollup.latestWindowStart > 0
+                        ? std::max<std::time_t>(1, rollup.latestWindowEnd - rollup.latestWindowStart + 1)
+                        : 0);
                 point.snapshotTime =
                     rollup.latestSnapshotTime > 0 ? rollup.latestSnapshotTime : rollup.periodStart;
                 point.remainingPercentage = remainingPercentage;
@@ -1870,15 +1874,17 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 const auto previousWindowIt = previousWindowsByKey.find(seriesKey);
                 if (previousWindowIt != previousWindowsByKey.end()) {
                     resetPoint =
-                        previousWindowIt->second.first != snapshot.windowStart ||
-                        previousWindowIt->second.second != snapshot.windowEnd;
+                        snapshot.hasWindowChangedSince(previousWindowIt->second.first, previousWindowIt->second.second);
                 }
-                previousWindowsByKey[seriesKey] = {snapshot.windowStart, snapshot.windowEnd};
+                if (snapshot.canIdentifyWindow()) {
+                    previousWindowsByKey[seriesKey] = {snapshot.windowStart, snapshot.windowEnd};
+                }
 
                 AnalysisQuotaTrendPoint point;
                 point.label = formatQuotaSnapshotLabel(
-                    snapshot.snapshotTime,
-                    std::max<std::time_t>(1, (snapshot.windowEnd - snapshot.windowStart) + 1));
+                    snapshot.snapshotTime, snapshot.windowStart > 0
+                                               ? std::max<std::time_t>(1, snapshot.windowEnd - snapshot.windowStart + 1)
+                                               : 0);
                 point.snapshotTime = snapshot.snapshotTime;
                 point.remainingPercentage = remainingPercentage;
                 point.remainingValue = remainingValue;
@@ -1979,19 +1985,12 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             formatTimeUtcIso(throughputNow)};
         appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
         appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");
-        sql += " ORDER BY ue.event_time_utc ASC, ue.id ASC;";
+        // Sort recorded requests ahead of same-second counters since stored timestamps have second precision.
+        sql += " ORDER BY ue.event_time_utc ASC, CASE WHEN ue.request_type = 'codex_request' THEN 0 ELSE 1 END, "
+               "ue.id ASC;";
 
         QueryResult result = storage_->execute(sql, params);
         if (result.success() && result.rowCount() > 0) {
-            std::map<std::string, std::time_t> firstRequestByRollout;
-            for (size_t row = 0; row < result.rowCount(); ++row) {
-                if (result.getString(row, 3) == "codex_request") {
-                    if (const auto time = parseUtcIso(result.getString(row, 0))) {
-                        firstRequestByRollout.try_emplace(result.getString(row, 2), *time);
-                    }
-                }
-            }
-
             struct TokenWindowTotals {
                 long long totalTokenDelta = 0;
                 long long promptDeltaCount = 0;
@@ -2001,6 +2000,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 long long tokens;
             };
             std::map<std::string, LegacyCounter> previousCounters;
+            std::map<std::string, std::time_t> latestRequestByRollout;
             std::set<std::string> countedResponseIds;
             std::map<std::time_t, TokenWindowTotals> usageAt;
             std::size_t legacySampleCount = 0;
@@ -2011,7 +2011,9 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     continue;
                 }
                 const auto tokens = result.getInt64(row, 1);
+                const auto rollout = result.getString(row, 2);
                 if (result.getString(row, 3) == "codex_request") {
+                    latestRequestByRollout[rollout] = *time;
                     const auto id = result.getString(row, 4);
                     if (id.rfind("response:", 0) == 0 && !countedResponseIds.insert(id).second) {
                         continue;
@@ -2022,17 +2024,16 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     continue;
                 }
 
-                const auto rollout = result.getString(row, 2);
-                const auto firstRequest = firstRequestByRollout.find(rollout);
-                if (firstRequest != firstRequestByRollout.end() && *time >= firstRequest->second) {
-                    continue;
-                }
                 ++legacySampleCount;
                 auto& usage = usageAt[*time];
                 auto [previous, inserted] = previousCounters.try_emplace(rollout, LegacyCounter{*time, tokens});
                 if (!inserted) {
                     legacyEstimated = legacyEstimated || *time - previous->second.time > 300;
-                    if (tokens > previous->second.tokens) {
+                    const auto latestRequest = latestRequestByRollout.find(rollout);
+                    // Only intervals past a reliable baseline without a recorded request can be attributed to counters.
+                    const bool overlapsRequest =
+                        latestRequest != latestRequestByRollout.end() && latestRequest->second > previous->second.time;
+                    if (!overlapsRequest && *time > previous->second.time && tokens > previous->second.tokens) {
                         usage.totalTokenDelta += tokens - previous->second.tokens;
                         ++usage.promptDeltaCount;
                     }

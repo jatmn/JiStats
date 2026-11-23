@@ -443,13 +443,16 @@ TEST_CASE("Analysis uses the same Codex request events for totals and chart buck
 
     const auto now = makeUtcTime(2026, 4, 20, 18);
     const std::string rollout = "codex://rollout/current";
-    seedCodexUsageEvent(storage, now - 120, 100);
-    seedCodexUsageEvent(storage, now - 60, 200);
-    seedCodexUsageEvent(storage, now, 250);
-    seedCodexUsageEvent(storage, now, 30, rollout, "response:one");
-    seedCodexUsageEvent(storage, now, 20, rollout, "response:two");
-    seedCodexUsageEvent(storage, now, 20, rollout, "response:two");
-    seedCodexUsageEvent(storage, now, 20, "codex://rollout/copied", "response:two");
+    seedCodexUsageEvent(storage, now - 240, 100);
+    seedCodexUsageEvent(storage, now - 180, 200);
+    seedCodexUsageEvent(storage, now - 120, 250);
+    seedCodexUsageEvent(storage, now - 120, 30, rollout, "response:one");
+    seedCodexUsageEvent(storage, now - 120, 20, rollout, "response:two");
+    seedCodexUsageEvent(storage, now - 120, 20, rollout, "response:two");
+    seedCodexUsageEvent(storage, now - 120, 20, "codex://rollout/copied", "response:two");
+
+    seedCodexUsageEvent(storage, now - 60, 370);
+    seedCodexUsageEvent(storage, now, 490);
 
     DashboardViewModel dashboard;
     dashboard.providers = {makeProvider("openai", "OpenAI", "openai.runtime_status")};
@@ -457,12 +460,13 @@ TEST_CASE("Analysis uses the same Codex request events for totals and chart buck
     const auto analysis = engine.buildViewModel(dashboard, DashboardPreferences{}, now);
 
     REQUIRE(analysis.codexThroughput.hasData);
-    CHECK(analysis.codexThroughput.tokensLast1h == 150);
-    CHECK(analysis.codexThroughput.promptsLast1h == 3);
+    CHECK(analysis.codexThroughput.tokensLast1h == 390);
+    CHECK(analysis.codexThroughput.promptsLast1h == 5);
     REQUIRE(analysis.codexHourlyHistory.hasData);
-    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
-    const auto& minute = analysis.codexHourlyHistory.points.back();
-    CHECK(minute.snapshotTime == now);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 5);
+    const auto& minute = analysis.codexHourlyHistory.points[2];
+    CHECK(minute.snapshotTime == now - 120);
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(120));
     CHECK(minute.tokensPerMinute == Catch::Approx(50));
     CHECK(minute.promptsPerMinute == Catch::Approx(2));
 }
@@ -550,6 +554,57 @@ TEST_CASE("AnalysisQueryEngine computes Codex throughput within rollout session 
     CHECK(analysis.codexThroughput.tokensPerMinute5m == Catch::Approx(20.0));
     CHECK(analysis.codexThroughput.promptsPerMinute5m == Catch::Approx(0.2));
     CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
+}
+
+TEST_CASE("Percentage quota history marks resets only when reported bounds change", "[analysis][quota]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const int providerId = requireProviderId(storage, "grok");
+    const int accountId = ensureRuntimeAccountId(storage, "grok", "Grok");
+    auto insert = [&](const char* observedAt, const char* windowStart, const char* windowEnd) {
+        REQUIRE(
+            storage
+                .execute("INSERT INTO quota_snapshots (provider_id, account_id, snapshot_time_utc, window_start_utc, "
+                         "window_end_utc, used_value, limit_value, confidence_tier, quota_dimension) "
+                         "VALUES (?, ?, ?, ?, ?, 40, 100, 'high', 'percent');",
+                         {std::to_string(providerId), std::to_string(accountId), observedAt, windowStart, windowEnd})
+                .success());
+    };
+
+    // Include a previously stored poll-time placeholder and two observations without reported dates.
+    insert("2026-04-20T13:00:00Z", "2026-04-20T13:00:00Z", "2026-04-20T13:00:00Z");
+    insert("2026-04-20T14:00:00Z", "", "");
+    insert("2026-04-20T15:00:00Z", "", "");
+    insert("2026-04-20T16:00:00Z", "", "2026-04-20T17:00:00Z");
+    insert("2026-04-20T16:30:00Z", "2026-04-13T17:00:00Z", "2026-04-20T17:00:00Z");
+    insert("2026-04-20T17:15:00Z", "", "");
+    insert("2026-04-20T17:30:00Z", "", "2026-04-27T17:00:00Z");
+
+    const auto from = makeUtcTime(2026, 4, 20);
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    DashboardViewModel dashboard;
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "grok";
+    preferences.analysisSelectedAccountId = "grok.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last24Hours;
+    auto analysis = AnalysisQueryEngine(storage).buildViewModel(dashboard, preferences, now);
+    REQUIRE(analysis.quotaTrendSeries.size() == 1);
+    const auto& series = analysis.quotaTrendSeries.front();
+    REQUIRE(series.points.size() == 7);
+    CHECK(series.resetCount == 1);
+    CHECK(std::none_of(series.points.begin(), series.points.end() - 1,
+                       [](const auto& point) { return point.resetPoint; }));
+    CHECK(series.points.back().resetPoint);
+    CHECK(series.points.back().remainingPercentage == Catch::Approx(60));
+
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, from, now));
+    const auto rollups = storage.getQuotaSnapshotRollups(providerId, accountId, from, from);
+    REQUIRE(rollups.size() == 1);
+    CHECK(rollups.front().sampleCount == 7);
+    CHECK(rollups.front().resetCount == 1);
 }
 
 TEST_CASE("AnalysisQueryEngine keeps Codex model usage buckets granular for recent deltas", "[analysis][query_engine][analysis_query_engine][codex]") {

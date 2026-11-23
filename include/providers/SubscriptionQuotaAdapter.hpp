@@ -5,6 +5,8 @@
 
 namespace JiStats {
 
+class HttpResponse;
+
 enum class SubscriptionProvider { Grok, Cursor };
 
 class SubscriptionQuotaAdapter : public IProviderAdapter {
@@ -12,6 +14,9 @@ class SubscriptionQuotaAdapter : public IProviderAdapter {
     explicit SubscriptionQuotaAdapter(SubscriptionProvider provider);
 
     UsageResponse fetchUsage(std::time_t from, std::time_t to) override;
+    bool supportsUsageHistory() const override {
+        return false;
+    }
     QuotaResponse fetchQuota() override;
     bool validateCredentials() override;
     std::vector<Capability> getCapabilities() override;
@@ -21,7 +26,7 @@ class SubscriptionQuotaAdapter : public IProviderAdapter {
     void setEnabled(bool enabled) override;
     bool hasDirectQuotaApiConfigured() const override;
 
-    static QuotaResponse parseQuotaResponse(SubscriptionProvider provider, const std::string& body,
+    static QuotaResponse parseQuotaResponse(SubscriptionProvider provider, const HttpResponse& response,
                                             std::time_t checkedAt);
 
   private:

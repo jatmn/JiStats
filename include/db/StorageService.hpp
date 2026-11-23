@@ -196,6 +196,18 @@ struct PersistedQuotaSnapshot {
     bool isReconciled = false;
     std::string basisSummary;
     std::string createdAtUtc;
+
+    bool canIdentifyWindow() const {
+        return quotaDimension != "percent" || windowStart > 0 || windowEnd > 0;
+    }
+
+    bool hasWindowChangedSince(std::time_t previousStart, std::time_t previousEnd) const {
+        if (quotaDimension != "percent") {
+            return previousStart != windowStart || previousEnd != windowEnd;
+        }
+        return (previousStart > 0 && windowStart > 0 && previousStart != windowStart) ||
+               (previousEnd > 0 && windowEnd > 0 && previousEnd != windowEnd);
+    }
 };
 
 struct PersistedQuotaSnapshotRollup {

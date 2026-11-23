@@ -42,12 +42,8 @@ UsageResponse ClaudeCodeAdapter::fetchUsage(std::time_t from, std::time_t to) {
     }
 
     response.success = true;
-    // All-time aggregates cannot establish usage within any particular recovery interval.
-    if ((from > 0 || to > 0) && result.dailyModelTokens.empty()) {
-        return response;
-    }
-
-    for (const auto& event : ClaudeCodeLocalParser::toUsageEvents(result)) {
+    const bool includeLifetimeFallback = from <= 0 && to <= 0;
+    for (const auto& event : ClaudeCodeLocalParser::toUsageEvents(result, includeLifetimeFallback)) {
         if (event.eventTime == 0) {
             continue;
         }

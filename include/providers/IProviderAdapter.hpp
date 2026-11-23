@@ -20,7 +20,10 @@ public:
     
     // Fetch usage data for a time range
     virtual UsageResponse fetchUsage(std::time_t from, std::time_t to) = 0;
-    
+    virtual bool supportsUsageHistory() const {
+        return true;
+    }
+
     // Fetch current quota information
     virtual QuotaResponse fetchQuota() = 0;
     

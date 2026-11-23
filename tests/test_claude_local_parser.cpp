@@ -91,8 +91,11 @@ TEST_CASE("Claude settings parsing extracts model and channel", "[claude][parser
 }
 
 TEST_CASE("Claude recovery does not attribute lifetime totals to a day", "[claude][parser]") {
-    TempFixtureFile fixture(R"json({
+    const auto dailyTokens = GENERATE("[]", R"([{"date":"2025-01-02","tokensByModel":{}}])");
+    TempFixtureFile fixture(std::string(R"json({
       "lastComputedDate": "2025-01-02",
+      "dailyModelTokens": )json") +
+                            dailyTokens + R"json(,
       "modelUsage": {"claude-sonnet": {"inputTokens": 100, "outputTokens": 50}}
     })json");
     ClaudeCodeAdapter adapter;

@@ -250,7 +250,8 @@ ClaudeCodeLocalParseResult ClaudeCodeLocalParser::parseSettings(const std::strin
     return result;
 }
 
-std::vector<UsageEvent> ClaudeCodeLocalParser::toUsageEvents(const ClaudeCodeLocalParseResult& result) {
+std::vector<UsageEvent> ClaudeCodeLocalParser::toUsageEvents(const ClaudeCodeLocalParseResult& result,
+                                                             bool includeLifetimeFallback) {
     std::vector<UsageEvent> events;
     if (!result.success) {
         return events;
@@ -280,7 +281,7 @@ std::vector<UsageEvent> ClaudeCodeLocalParser::toUsageEvents(const ClaudeCodeLoc
     }
 
     // If no daily model tokens, fall back to aggregate modelUsage without specific dates
-    if (events.empty() && !result.modelUsage.empty()) {
+    if (includeLifetimeFallback && events.empty() && !result.modelUsage.empty()) {
         const std::time_t aggregateTime = parseDateToUnixTime(result.lastComputedDate);
         for (const auto& model : result.modelUsage) {
             UsageEvent event;

@@ -27,6 +27,7 @@
 #include "platform/WindowsCredentialStore.hpp"
 #include "providers/IProviderAdapter.hpp"
 #include "providers/ProviderManager.hpp"
+#include "providers/SubscriptionQuotaAdapter.hpp"
 #include "providers/claude/ClaudeCodeAdapter.hpp"
 #include "providers/kimi/KimiAdapter.hpp"
 #include "providers/minimax/MiniMaxAdapter.hpp"
@@ -3227,7 +3228,30 @@ TEST_CASE("AppController persists failed recovery backfill checkpoints and leave
     failedBackfill.success = false;
     failedBackfill.error = "network unreachable";
     liveProvider->setUsageResponse(failedBackfill);
+    class TestKimiQuota : public KimiAdapter {
+        QuotaResponse fetchQuota() override {
+            return makeQuotaResponse(std::time(nullptr), 25, 100, "interval", "kimi_subscription_api");
+        }
+    };
+    class TestSubscriptionQuota : public SubscriptionQuotaAdapter {
+      public:
+        using SubscriptionQuotaAdapter::SubscriptionQuotaAdapter;
+
+        QuotaResponse fetchQuota() override {
+            return makeQuotaResponse(std::time(nullptr), 25, 100, "weekly", getProviderKey() + "_subscription_api");
+        }
+    };
     auto providerManager = makeProviderManager({liveProvider});
+    providerManager->addProvider(std::make_shared<TestKimiQuota>());
+    providerManager->addProvider(std::make_shared<TestSubscriptionQuota>(SubscriptionProvider::Grok));
+    providerManager->addProvider(std::make_shared<TestSubscriptionQuota>(SubscriptionProvider::Cursor));
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        SettingsService settings(storage);
+        REQUIRE(settings.setBool("runtime.grok_subscription_tracking_enabled", true));
+        REQUIRE(settings.setBool("runtime.cursor_subscription_tracking_enabled", true));
+    }
 
     AppController app;
     app.setHeadlessForTesting(true);
@@ -3250,6 +3274,14 @@ TEST_CASE("AppController persists failed recovery backfill checkpoints and leave
     CHECK(backfillCheckpoint->fetchedEventCount == 0);
     CHECK(backfillCheckpoint->comparisonResult == "not_available");
     CHECK(backfillCheckpoint->failureCategory == "provider_backfill_fetch_failed");
+    for (const auto* key : {"kimi", "grok", "cursor"}) {
+        const auto providerId = requireProviderId(storage, key);
+        const auto account = requireAccountId(storage, providerId, std::string(key) + ".runtime_status");
+        CHECK_FALSE(storage.getLatestRecoveryCheckpoint(providerId, account, "runtime_backfill").has_value());
+        const auto gaps = app.getGapMarkersForTesting(key, now - 4 * 3600, std::time(nullptr));
+        REQUIRE(gaps.size() == 1);
+        CHECK(gaps.front().classification == GapClassification::Unknown);
+    }
     storage.close();
 
     const auto runtimeState = app.getPersistedRuntimeStateForTesting();

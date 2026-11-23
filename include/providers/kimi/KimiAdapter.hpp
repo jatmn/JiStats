@@ -93,6 +93,9 @@ public:
     ~KimiAdapter() override;
 
     UsageResponse fetchUsage(std::time_t from, std::time_t to) override;
+    bool supportsUsageHistory() const override {
+        return false;
+    }
     QuotaResponse fetchQuota() override;
     bool validateCredentials() override;
     std::vector<Capability> getCapabilities() override;

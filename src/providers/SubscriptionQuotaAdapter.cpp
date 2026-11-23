@@ -187,15 +187,29 @@ std::string surface(SubscriptionProvider provider) {
 
 SubscriptionQuotaAdapter::SubscriptionQuotaAdapter(SubscriptionProvider provider) : provider_(provider) {}
 
-QuotaResponse SubscriptionQuotaAdapter::parseQuotaResponse(SubscriptionProvider provider, const std::string& body,
+QuotaResponse SubscriptionQuotaAdapter::parseQuotaResponse(SubscriptionProvider provider, const HttpResponse& response,
                                                            std::time_t checkedAt) {
     QuotaResponse result;
     result.snapshotTime = checkedAt;
     result.providerSurface = surface(provider);
+    if (!response.success) {
+        if (provider == SubscriptionProvider::Grok && response.statusCode == 401) {
+            result.unavailable = true;
+            result.error = "Run grok login again";
+            return result;
+        }
+        result.unavailable = response.statusCode == 401 || response.statusCode == 403;
+        result.error = std::string(provider == SubscriptionProvider::Grok ? "Grok" : "Cursor") +
+                       " subscription quota request failed";
+        if (response.statusCode > 0) {
+            result.error += " (HTTP " + std::to_string(response.statusCode) + ")";
+        }
+        return result;
+    }
     result.error = "This account did not report a subscription quota";
     result.unavailable = true;
     JsonValue root;
-    if (!JsonParser::parse(body, root) || !root.isObject()) {
+    if (!JsonParser::parse(response.body, root) || !root.isObject()) {
         return result;
     }
 
@@ -246,7 +260,7 @@ QuotaResponse SubscriptionQuotaAdapter::parseQuotaResponse(SubscriptionProvider 
     if (!used) {
         return result;
     }
-    if (result.windowStart >= result.windowEnd) {
+    if (result.windowEnd > 0 && result.windowStart >= result.windowEnd) {
         result.windowStart = 0;
     }
     if (result.secondaryLimit > 0) {
@@ -309,15 +323,11 @@ QuotaResponse SubscriptionQuotaAdapter::fetchQuota() {
         http.setHeader("x-cursor-client-type", "cli");
         response = http.post(kCursorQuotaUrl, "{}");
     }
-    if (!response.success) {
-        unavailable.error = getDisplayName() + " subscription quota request failed";
-        unavailable.unavailable = response.statusCode == 401 || response.statusCode == 403;
-        if (response.statusCode > 0) {
-            unavailable.error += " (HTTP " + std::to_string(response.statusCode) + ")";
-        }
-        return unavailable;
+    auto quota = parseQuotaResponse(provider_, response, std::time(nullptr));
+    if (provider_ == SubscriptionProvider::Grok && response.statusCode == 401 && !env("GROK_AUTH").empty()) {
+        quota.error = "Update GROK_AUTH and restart JiStats";
     }
-    return parseQuotaResponse(provider_, response.body, std::time(nullptr));
+    return quota;
 }
 
 UsageResponse SubscriptionQuotaAdapter::fetchUsage(std::time_t from, std::time_t to) {

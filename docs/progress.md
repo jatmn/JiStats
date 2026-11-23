@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- Mixed Codex rollouts retain cumulative intervals after recorded requests. Bounded Claude recovery uses dated model tokens. Quota history keeps missing billing dates unknown, and recovery skips adapters that supply no dated usage. Provider Snapshot prompts for renewed Grok sign-in when a credential is rejected. Bundled-SQLite Linux CTest and the three MinGW Debug targets passed. The cross-built Windows suite passed 456 cases under Wine. Live Grok sign-in renewal remains unverified.
+
 - Codex throughput now uses recorded requests and keeps existing cumulative history readable. Claude honors its configured home and uses dated totals for recovery. Kimi task metadata stays in local activity. Grok and Cursor subscription quota can be enabled independently in Settings. Linux CTest passed with bundled SQLite, and MinGW Debug built the app, CLI, and Windows test executable. Live subscription verification remains open. [Provider matrix](capability-matrix.md) · [Verification guide](validation/testing.md)
 
 - Refreshed the SHA-256-verified SQLite, spdlog (including bundled fmt), and Catch2 versions in [CMake](../CMakeLists.txt) and synced the [third-party notices](../THIRD_PARTY_NOTICES.md). Updated both Pullfrog action references and the owner command payload to 0.1.141. The [Linux CMake/Ninja build](../README.md#building-on-linux) passed CTest with bundled SQLite (125 cases, 920 assertions). The MinGW Release build produced the app, opt-in CLI and test executables, and UPX 5.3.0 verified the packed app. The workflow lint and seven Pullfrog authorization tests passed locally. CI covers the full Windows test run.
