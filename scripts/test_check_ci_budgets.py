@@ -201,6 +201,30 @@ class NativeBudgetTest(unittest.TestCase):
                 self.assertIn(f"Windows suite wall time across shards: {latest_finish}s", result.stdout)
                 self.assertNotIn("Windows suite step:", result.stdout)
 
+    def test_completed_audit_keeps_suite_timing_after_report_upload_fails(self):
+        upload = {**step("Save Windows shard reports", 30, 31), "conclusion": "failure"}
+        late_shard = job(
+            SHARDS[2], 2, 19, conclusion="failure",
+            steps=[step(SUITE_STEP, 12, 30), upload], finish=TIMELINE + timedelta(seconds=31),
+        )
+        cohort = (shard(0, 0, 17), shard(1, 5, 25), late_shard)
+        result = self.run_completed_audit(*cohort)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Windows suite wall time across shards: 30s (limit <30s) **FAIL**", result.stdout)
+        self.assertIn(f"{SHARDS[2]}: source conclusion failure", result.stdout)
+
+        active, output = self.run_shard_gate(*cohort)
+        self.assertNotEqual(active.returncode, 0)
+        self.assertIsNone(output)
+
+    def test_completed_audit_falls_back_when_a_suite_does_not_succeed(self):
+        suite = {**step(SUITE_STEP, 12, 32), "conclusion": "failure"}
+        failed = job(SHARDS[2], 2, 20, conclusion="failure", steps=[suite])
+        result = self.run_completed_audit(shard(0, 0, 17), shard(1, 5, 25), failed)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Windows suite step: 20s", result.stdout)
+        self.assertNotIn("Windows suite wall time across shards", result.stdout)
+
     def test_completed_audit_times_only_jobs_in_a_partial_retry(self):
         current = shard(2, 25, 42)
         for cohort in ((current,), (shard(0, 0, 17, attempt=1), shard(1, 5, 25, attempt=1), current)):

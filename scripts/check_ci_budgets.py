@@ -71,26 +71,34 @@ def windows_shard_cohort(jobs, shard_names, attempt, conclusion):
     if len({job["run_attempt"] for job in shards}) != 1:
         raise ValueError("Windows shards came from different attempts and cannot be timed together.")
 
+    return shards, windows_suite_span(shards, require_complete=True)
+
+
+def windows_suite_span(shards, *, require_complete):
     spans = []
     for job in shards:
         steps = [step for step in job["steps"] if step["name"] == WINDOWS_SUITE_STEP]
-        if len(steps) != 1 or steps[0]["status"] != "completed" or steps[0]["conclusion"] != "success":
+        if len(steps) == 1 and steps[0]["status"] == "completed" and steps[0]["conclusion"] == "success":
+            spans.append(timing(steps[0]))
+        elif require_complete or len(steps) > 1:
             raise ValueError(f'Could not identify the completed Windows suite step for {job["name"]}.')
-        spans.append(timing(steps[0]))
+        else:
+            return None
     start = min(start for start, _ in spans)
     finish = max(finish for _, finish in spans)
-    return shards, (finish - start).total_seconds()
+    return (finish - start).total_seconds()
 
 
 def completed_windows_span(jobs):
-    """Measure a successful cohort during an audit of one completed attempt."""
-    shards = [job for job in jobs if job["name"] in WINDOWS_SHARD_NAMES]
-    successful = {job["name"] for job in shards if job["conclusion"] == "success"}
-    attempts = {job["run_attempt"] for job in shards}
-    if successful != set(WINDOWS_SHARD_NAMES) or len(attempts) != 1:
+    """Measure a successful suite even if a later step failed."""
+    shards = [job for job in jobs if job["name"] in WINDOWS_SHARD_NAMES and job["status"] == "completed"]
+    if {job["name"] for job in shards} != set(WINDOWS_SHARD_NAMES):
         return None
-    _, span = windows_shard_cohort(shards, WINDOWS_SHARD_NAMES, attempts.pop(), "success")
-    return span
+    if len({job["run_attempt"] for job in shards}) != 1:
+        return None
+    if len(shards) != len(WINDOWS_SHARD_NAMES):
+        raise ValueError("Could not identify unique Windows shard jobs for this attempt.")
+    return windows_suite_span(shards, require_complete=False)
 
 
 def main():
