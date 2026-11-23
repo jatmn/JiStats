@@ -1,0 +1,128 @@
+{
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error",
+    "pedantic": "error",
+    "style": "error",
+    "restriction": "error",
+    "nursery": "error"
+  },
+  "env": {
+    "node": true,
+    "builtin": true
+  },
+  "ignorePatterns": [
+    "node_modules/**"
+  ],
+  "overrides": [
+    {
+      "files": [
+        "scripts/pullfrog-command-check.mjs"
+      ],
+      "rules": {
+        "capitalized-comments": "off",
+        "curly": "off",
+        "func-style": "off",
+        "max-lines-per-function": "off",
+        "max-params": "off",
+        "max-statements": "off",
+        "no-magic-numbers": "off",
+        "no-ternary": "off",
+        "no-undefined": "off",
+        "one-var": "off",
+        "oxc/no-optional-chaining": "off",
+        "oxc/no-rest-spread-properties": "off",
+        "prefer-destructuring": "off",
+        "prefer-named-capture-group": "off",
+        "require-unicode-regexp": "off",
+        "sort-keys": "off",
+        "typescript/no-unnecessary-boolean-literal-compare": "off",
+        "typescript/no-unnecessary-condition": "off",
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/no-useless-default-assignment": "off",
+        "typescript/prefer-nullish-coalescing": "off",
+        "typescript/strict-boolean-expressions": "off",
+        "unicorn/no-null": "off",
+        "unicorn/no-process-exit": "off",
+        "unicorn/no-useless-undefined": "off",
+        "unicorn/numeric-separators-style": "off",
+        "unicorn/prefer-import-meta-properties": "off",
+        "unicorn/prefer-string-replace-all": "off"
+      }
+    },
+    {
+      "files": [
+        "scripts/pullfrog-review-check.mjs"
+      ],
+      "rules": {
+        "complexity": "off",
+        "curly": "off",
+        "func-style": "off",
+        "init-declarations": "off",
+        "max-lines-per-function": "off",
+        "max-statements": "off",
+        "no-await-in-loop": "off",
+        "no-console": "off",
+        "no-magic-numbers": "off",
+        "one-var": "off",
+        "oxc/no-async-await": "off",
+        "oxc/no-optional-chaining": "off",
+        "sort-imports": "off",
+        "sort-keys": "off",
+        "typescript/no-unnecessary-boolean-literal-compare": "off",
+        "typescript/no-unnecessary-condition": "off",
+        "typescript/no-unsafe-argument": "off",
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/no-useless-default-assignment": "off",
+        "typescript/prefer-nullish-coalescing": "off",
+        "typescript/prefer-readonly-parameter-types": "off",
+        "typescript/strict-boolean-expressions": "off",
+        "unicorn/prefer-import-meta-properties": "off"
+      }
+    },
+    {
+      "files": [
+        "scripts/pullfrog-review-check.test.mjs"
+      ],
+      "rules": {
+        "func-style": "off",
+        "id-length": "off",
+        "max-statements": "off",
+        "no-await-in-loop": "off",
+        "no-empty-function": "off",
+        "no-magic-numbers": "off",
+        "no-plusplus": "off",
+        "no-shadow": "off",
+        "no-template-curly-in-string": "off",
+        "no-undefined": "off",
+        "one-var": "off",
+        "oxc/no-async-await": "off",
+        "oxc/no-optional-chaining": "off",
+        "oxc/no-rest-spread-properties": "off",
+        "prefer-destructuring": "off",
+        "prefer-named-capture-group": "off",
+        "require-await": "off",
+        "require-unicode-regexp": "off",
+        "sort-imports": "off",
+        "sort-keys": "off",
+        "typescript/no-floating-promises": "off",
+        "typescript/no-unnecessary-boolean-literal-compare": "off",
+        "typescript/no-unnecessary-condition": "off",
+        "typescript/no-unsafe-call": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/no-unsafe-return": "off",
+        "typescript/no-useless-default-assignment": "off",
+        "typescript/prefer-nullish-coalescing": "off",
+        "typescript/prefer-readonly-parameter-types": "off",
+        "typescript/prefer-regexp-exec": "off",
+        "typescript/require-await": "off",
+        "typescript/strict-boolean-expressions": "off",
+        "unicorn/no-null": "off",
+        "unicorn/numeric-separators-style": "off"
+      }
+    }
+  ]
+}
