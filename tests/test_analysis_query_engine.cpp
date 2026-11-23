@@ -782,6 +782,42 @@ TEST_CASE("Codex estimates adjacent unordered seconds together", "[analysis][cod
     }
 }
 
+TEST_CASE("Codex tallies distinct interior readings from a legacy second", "[analysis][codex]") {
+    requireSqlite();
+    const bool reset = GENERATE(false, true);
+    const int timedReadings = GENERATE(0, 1, 3);
+    CAPTURE(reset, timedReadings);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/no-longer-available";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    seedCodexUsageEvent(storage, now - 180, 100, rollout);
+    const std::vector<long long> readings =
+        reset ? std::vector<long long>{150, 25, 50} : std::vector<long long>{125, 150, 175};
+    // Insert out of order for the legacy, mixed-precision and fully timed controls.
+    for (int index : {2, 0, 1}) {
+        const std::optional<int> nanos =
+            index < timedReadings ? std::optional<int>((index + 1) * 100000000) : std::nullopt;
+        seedCodexUsageEvent(storage, now - 120, readings[index], rollout, {}, nanos);
+    }
+    if (reset && timedReadings == 1) {
+        // The known 150-to-145 decline cannot account for a later 25-to-50 gain.
+        seedCodexUsageEvent(storage, now - 120, 145, rollout, {}, 150000000);
+    }
+    seedCodexUsageEvent(storage, now - 60, reset ? 75 : 200, rollout);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 100);
+    CHECK(analysis.codexThroughput.promptsLast1h == (reset ? 3 : 4));
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[0].tokensPerMinute == Catch::Approx(0));
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(75));
+    CHECK(analysis.codexHourlyHistory.points[2].tokensPerMinute == Catch::Approx(25));
+}
+
 TEST_CASE("An unsequenced Codex counter does not replace a matching timed boundary", "[analysis][codex]") {
     requireSqlite();
     TempTestDatabase tempDb;

@@ -2252,6 +2252,98 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     }
                     baseline = &counter;
                 };
+                const auto useEstimatedSecond = [&](const CounterSecond& second, const CounterOrder& order,
+                                                    const UsageSample* next) {
+                    std::vector<const UsageSample*> anchors;
+                    const auto count = static_cast<std::size_t>(second.end - second.ordered);
+                    for (std::size_t gap = 0; gap <= count; ++gap) {
+                        if (order.firstBound.sample && gap == order.firstBound.gap) {
+                            anchors.push_back(order.firstBound.sample);
+                        }
+                        if (order.secondBound.sample && gap == order.secondBound.gap) {
+                            anchors.push_back(order.secondBound.sample);
+                        }
+                        if (gap < count) {
+                            anchors.push_back(&*(second.ordered + gap));
+                        }
+                    }
+
+                    if (anchors.size() == static_cast<std::size_t>(second.end - second.begin)) {
+                        for (const auto* anchor : anchors) {
+                            useCounter(*anchor);
+                        }
+                        return;
+                    }
+
+                    // Keep the timestamp/source of an established boundary when its total repeats.
+                    std::map<long long, const UsageSample*> remaining;
+                    for (const auto* anchor : anchors) {
+                        remaining.emplace(anchor->tokens, anchor);
+                    }
+                    for (auto sample = second.begin; sample != second.ordered; ++sample) {
+                        const auto [existing, inserted] = remaining.emplace(sample->tokens, &*sample);
+                        if (!inserted && existing->second != &*sample) {
+                            linkedCounters.erase({rollout, sample->sourceId});
+                        }
+                    }
+                    for (const auto* anchor : anchors) {
+                        remaining.erase(anchor->tokens);
+                    }
+
+                    // Split the selected intervals at actual observations before counting prompts or overlap.
+                    std::vector<std::vector<const UsageSample*>> gaps(anchors.size() + 1);
+                    const auto fillGap = [&](std::size_t gap, long long from, long long to) {
+                        const auto first = remaining.lower_bound(std::min(from, to));
+                        const auto last = remaining.upper_bound(std::max(from, to));
+                        auto& samples = gaps[gap];
+                        for (auto it = first; it != last; ++it) {
+                            samples.push_back(it->second);
+                        }
+                        if (from > to) {
+                            std::reverse(samples.begin(), samples.end());
+                        }
+                        remaining.erase(first, last);
+                    };
+                    const auto fillInternalGaps = [&](bool rising) {
+                        for (std::size_t gap = 1; gap < anchors.size() && !remaining.empty(); ++gap) {
+                            const auto from = anchors[gap - 1]->tokens;
+                            const auto to = anchors[gap]->tokens;
+                            if ((from < to) == rising) {
+                                fillGap(gap, from, to);
+                            }
+                        }
+                    };
+                    fillInternalGaps(true);
+                    // Only a reading within an established drop can belong to that drop instead of
+                    // establishing growth across the boundary of this second.
+                    std::map<long long, const UsageSample*> withinKnownDrops;
+                    for (auto known = second.ordered; known != second.end && !remaining.empty(); ++known) {
+                        if (known == second.ordered || (known - 1)->tokens <= known->tokens) {
+                            continue;
+                        }
+                        auto it = remaining.lower_bound(known->tokens);
+                        while (it != remaining.end() && it->first < (known - 1)->tokens) {
+                            withinKnownDrops.insert(remaining.extract(it++));
+                        }
+                    }
+                    if (!remaining.empty() && (!baseline || baseline->tokens <= order.first->tokens)) {
+                        fillGap(0, baseline ? baseline->tokens : 0, order.first->tokens);
+                    }
+                    if (!remaining.empty() && (!next || order.last->tokens <= next->tokens)) {
+                        fillGap(anchors.size(), order.last->tokens,
+                                next ? next->tokens : std::numeric_limits<long long>::max());
+                    }
+                    remaining.merge(withinKnownDrops);
+                    fillInternalGaps(false);
+                    for (std::size_t gap = 0; gap < gaps.size(); ++gap) {
+                        for (const auto* sample : gaps[gap]) {
+                            useCounter(*sample);
+                        }
+                        if (gap < anchors.size()) {
+                            useCounter(*anchors[gap]);
+                        }
+                    }
+                };
                 using SecondIterator = std::vector<CounterSecond>::const_iterator;
                 const auto useEstimatedRun = [&](SecondIterator begin, SecondIterator end) {
                     legacyEstimated = true;
@@ -2294,23 +2386,8 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     for (std::size_t i = 0; i < choices.size(); ++i) {
                         const auto& second = *(begin + i);
                         const auto& order = choices[i][selected[i]];
-                        for (auto sample = second.begin; sample != second.ordered; ++sample) {
-                            if (&*sample != order.firstBound.sample && &*sample != order.secondBound.sample) {
-                                linkedCounters.erase({rollout, sample->sourceId});
-                            }
-                        }
-                        const auto count = static_cast<std::size_t>(second.end - second.ordered);
-                        for (std::size_t gap = 0; gap <= count; ++gap) {
-                            if (order.firstBound.sample && gap == order.firstBound.gap) {
-                                useCounter(*order.firstBound.sample);
-                            }
-                            if (order.secondBound.sample && gap == order.secondBound.gap) {
-                                useCounter(*order.secondBound.sample);
-                            }
-                            if (gap < count) {
-                                useCounter(*(second.ordered + gap));
-                            }
-                        }
+                        const auto* next = i + 1 < choices.size() ? choices[i + 1][selected[i + 1]].first : after;
+                        useEstimatedSecond(second, order, next);
                     }
                 };
                 for (auto second = seconds.cbegin(); second != seconds.cend();) {
