@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace JiStats {
@@ -230,6 +231,7 @@ struct DashboardMiniMaxCredentialResult {
     bool success = false;
     std::string planKey;
     std::string message;
+    std::optional<std::string> accountDisplayName = std::nullopt;
 };
 
 struct DashboardOpenAIImportResult {
@@ -269,6 +271,8 @@ struct DashboardViewModel {
     RuntimeState runtimeState = RuntimeState::Unknown;
     DashboardPreferences preferences;
     std::uint64_t completedPreferencesRequest = 0;
+    std::uint64_t failedPreferencesRequest = 0;
+    bool preferencesSessionOnly = false;
     std::uint64_t completedCodexAttributionRequest = 0;
     CodexAttributionSaveError codexAttributionSaveError = CodexAttributionSaveError::None;
     bool claudeCodeLocallyDetected = false;

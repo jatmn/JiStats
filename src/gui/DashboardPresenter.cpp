@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <condition_variable>
 #include <ctime>
@@ -1153,6 +1154,8 @@ public:
 
     struct MiniMaxActionCompletionParams {
         DashboardMiniMaxCredentialResult result;
+        std::string submittedAccountName;
+        std::uint64_t submittedAccountEditRevision;
     };
 
     struct OfflineRetryCompletionParams {
@@ -1259,6 +1262,7 @@ public:
     HWND miniMaxPlanCombo = nullptr;
     HWND miniMaxAccountLabel = nullptr;
     HWND miniMaxAccountEdit = nullptr;
+    std::atomic<std::uint64_t> miniMaxAccountEditRevision{0};
     HWND miniMaxSecretLabel = nullptr;
     HWND miniMaxSecretEdit = nullptr;
     HWND miniMaxSaveButton = nullptr;
@@ -1281,6 +1285,7 @@ public:
     HWND kimiCodeStatus = nullptr;
     HWND kimiCodeDetail = nullptr;
     HWND preferencesSaveStatus = nullptr;
+    HWND preferencesRetryButton = nullptr;
     HWND preferencesCloseButton = nullptr;
     std::string miniMaxFeedbackMessage;
     bool threadReady = false;
@@ -1386,6 +1391,8 @@ public:
     static constexpr int kPreferencesGrokSubscriptionCheckboxId = 1119;
     static constexpr int kPreferencesCursorSubscriptionCheckboxId = 1120;
     static constexpr int kPreferencesCodexModelAttributionCheckboxId = 1121;
+    static constexpr int kPreferencesSaveStatusId = 1122;
+    static constexpr int kPreferencesRetryButtonId = 1123;
     static constexpr int kPreferencesScheduledExportCheckboxId = 1108;
     static constexpr int kPreferencesScheduledExportIntervalEditId = 1109;
     static constexpr int kPreferencesCloseButtonId = 1106;
@@ -2553,9 +2560,14 @@ public:
             MoveWindow(kimiCodeDetail, innerLeft, innerTop + 166, innerWidth - 12, 84, TRUE);
         }
 
+        const int buttonsTop = clientRect.bottom - closeBottomMargin - buttonHeight;
         if (preferencesSaveStatus != nullptr) {
-            MoveWindow(preferencesSaveStatus, margin, clientRect.bottom - closeBottomMargin - buttonHeight + 5,
-                       contentWidth - buttonWidth - margin, 20, TRUE);
+            MoveWindow(preferencesSaveStatus, margin, buttonsTop + 5, contentWidth - 2 * (buttonWidth + margin), 20,
+                       TRUE);
+        }
+        if (preferencesRetryButton != nullptr) {
+            MoveWindow(preferencesRetryButton, clientRect.right - 2 * (margin + buttonWidth), buttonsTop, buttonWidth,
+                       buttonHeight, TRUE);
         }
         if (preferencesCloseButton != nullptr) {
             MoveWindow(preferencesCloseButton,
@@ -3565,6 +3577,7 @@ public:
     void syncPreferencesWindowState() {
         DashboardViewModel model;
         bool preferencesPending = false;
+        bool preferencesFailed = false;
         HWND overlay = nullptr;
         HWND openaiSubscription = nullptr;
         HWND codexModelAttribution = nullptr;
@@ -3596,6 +3609,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex);
             model = viewModel;
             preferencesPending = model.completedPreferencesRequest < preferencesRequest;
+            preferencesFailed = preferencesPending && model.failedPreferencesRequest == preferencesRequest;
             overlay = overlayCheckbox;
             openaiSubscription = openaiSubscriptionCheckbox;
             codexModelAttribution = codexModelAttributionCheckbox;
@@ -3627,7 +3641,18 @@ public:
             feedbackLabel = miniMaxFeedbackLabel;
         }
 
-        setWindowText(preferencesSaveStatus, preferencesPending ? L"Applying changes..." : L"");
+        const wchar_t* saveStatus = L"";
+        if (preferencesFailed) {
+            saveStatus = L"Could not save changes.";
+        } else if (preferencesPending) {
+            saveStatus = L"Applying changes...";
+        } else if (model.preferencesSessionOnly) {
+            saveStatus = L"Storage unavailable. Changes apply for this session.";
+        }
+        setWindowText(preferencesSaveStatus, saveStatus);
+        if (preferencesRetryButton != nullptr) {
+            ShowWindow(preferencesRetryButton, preferencesFailed ? SW_SHOWNA : SW_HIDE);
+        }
         if (overlay != nullptr) {
             SendMessageW(
                 overlay,
@@ -3846,8 +3871,9 @@ public:
         requestViewModelSync();
         setStatusText(inFlightStatus);
 
+        const auto submittedRevision = miniMaxAccountEditRevision.load();
         std::lock_guard<std::mutex> lock(miniMaxActionMutex);
-        miniMaxActionThreads.emplace_back([this, callback, request]() {
+        miniMaxActionThreads.emplace_back([this, callback, request, submittedRevision]() {
             DashboardMiniMaxCredentialResult result = callback(request);
             HWND hwnd = nullptr;
             {
@@ -3855,7 +3881,8 @@ public:
                 hwnd = window;
             }
 
-            auto* payload = new MiniMaxActionCompletionParams{std::move(result)};
+            auto* payload =
+                new MiniMaxActionCompletionParams{std::move(result), request.accountDisplayName, submittedRevision};
             if (hwnd == nullptr ||
                 PostMessageW(hwnd, WM_JISTATS_MINIMAX_ACTION_COMPLETE, 0, reinterpret_cast<LPARAM>(payload)) == FALSE) {
                 delete payload;
@@ -3875,6 +3902,15 @@ public:
         if (!ownedParams) {
             setStatusText(L"MiniMax credential action finished without a result.");
             return;
+        }
+
+        const auto& result = ownedParams->result;
+        if (result.success && result.accountDisplayName && miniMaxAccountEdit != nullptr &&
+            miniMaxAccountEditRevision.load() == ownedParams->submittedAccountEditRevision &&
+            selectedMiniMaxPlanKey() == result.planKey &&
+            getWindowTextUtf8(miniMaxAccountEdit) == ownedParams->submittedAccountName) {
+            setWindowText(miniMaxAccountEdit, *result.accountDisplayName);
+            SendMessageW(miniMaxAccountEdit, EM_SETMODIFY, FALSE, 0);
         }
 
         std::wstring statusText = utf8ToWide(ownedParams->result.message);
@@ -4788,8 +4824,13 @@ public:
             GetModuleHandleW(nullptr),
             nullptr);
 
-        preferencesSaveStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr,
+        preferencesSaveStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
+                                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesSaveStatusId)),
                                                 GetModuleHandleW(nullptr), nullptr);
+        preferencesRetryButton =
+            CreateWindowExW(0, L"BUTTON", L"Retry save", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd,
+                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesRetryButtonId)),
+                            GetModuleHandleW(nullptr), nullptr);
         preferencesCloseButton = CreateWindowExW(
             0,
             L"BUTTON",
@@ -4857,6 +4898,7 @@ public:
         applyBodyFont(kimiCodeStatus);
         applyBodyFont(kimiCodeDetail);
         applyBodyFont(preferencesSaveStatus);
+        applyBodyFont(preferencesRetryButton);
         applyBodyFont(preferencesCloseButton);
         layoutPreferencesControls(hwnd);
         syncPreferencesWindowState();
@@ -5217,8 +5259,22 @@ public:
                     DestroyWindow(hwnd);
                 }
                 return 0;
+            case kPreferencesRetryButtonId:
+                if (HIWORD(wParam) == BN_CLICKED) {
+                    editPreferences([this](DashboardPreferences&) {
+                        return preferencesRequest > viewModel.completedPreferencesRequest &&
+                               viewModel.failedPreferencesRequest == preferencesRequest;
+                    });
+                }
+                return 0;
+            case kMiniMaxAccountEditId:
+                if (HIWORD(wParam) == EN_CHANGE) {
+                    ++miniMaxAccountEditRevision;
+                }
+                return 0;
             case kMiniMaxPlanComboId:
                 if (HIWORD(wParam) == CBN_SELCHANGE) {
+                    ++miniMaxAccountEditRevision;
                     SendMessageW(miniMaxAccountEdit, EM_SETMODIFY, FALSE, 0);
                     syncPreferencesWindowState();
                 }
@@ -5317,6 +5373,7 @@ public:
                 miniMaxPlanCombo = nullptr;
                 miniMaxAccountLabel = nullptr;
                 miniMaxAccountEdit = nullptr;
+                ++miniMaxAccountEditRevision;
                 miniMaxSecretLabel = nullptr;
                 miniMaxSecretEdit = nullptr;
                 miniMaxSaveButton = nullptr;
@@ -5334,6 +5391,7 @@ public:
                 kimiCodeStatus = nullptr;
                 kimiCodeDetail = nullptr;
                 preferencesSaveStatus = nullptr;
+                preferencesRetryButton = nullptr;
                 preferencesCloseButton = nullptr;
             }
             return 0;
@@ -5884,12 +5942,14 @@ public:
                 miniMaxPlanCombo = nullptr;
                 miniMaxAccountLabel = nullptr;
                 miniMaxAccountEdit = nullptr;
+                ++miniMaxAccountEditRevision;
                 miniMaxSecretLabel = nullptr;
                 miniMaxSecretEdit = nullptr;
                 miniMaxSaveButton = nullptr;
                 miniMaxValidateButton = nullptr;
                 miniMaxFeedbackLabel = nullptr;
                 preferencesSaveStatus = nullptr;
+                preferencesRetryButton = nullptr;
                 preferencesCloseButton = nullptr;
                 helpDialog = {};
                 aboutDialog = {};
@@ -8097,6 +8157,7 @@ void DashboardPresenter::updateViewModel(const DashboardViewModel& viewModel) {
         if (viewModel.completedPreferencesRequest < pImpl->preferencesRequest) {
             auto preferences = std::move(current.preferences);
             const auto completedRequest = current.completedPreferencesRequest;
+            const auto failedRequest = current.failedPreferencesRequest;
             current = viewModel;
             // Runtime publications also carry the independently saved Analysis scope and attribution consent.
             preferences.codexModelAttributionEnabled = viewModel.preferences.codexModelAttributionEnabled;
@@ -8107,6 +8168,7 @@ void DashboardPresenter::updateViewModel(const DashboardViewModel& viewModel) {
             preferences.analysisCustomRangeEndUtc = viewModel.preferences.analysisCustomRangeEndUtc;
             current.preferences = std::move(preferences);
             current.completedPreferencesRequest = std::max(completedRequest, viewModel.completedPreferencesRequest);
+            current.failedPreferencesRequest = std::max(failedRequest, viewModel.failedPreferencesRequest);
         } else {
             current = viewModel;
         }

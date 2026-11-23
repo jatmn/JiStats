@@ -3878,7 +3878,9 @@ public:
         std::uint64_t request = 0;
     };
     std::mutex codexModelAttributionMutex;
-    // Keep attribution transactions off the connection shared by runtime and retention work.
+    // Keep ordinary preferences and attribution off the connection shared by runtime and retention work.
+    StorageService preferencesStorage;
+    SettingsService preferenceWriter{preferencesStorage};
     StorageService codexAttributionStorage;
     SettingsService codexAttributionSettings{codexAttributionStorage};
     std::atomic<bool> codexModelAttributionEnabled{false};
@@ -3907,7 +3909,7 @@ public:
     std::thread scheduledExportThread;
     std::thread retentionThread;
     std::mutex refreshWatcherMutex;
-    std::mutex interactionWorkMutex;
+    mutable std::mutex interactionWorkMutex;
     mutable std::mutex persistedMetricMutex;
     std::mutex scheduledExportMutex;
     std::condition_variable refreshWatcherCv;
@@ -3915,7 +3917,10 @@ public:
     std::condition_variable interactionWorkCv;
     std::optional<DashboardPreferences> pendingInteractionPreferences;
     std::optional<DashboardPreferences> activeInteractionPreferences;
+    std::optional<DashboardPreferences>
+        failedInteractionPreferences; // Effective runtime preferences while a save failed.
     std::atomic<std::uint64_t> completedPreferencesRequest{0};
+    std::atomic<std::uint64_t> failedPreferencesRequest{0};
     std::uint64_t completedProviderPreferencesRequest = 0; // Protected by runtimeRefreshMutex.
     std::optional<AnalysisScopeState> pendingAnalysisScope;
     std::optional<CodexAttributionChange> pendingCodexModelAttribution;
@@ -4277,7 +4282,8 @@ public:
         return (activeInteractionPreferences &&
                 !isProviderTrackingEnabled(*activeInteractionPreferences, providerKey)) ||
                (pendingInteractionPreferences &&
-                !isProviderTrackingEnabled(*pendingInteractionPreferences, providerKey));
+                !isProviderTrackingEnabled(*pendingInteractionPreferences, providerKey)) ||
+               (failedInteractionPreferences && !isProviderTrackingEnabled(*failedInteractionPreferences, providerKey));
     }
 
     std::vector<QuotaResponse> fetchQuotaResponses(std::vector<std::shared_ptr<IProviderAdapter>>& providers,
@@ -4313,16 +4319,28 @@ public:
         return providerManager;
     }
 
+    DashboardPreferences effectiveRuntimePreferences(DashboardPreferences preferences) const {
+        std::lock_guard<std::mutex> lock(interactionWorkMutex);
+        if (!failedInteractionPreferences) {
+            return preferences;
+        }
+        DashboardPreferences effective = *failedInteractionPreferences;
+        effective.codexModelAttributionEnabled = preferences.codexModelAttributionEnabled;
+        setAnalysisScope(effective, analysisScopeFromPreferences(preferences));
+        return effective;
+    }
+
     DashboardPreferences currentDashboardPreferences() const {
         const DashboardViewModel viewModel = dashboardPresenter.getViewModel();
         if (!viewModel.appVersion.empty()) {
-            return viewModel.preferences;
+            return effectiveRuntimePreferences(viewModel.preferences);
         }
-        return loadPreferences();
+        return effectiveRuntimePreferences(loadPreferences());
     }
 
     bool shouldPersistLocalActivity(const ActivityEvent& event) {
-        return isProviderTrackingEnabled(currentDashboardPreferences(), event.providerKey);
+        return isProviderTrackingEnabled(currentDashboardPreferences(), event.providerKey) &&
+               !hasProviderOptOutInProgress(event.providerKey);
     }
 
     void persistQuotaSnapshots(
@@ -4801,7 +4819,8 @@ public:
             return;
         }
 
-        const DashboardViewModel viewModel = dashboardPresenter.getViewModel();
+        DashboardViewModel viewModel = dashboardPresenter.getViewModel();
+        viewModel.preferences = effectiveRuntimePreferences(std::move(viewModel.preferences));
         if (viewModel.appVersion.empty()) {
             return;
         }
@@ -5297,7 +5316,7 @@ public:
     }
 
     std::chrono::milliseconds scheduledExportWaitInterval(std::time_t now) const {
-        const DashboardPreferences preferences = dashboardPresenter.getViewModel().preferences;
+        const DashboardPreferences preferences = currentDashboardPreferences();
         if (!shouldRunScheduledExport(preferences)) {
             return scheduledExportDormantPollInterval;
         }
@@ -5395,7 +5414,7 @@ public:
     }
 
     void runScheduledExportIfDue(std::time_t now) {
-        const DashboardPreferences preferences = dashboardPresenter.getViewModel().preferences;
+        const DashboardPreferences preferences = currentDashboardPreferences();
         if (!shouldRunScheduledExport(preferences)) {
             return;
         }
@@ -5450,7 +5469,7 @@ public:
     DashboardHtmlExportResult handleManualHtmlExport(const std::string& outputPath) {
         DashboardHtmlExportResult result;
 
-        const DashboardPreferences preferences = dashboardPresenter.getViewModel().preferences;
+        const DashboardPreferences preferences = currentDashboardPreferences();
         const std::time_t requestedAt = std::time(nullptr);
         ReportRequest request =
             buildAnalysisScopedHtmlExportRequest(preferences, outputPath, requestedAt);
@@ -5864,6 +5883,7 @@ public:
             updateMiniMaxCredentialProfile(planKey, profile);
             syncActiveMiniMaxRuntimeProfile(planKey);
             result.success = true;
+            result.accountDisplayName = profile.accountDisplayName;
             result.message = "Stored " + minimaxPlanDisplayName(planKey) + " credential.";
             refreshProviderRuntimeState(std::time(nullptr), true, true);
             return result;
@@ -5914,6 +5934,7 @@ public:
         syncActiveMiniMaxRuntimeProfile(planKey);
         queueMiniMaxCredentialValidation(planKey, profile);
         result.success = true;
+        result.accountDisplayName = profile.accountDisplayName;
         result.message = "Validating " + minimaxPlanDisplayName(planKey) + " credential...";
         refreshProviderRuntimeState(std::time(nullptr), true, true);
         return result;
@@ -6641,6 +6662,8 @@ public:
                 persistConnectivityForPublication(*connectivityUpdates, now);
             }
             presentedViewModel.completedPreferencesRequest = completedPreferencesRequest.load();
+            presentedViewModel.failedPreferencesRequest = failedPreferencesRequest.load();
+            presentedViewModel.preferencesSessionOnly = !storageAvailable;
             presentedViewModel.completedCodexAttributionRequest = completedCodexAttributionRequest.load();
             presentedViewModel.preferences.codexModelAttributionEnabled = codexModelAttributionEnabled.load();
             presentedViewModel.codexAttributionSaveError = codexAttributionSaveError.load();
@@ -6905,6 +6928,7 @@ public:
     void refreshPersistedActivityPresenters(std::time_t now, const AnalysisScopeState* requestedScope = nullptr) {
         std::lock_guard<std::mutex> refreshLock(runtimeRefreshMutex);
         DashboardViewModel viewModel = dashboardPresenter.getViewModel();
+        viewModel.preferences = effectiveRuntimePreferences(std::move(viewModel.preferences));
         if (requestedScope) {
             setAnalysisScope(viewModel.preferences, *requestedScope);
             saveAnalysisScope(*requestedScope);
@@ -6927,9 +6951,9 @@ public:
 
         const DashboardPreferences preferences = currentDashboardPreferences();
         const size_t persistedCount = observationPersistenceBridge.persistPending(
-            localObservationService,
-            [&preferences](const ActivityEvent& event) {
-                return isProviderTrackingEnabled(preferences, event.providerKey);
+            localObservationService, [this, &preferences](const ActivityEvent& event) {
+                return isProviderTrackingEnabled(preferences, event.providerKey) &&
+                       !hasProviderOptOutInProgress(event.providerKey);
             });
         const std::string persistenceError = observationPersistenceBridge.getLastError();
         if (!persistenceError.empty() && Logger::isInitialized()) {
@@ -6977,6 +7001,7 @@ public:
             applyCodexModelAttributionPreference({false, requestedCodexRevocations.load()});
         }
         codexAttributionStorage.close();
+        preferencesStorage.close();
         if (storageService.isOpen()) {
             storageService.close();
         }
@@ -7000,9 +7025,9 @@ public:
                                 bool refreshLocalPresenters = false) {
         std::lock_guard<std::mutex> refreshLock(runtimeRefreshMutex);
         DashboardViewModel currentViewModel = dashboardPresenter.getViewModel();
-        DashboardPreferences preferences = storageAvailable
-            ? loadPreferences()
-            : (currentViewModel.appVersion.empty() ? loadPreferences() : currentViewModel.preferences);
+        DashboardPreferences preferences = effectiveRuntimePreferences(
+            storageAvailable || currentViewModel.appVersion.empty() ? loadPreferences() : currentViewModel.preferences);
+        bool settingsSaved = false;
         if (requestedSettings) {
             const auto scope = requestedScope ? *requestedScope : analysisScopeFromPreferences(preferences);
             // A queued off/on edit can suppress a provider between refreshes even if the final value matches storage.
@@ -7013,13 +7038,41 @@ public:
                     isProviderTrackingEnabled(preferences, key) != isProviderTrackingEnabled(*requestedSettings, key);
             }
 
-            preferences = applyStartupPreferences(*requestedSettings);
+            const auto previousStartup = resolveStartupPreferences(preferences);
+            DashboardPreferences requested = applyStartupPreferences(*requestedSettings);
+            settingsSaved = !storageAvailable || savePreferences(requested);
+            if (settingsSaved) {
+                preferences = std::move(requested);
+                {
+                    std::lock_guard<std::mutex> lock(interactionWorkMutex);
+                    failedInteractionPreferences.reset();
+                }
+                failedPreferencesRequest.store(0);
+                completedPreferencesRequest.store(requestedSettings->changeRequest);
+            } else {
+                JISTATS_LOG_WARN(LogCategory::General, "Could not save Settings changes to SQLite.");
+                if (previousStartup.startupEnabled != requested.startupEnabled ||
+                    previousStartup.startupStartInBackground != requested.startupStartInBackground) {
+                    applyStartupPreferences(previousStartup);
+                    preferences = resolveStartupPreferences(preferences);
+                }
+                // Keep an unsaved opt-out in force for this process. A failed opt-in cannot start tracking.
+                preferences.openaiSubscriptionTrackingEnabled &= requested.openaiSubscriptionTrackingEnabled;
+                preferences.miniMaxSubscriptionTrackingEnabled &= requested.miniMaxSubscriptionTrackingEnabled;
+                preferences.claudeCodeEnabled &= requested.claudeCodeEnabled;
+                preferences.kimiCodeEnabled &= requested.kimiCodeEnabled;
+                preferences.grokSubscriptionTrackingEnabled &= requested.grokSubscriptionTrackingEnabled;
+                preferences.cursorSubscriptionTrackingEnabled &= requested.cursorSubscriptionTrackingEnabled;
+                {
+                    std::lock_guard<std::mutex> lock(interactionWorkMutex);
+                    failedInteractionPreferences = preferences;
+                }
+                failedPreferencesRequest.store(requestedSettings->changeRequest);
+            }
             setAnalysisScope(preferences, scope);
-            savePreferences(preferences);
             if (requestedScope) {
                 saveAnalysisScope(scope);
             }
-            completedPreferencesRequest.store(requestedSettings->changeRequest);
 
             if (storageAvailable && !providerTrackingChanged) {
                 currentViewModel.preferences = preferences;
@@ -7061,7 +7114,7 @@ public:
         }
 #endif
         applyRuntimeViewModel(viewModel, now, std::move(connectivityUpdates));
-        if (requestedSettings) {
+        if (settingsSaved) {
             completedProviderPreferencesRequest =
                 std::max(completedProviderPreferencesRequest, requestedSettings->providerChangeRequest);
         }
@@ -7187,36 +7240,40 @@ public:
                                   scope.customRangeEndUtc > 0 ? formatTimeUtcIso(scope.customRangeEndUtc) : "");
     }
 
-    void savePreferences(const DashboardPreferences& preferences) {
-        if (storageAvailable) {
-            settingsService.setBool(preference_keys::TASKBAR_OVERLAY_ENABLED,
-                                    preferences.taskbarOverlayEnabled);
-            settingsService.setBool(preference_keys::OPENAI_SUBSCRIPTION_TRACKING_ENABLED,
-                                    preferences.openaiSubscriptionTrackingEnabled);
-            settingsService.setBool(preference_keys::MINIMAX_SUBSCRIPTION_TRACKING_ENABLED,
-                                    preferences.miniMaxSubscriptionTrackingEnabled);
-            settingsService.setBool(preference_keys::CLAUDE_CODE_ENABLED,
-                                    preferences.claudeCodeEnabled);
-            settingsService.setBool(preference_keys::KIMI_CODE_ENABLED,
-                                    preferences.kimiCodeEnabled);
-            settingsService.setBool(preference_keys::GROK_TRACKING_ENABLED,
-                                    preferences.grokSubscriptionTrackingEnabled);
-            settingsService.setBool(preference_keys::CURSOR_TRACKING_ENABLED,
-                                    preferences.cursorSubscriptionTrackingEnabled);
-            settingsService.setBool(preference_keys::STARTUP_ENABLED,
-                                    preferences.startupEnabled);
-            settingsService.setBool(preference_keys::STARTUP_BACKGROUND,
-                                    preferences.startupStartInBackground);
-            settingsService.setString(preference_keys::LAST_SELECTED_PROVIDER_ID,
-                                      preferences.lastSelectedProviderId);
-            settingsService.setString(preference_keys::LAST_SELECTED_ACCOUNT_ID, preferences.lastSelectedAccountId);
-            settingsService.setBool(preference_keys::SCHEDULED_EXPORT_ENABLED,
-                                    preferences.scheduledExportEnabled);
-            settingsService.setInt(preference_keys::SCHEDULED_EXPORT_INTERVAL_MINUTES,
-                                   std::max(1, preferences.scheduledExportIntervalMinutes));
-            settingsService.setString(preference_keys::SCHEDULED_EXPORT_PATH,
-                                      preferences.scheduledExportPath);
+    bool savePreferences(const DashboardPreferences& preferences) {
+        if (!storageAvailable ||
+            (!preferencesStorage.isOpen() && !preferencesStorage.init(storageService.getDbPath())) ||
+            !preferencesStorage.beginTransaction(StorageService::TransactionMode::Immediate)) {
+            return false;
         }
+
+        if (preferenceWriter.setBool(preference_keys::TASKBAR_OVERLAY_ENABLED, preferences.taskbarOverlayEnabled) &&
+            preferenceWriter.setBool(preference_keys::OPENAI_SUBSCRIPTION_TRACKING_ENABLED,
+                                     preferences.openaiSubscriptionTrackingEnabled) &&
+            preferenceWriter.setBool(preference_keys::MINIMAX_SUBSCRIPTION_TRACKING_ENABLED,
+                                     preferences.miniMaxSubscriptionTrackingEnabled) &&
+            preferenceWriter.setBool(preference_keys::CLAUDE_CODE_ENABLED, preferences.claudeCodeEnabled) &&
+            preferenceWriter.setBool(preference_keys::KIMI_CODE_ENABLED, preferences.kimiCodeEnabled) &&
+            preferenceWriter.setBool(preference_keys::GROK_TRACKING_ENABLED,
+                                     preferences.grokSubscriptionTrackingEnabled) &&
+            preferenceWriter.setBool(preference_keys::CURSOR_TRACKING_ENABLED,
+                                     preferences.cursorSubscriptionTrackingEnabled) &&
+            preferenceWriter.setBool(preference_keys::STARTUP_ENABLED, preferences.startupEnabled) &&
+            preferenceWriter.setBool(preference_keys::STARTUP_BACKGROUND, preferences.startupStartInBackground) &&
+            preferenceWriter.setString(preference_keys::LAST_SELECTED_PROVIDER_ID,
+                                       preferences.lastSelectedProviderId) &&
+            preferenceWriter.setString(preference_keys::LAST_SELECTED_ACCOUNT_ID, preferences.lastSelectedAccountId) &&
+            preferenceWriter.setBool(preference_keys::SCHEDULED_EXPORT_ENABLED, preferences.scheduledExportEnabled) &&
+            preferenceWriter.setInt(preference_keys::SCHEDULED_EXPORT_INTERVAL_MINUTES,
+                                    std::max(1, preferences.scheduledExportIntervalMinutes)) &&
+            preferenceWriter.setString(preference_keys::SCHEDULED_EXPORT_PATH, preferences.scheduledExportPath) &&
+            preferencesStorage.commitTransaction()) {
+            return true;
+        }
+        if (!preferencesStorage.rollbackTransaction()) {
+            preferencesStorage.close();
+        }
+        return false;
     }
 
     void syncPresentedPreferences(const DashboardPreferences& preferences) {
