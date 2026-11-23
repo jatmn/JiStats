@@ -1325,6 +1325,7 @@ public:
     std::wstring updatedTooltipBody;
     StorageService placementStorage;
     std::optional<RECT> savedAnalysisWindowRect;
+    std::optional<RECT> initialAnalysisFallbackRect;
     std::thread placementWriter;
     std::mutex placementMutex;
     std::condition_variable placementCv;
@@ -1539,9 +1540,9 @@ public:
         placementCv.notify_one();
     }
 
-    void persistAnalysisWindowPlacement(HWND hwnd) {
+    static std::optional<RECT> analysisWindowPlacement(HWND hwnd) {
         if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd)) {
-            return;
+            return std::nullopt;
         }
 
         WINDOWPLACEMENT placement{};
@@ -1551,9 +1552,19 @@ public:
             !IsRectEmpty(&placement.rcNormalPosition)) {
             rect = placement.rcNormalPosition;
         } else if (GetWindowRect(hwnd, &rect) == 0 || IsRectEmpty(&rect)) {
+            return std::nullopt;
+        }
+
+        return rect;
+    }
+
+    void persistAnalysisWindowPlacement(HWND hwnd) {
+        const auto rect = analysisWindowPlacement(hwnd);
+        if (!rect || (initialAnalysisFallbackRect && EqualRect(&*rect, &*initialAnalysisFallbackRect))) {
             return;
         }
 
+        initialAnalysisFallbackRect.reset();
         {
             std::lock_guard<std::mutex> lock(placementMutex);
             savedAnalysisWindowRect = rect;
@@ -2156,6 +2167,7 @@ public:
             analysisWindow = hwnd;
         }
 
+        initialAnalysisFallbackRect = savedRect ? std::nullopt : analysisWindowPlacement(hwnd);
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
         if (bringToFront) {

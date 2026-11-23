@@ -1564,7 +1564,7 @@ TEST_CASE("AppController tray navigation stays responsive during a runtime refre
     app.shutdown();
 }
 
-TEST_CASE("AppController applies a custom Analysis edit after an older provider refresh",
+TEST_CASE("AppController applies a custom Analysis edit alongside a Settings change after an older provider refresh",
           "[app][analysis][navigation]") {
     requireSqlite();
     TempTestDatabase dbPath;
@@ -1574,6 +1574,7 @@ TEST_CASE("AppController applies a custom Analysis edit after an older provider 
         StorageService storage;
         REQUIRE(storage.init(dbPath.path()));
         SettingsService settings(storage);
+        REQUIRE(settings.setBool("ui.taskbar_overlay_enabled", true));
         REQUIRE(settings.setString("ui.analysis_date_range_preset", "custom"));
         REQUIRE(settings.setString("ui.analysis_custom_range_start_utc", "2026-04-02T00:00:00Z"));
         REQUIRE(settings.setString("ui.analysis_custom_range_end_utc", "2026-04-05T00:00:00Z"));
@@ -1601,13 +1602,22 @@ TEST_CASE("AppController applies a custom Analysis edit after an older provider 
         },
         std::chrono::seconds(5)));
 
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+    HWND overlay = nullptr;
+    REQUIRE(waitForCondition([&]() {
+        overlay = GetDlgItem(FindWindowW(L"JiStatsPreferencesWindow", nullptr), 1101);
+        return overlay != nullptr;
+    }));
+
     std::promise<void> reachedPublication;
     auto publicationReached = reachedPublication.get_future();
     std::promise<void> releasePublication;
     auto publicationReleased = releasePublication.get_future().share();
     app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
-        reachedPublication.set_value();
-        publicationReleased.wait();
+        if (publicationReleased.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            reachedPublication.set_value();
+            publicationReleased.wait();
+        }
     });
 
     auto refresh = std::async(std::launch::async, [&app]() { app.refreshRuntimeForTesting(); });
@@ -1615,11 +1625,8 @@ TEST_CASE("AppController applies a custom Analysis edit after an older provider 
     const bool editQueued = SetWindowTextW(startDate, L"2026-04-01") != FALSE &&
                             waitForCondition([&]() { return !IsWindowEnabled(startDate); });
 
-    // On the old path the blocked worker could publish the edited preferences early.
-    // Allow that publication before releasing the held provider snapshot.
-    waitForCondition(
-        [&]() { return app.getDashboardViewModelForTesting().preferences.analysisCustomRangeStartUtc == *editedStart; },
-        std::chrono::milliseconds(500));
+    SendMessageW(overlay, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(GetParent(overlay), WM_COMMAND, MAKEWPARAM(1101, BN_CLICKED), reinterpret_cast<LPARAM>(overlay));
     releasePublication.set_value();
     refresh.get();
 
@@ -1628,11 +1635,18 @@ TEST_CASE("AppController applies a custom Analysis edit after an older provider 
     REQUIRE(waitForCondition(
         [&]() {
             const auto model = app.getDashboardViewModelForTesting();
-            return model.analysis.scope.customRangeStartUtc == *editedStart && IsWindowEnabled(startDate);
+            return !model.preferences.taskbarOverlayEnabled &&
+                   model.analysis.scope.customRangeStartUtc == *editedStart && IsWindowEnabled(startDate);
         },
         std::chrono::seconds(3)));
     CHECK(app.getDashboardViewModelForTesting().analysis.scope.dateRangePreset == AnalysisDateRangePreset::Custom);
     app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    SettingsService settings(storage);
+    CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
+    CHECK(settings.getString("ui.analysis_custom_range_start_utc") == "2026-04-01T00:00:00Z");
 }
 
 TEST_CASE("AppController dashboard shell menu opens settings help and about windows", "[app][shell]") {
