@@ -56,3 +56,5 @@ Desktop.ini
 # Local AI CLI profiles / credentials
 .claude/settings.local.json
 .openclaude-profile.json
+
+/node_modules/
