@@ -38,6 +38,7 @@ if(WIN32)
         test_dashboard_presenter.cpp
         test_tray_controller.cpp
         test_app_controller.cpp
+        test_app_controller_offline_notice.cpp
         test_app_observation_persistence.cpp
         test_analysis_presenter.cpp
         test_analysis_query_engine.cpp
@@ -126,5 +127,5 @@ set_target_properties(JiStatsTests PROPERTIES
 )
 
 # Register with CTest (run from repo root so relative fixture paths work)
-add_test(NAME JiStatsTests COMMAND $<TARGET_FILE:JiStatsTests>)
+add_test(NAME JiStatsTests COMMAND $<TARGET_FILE:JiStatsTests> "*" --order rand)
 set_tests_properties(JiStatsTests PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

@@ -368,6 +368,32 @@ TEST_CASE("DashboardPresenter syncs scheduled export controls from the view mode
     presenter.shutdown();
 }
 
+TEST_CASE("DashboardPresenter routes the separate Codex attribution checkbox",
+          "[dashboard_presenter][settings][codex]") {
+    std::atomic<int> requested{-1};
+    DashboardPresenter presenter;
+    presenter.setCodexModelAttributionChangedCallback(
+        [&requested](bool enabled, std::uint64_t) { requested.store(enabled ? 1 : 0); });
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(makeQuotaViewModel());
+
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition(
+        [&presenter]() { return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+    REQUIRE(presenter.selectPreferencesTabForTesting(1));
+
+    const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    REQUIRE(settings != nullptr);
+    const HWND checkbox = FindWindowExW(settings, nullptr, L"Button", L"Enable Codex model attribution");
+    REQUIRE(checkbox != nullptr);
+    REQUIRE(waitForCondition([checkbox]() { return IsWindowVisible(checkbox) != FALSE; }));
+    CHECK(SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_UNCHECKED);
+    SendMessageW(checkbox, BM_CLICK, 0, 0);
+    CHECK(requested.load() == 1);
+    SendMessageW(checkbox, BM_CLICK, 0, 0);
+    CHECK(requested.load() == 0);
+}
+
 TEST_CASE("DashboardPresenter runs MiniMax credential actions asynchronously", "[dashboard_presenter][settings][minimax]") {
     DashboardPresenter presenter;
     DashboardViewModel model = makeQuotaViewModel();
@@ -835,6 +861,7 @@ TEST_CASE("DashboardPresenter shows Codex throughput on the main overview tab", 
     model.analysis.codexThroughput.tokensPerMinute30m = 9.8;
     model.analysis.codexThroughput.promptsPerMinute30m = 0.7;
     model.analysis.codexThroughput.confidenceLabel = "LocalExact";
+    model.preferences.codexModelAttributionEnabled = true;
     model.analysis.openAiCodexModelUsage.title = "OpenAI Codex Usage by Model";
     model.analysis.openAiCodexModelUsage.subtitle = "Observed local Codex usage since JiStats baseline";
     model.analysis.openAiCodexModelUsage.hasData = true;
@@ -858,6 +885,14 @@ TEST_CASE("DashboardPresenter shows Codex throughput on the main overview tab", 
     CHECK(text.find("Source: LocalExact") != std::string::npos);
     CHECK(presenter.getOpenAiCodexModelUsageTextForTesting().find("gpt-5.4: 12,345 tokens") != std::string::npos);
     CHECK(presenter.getHicapCodexModelUsageTextForTesting().find("No new Codex SQLite usage observed yet") != std::string::npos);
+
+    model.preferences.codexModelAttributionEnabled = false;
+    presenter.updateViewModel(model);
+    REQUIRE(waitForCondition([&presenter]() {
+        return presenter.getHicapCodexModelUsageTextForTesting().find("Enable Codex model attribution") !=
+               std::string::npos;
+    }));
+    CHECK(presenter.getOpenAiCodexModelUsageTextForTesting().find("gpt-5.4: 12,345 tokens") != std::string::npos);
 
     const auto chartRect = presenter.getCodexThroughputChartRectForTesting();
     CHECK(chartRect[0] == 0);

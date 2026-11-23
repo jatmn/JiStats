@@ -11,7 +11,7 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 
 ## Provider and privacy boundaries
 
-- Keep provider tracking opt-in. OpenAI/Codex is subscription-first, with separate credentials and billing for the optional API-platform path. See the [Codex SQLite reference](docs/providers/openai.md#codex-sqlite-privacy-boundary) for a current exception in the model attribution path. MiniMax focuses on subscription quota, with broader PAYG support tracked separately.
+- Keep provider tracking opt-in. OpenAI/Codex is subscription-first, with separate credentials and billing for the optional API-platform path. See the [Codex SQLite reference](docs/providers/openai.md#codex-sqlite-privacy-boundary) for the separate model attribution opt-in. MiniMax focuses on subscription quota, with broader PAYG support tracked separately.
 - Claude Code uses bounded local evidence. Kimi Code uses bounded local evidence and can show provider-exact quota through the validated OAuth-backed surface when available. Preserve the provenance and confidence of each metric and show uncertainty when source evidence is incomplete.
 - Prefer official provider signals and non-model endpoints. If a model call is needed for monitoring, use the lowest-cost suitable path and make it explicit and configurable.
 - Use the existing [logger and categories](include/core/Logger.hpp). Keep API keys, tokens, and raw request or response bodies out of logs. Never log `UsageResponse::rawResponse` or `QuotaResponse::rawResponse` directly, because they can hold raw provider payloads or local Codex session content. Use `sanitize::mask` when a sensitive value needs a log reference. The application log is at `%LOCALAPPDATA%/JiStats/logs/jistats.log`.

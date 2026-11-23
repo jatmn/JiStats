@@ -15,6 +15,8 @@ Choose checks for the behavior affected and record the commands, results, and an
 
 Follow the [Linux build instructions](../../README.md#building-on-linux) for the native test build and the MinGW cross-build. For a focused native run, execute `build-linux/bin/JiStatsTests "[schema][migration]"` from the repository root. The native target covers the portable components listed in [tests/CMakeLists.txt](../../tests/CMakeLists.txt). The Windows target includes the remaining provider, controller, reporting and desktop integration tests.
 
+Both suites randomize case order. Full Windows runs compare the Catch2 execution report with its registration list and every tracked test translation unit. The `windows-test-file-times` artifact records the revision, seed and elapsed seconds per source file for 14 days.
+
 ## Windows commands
 
 Use the [UCRT64 build instructions](../../README.md#building-on-windows) to run the full suite locally. [CTest](../../tests/CMakeLists.txt) sets the working directory for relative fixture paths. For a focused run, launch `build-ucrt/bin/JiStatsTests.exe "[openai]"` from the repository root.
@@ -24,6 +26,8 @@ Use the [UCRT64 build instructions](../../README.md#building-on-windows) to run 
 For build-affecting pull requests to `main` or `release/**`, Linux runs the portable tests and cross-compiles all three Windows executables. A hosted Windows runner downloads that run's `JiStatsTests.exe` and executes the full suite from the checkout root. The required `CI passed` check includes both jobs. CI compares the PR test merge commit with its base parent. Only PRs targeting a branch with an active merge queue can omit native builds for documentation and certain repository metadata. Test payloads still trigger them, including Markdown inside the Kimi synthetic runtime and ChatGPT export payload directories.
 
 Merge groups and protected-branch pushes always build and run both native suites and the Pullfrog authorization tests. The required check accepts skipped builds only on a pull request with a successful change detector and an explicit no-build decision. GitHub requires organization ownership to enable a merge queue on a public repository. Dispatch [CI](../../.github/workflows/ci.yml) to run both jobs on a selected branch regardless of the diff. Enable **Run eight additional offline notice passes to diagnose restart stalls** when investigating offline restart timing. CI retains the cross-built test executable for 30 days so a Windows job retry can reuse it.
+
+The Linux build restores compiler results seeded by pushes to the default branch. Both native and MinGW compilers use ccache in preprocessor mode. Each run reports compiler hits and misses and still links the binaries and executes the suites.
 
 ## Pull request lint
 
