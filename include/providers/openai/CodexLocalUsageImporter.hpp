@@ -23,9 +23,10 @@ class CodexLocalUsageImporter {
 public:
     explicit CodexLocalUsageImporter(StorageService& storage);
     CodexLocalUsageImportResult importFromDefaultSource(std::time_t now = 0);
-    CodexLocalUsageImportResult importFromSource(const std::string& sourcePath, std::time_t now = 0);
+    CodexLocalUsageImportResult importFromSource(const std::string& sourcePath, std::time_t now = 0,
+                                                 int attributionGeneration = 0);
 
-private:
+  private:
     StorageService& storage_;
 };
 

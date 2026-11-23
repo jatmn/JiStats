@@ -14,7 +14,8 @@ on:
         default: false
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Push SHAs and manual runs are isolated. A delayed push must not cancel a newer tip.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && github.run_id) || github.ref }}-${{ github.event_name == 'push' && github.sha || 'latest' }}
   cancel-in-progress: true
 
 permissions:
@@ -25,48 +26,44 @@ jobs:
     name: Detect build changes
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     outputs:
       build: ${{ steps.filter.outputs.build }}
+      selector: ${{ steps.selector.outcome }}
     steps:
       - name: Check out the tested revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          filter: blob:none
           ref: ${{ github.sha }}
           fetch-depth: 2
           persist-credentials: false
+      - name: Verify required native CI inputs
+        id: selector
+        run: bash scripts/check_native_ci_selection.sh
       - name: Check whether the change can affect the build or tests
+        if: github.event_name == 'pull_request'
         id: filter
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          source scripts/native_ci_input.sh
           build=true
           files="$RUNNER_TEMP/jistats-changed-files"
           # Selection is safe only when the target branch enforces a merge queue.
-          branch=$(jq -rn --arg branch "$GITHUB_BASE_REF" '$branch | @uri')
-          queued=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$branch" --paginate |
-            jq -s 'any(.[][]; .type == "merge_queue")')
-          if [[ "$queued" != true ]]; then
+          if ! branch=$(jq -rn --arg branch "$GITHUB_BASE_REF" '$branch | @uri') ||
+             ! queued=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$branch" --paginate |
+               jq -s 'if length > 0 and all(.[]; type == "array") then
+                 any(.[][]; .type == "merge_queue") else error("invalid rules response") end'); then
+            reason="could not check the target branch rules"
+          elif [[ "$queued" != true ]]; then
             reason="target branch has no merge queue"
           elif git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null &&
             git diff --no-ext-diff --no-renames --name-only -z "$GITHUB_SHA^1" "$GITHUB_SHA" -- > "$files"; then
             build=false
             while IFS= read -r -d '' file; do
-              case "$file" in
-                # Keep all files in test payload directories as build inputs.
-                docs/fixtures/kimi/synthetic_local_runtime/* | docs/fixtures/openai/chatgpt-export-redacted/*)
-                  ;;
-                *.md)
-                  continue ;;
-                docs/fixtures/* | .github/workflows/ci.yml)
-                  ;;
-                docs/*)
-                  continue ;;
-                # Keep the existing PR-only exemption for non-build metadata and scripts.
-                .github/* | scripts/* | LICENSE | .gitignore | .clang-format | .clang-tidy | assets/logo.png)
-                  continue ;;
-              esac
+              is_native_ci_input "$file" || continue
               build=true
               printf -v reason '%q' "$file"
               break
@@ -83,29 +80,101 @@ jobs:
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           echo "build=$build" >> "$GITHUB_OUTPUT"
 
-  linux-cross:
-    name: Linux tests and Windows cross-build
+  portable:
+    name: Portable tests with bundled SQLite
     needs: changes
     if: >-
-      ${{ !cancelled() && (github.event_name != 'pull_request' ||
-          needs.changes.result != 'success' || needs.changes.outputs.build != 'false') }}
+      ${{ !cancelled() && needs.changes.outputs.selector != 'failure' &&
+          (github.event_name != 'pull_request' || needs.changes.result != 'success' ||
+           needs.changes.outputs.build != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NODIRECT: 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          filter: blob:none
           persist-credentials: false
+      - name: Install ccache and fingerprint the native toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ccache
+          # GCC invokes separate assembler and compiler backends. Include their
+          # installed package versions even when the driver binary is unchanged.
+          dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' > "$RUNNER_TEMP/compiler-packages"
+          echo "CCACHE_EXTRAFILES=$RUNNER_TEMP/compiler-packages" >> "$GITHUB_ENV"
+      - name: Restore compiler results
+        id: compiler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: jistats-ccache-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: jistats-ccache-native-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Run portable tests with bundled SQLite
+        run: |
+          ccache --zero-stats
+          cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
+          cmake --build build-linux --parallel "$(nproc)"
+          ctest --test-dir build-linux --output-on-failure
+      - name: Report compiler cache hits and misses
+        run: ccache --show-stats --verbose
+      - name: Seed compiler results for pull requests
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+  linux-cross:
+    name: Windows cross-build
+    needs: changes
+    if: >-
+      ${{ !cancelled() && needs.changes.outputs.selector != 'failure' &&
+          (github.event_name != 'pull_request' || needs.changes.result != 'success' ||
+           needs.changes.outputs.build != 'false') }}
+    runs-on: ${{ vars.JISTATS_LINUX_BUILD_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NODIRECT: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          filter: blob:none
+          persist-credentials: false
+      - name: Verify required native CI inputs after detector fallback
+        if: >-
+          ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
+              needs.changes.outputs.selector != 'success' }}
+        run: bash scripts/check_native_ci_selection.sh
       - name: Run Pullfrog authorization tests
         run: node --test scripts/pullfrog-review-check.test.mjs
       - name: Install MinGW-w64 and ImageMagick
+        if: vars.JISTATS_LINUX_BUILD_RUNNER == ''
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix imagemagick ninja-build
-      - name: Run portable tests with bundled SQLite
+          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix imagemagick ninja-build ccache
+      - name: Identify compiler packages for the cache
         run: |
-          cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
-          cmake --build build-linux --parallel
-          ctest --test-dir build-linux --output-on-failure
+          # GCC invokes separate assembler and compiler backends. Include their
+          # installed package versions even when the driver binary is unchanged.
+          dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' 'mingw-w64*' > "$RUNNER_TEMP/compiler-packages"
+          echo "CCACHE_EXTRAFILES=$RUNNER_TEMP/compiler-packages" >> "$GITHUB_ENV"
+      - name: Restore compiler results
+        id: compiler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Check the default build and enable the MiniMax CLI and tests
         shell: bash
         run: |
@@ -119,7 +188,17 @@ jobs:
           fi
           cmake -S . -B build-mingw -DJISTATS_BUILD_TESTS=ON -DJISTATS_BUILD_MINIMAX_CLI=ON
       - name: Build the app, MiniMax CLI, and tests
-        run: cmake --build build-mingw --parallel --target JiStats JiStatsMiniMaxCli JiStatsTests
+        run: |
+          ccache --zero-stats
+          cmake --build build-mingw --parallel "$(nproc)" --target JiStats JiStatsMiniMaxCli JiStatsTests
+      - name: Report compiler cache hits and misses
+        run: ccache --show-stats --verbose
+      - name: Seed compiler results for pull requests
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
       - name: Upload the test executable for Windows
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -132,7 +211,7 @@ jobs:
 
   ci-passed:
     name: CI passed
-    needs: [changes, linux-cross]
+    needs: [changes, portable, linux-cross]
     if: always()
     runs-on: ${{ needs.linux-cross.result == 'success' && 'windows-latest' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.repeat_offline_notice_tests && 15 || 5 }}
@@ -140,6 +219,7 @@ jobs:
       - if: needs.linux-cross.result == 'success'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          filter: blob:none
           persist-credentials: false
       - if: needs.linux-cross.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -151,6 +231,8 @@ jobs:
         id: windows-tests
         if: needs.linux-cross.result == 'success'
         env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
           REPEAT_OFFLINE_NOTICE_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.repeat_offline_notice_tests }}
         shell: pwsh
         run: |
@@ -189,13 +271,26 @@ jobs:
             if ($process.ExitCode -ne 0) { exit $process.ExitCode }
           }
           # Reserve 15 seconds for GDB and 35 seconds for runner setup and cleanup.
-          Invoke-WindowsTests @() 250000
+          Invoke-WindowsTests @('*', '--list-tests', '--reporter', 'xml::out=catch-inventory.xml') 250000
+          Invoke-WindowsTests @('*', '--order', 'rand', '--durations', 'yes', '--reporter', 'console', '--reporter', 'xml::out=catch-results.xml') 250000
+          $expected = @(git ls-files -- 'tests/*.cpp')
+          if ($LASTEXITCODE -ne 0 -or !$expected) { throw 'Cannot enumerate the Windows test sources.' }
+          ./scripts/check_test_inventory.ps1 -Inventory catch-inventory.xml -Results catch-results.xml -Output test-file-times.json -ExpectedFiles $expected
           if ($env:REPEAT_OFFLINE_NOTICE_TESTS -ne 'true') { exit 0 }
           foreach ($attempt in 1..8) {
             Write-Host "Checking offline notice restart timing, pass $attempt"
             Invoke-WindowsTests @('[offline_notice]', '--reporter', 'compact', '--success') 60000
           }
           exit 0
+
+      - name: Save verified per-file test times
+        if: needs.linux-cross.result == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-test-file-times
+          path: test-file-times.json
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Check job results
         if: always()
@@ -204,17 +299,14 @@ jobs:
           EVENT: ${{ github.event_name }}
           DETECT: ${{ needs.changes.result }}
           BUILD: ${{ needs.changes.outputs.build }}
+          PORTABLE: ${{ needs.portable.result }}
           LINUX: ${{ needs.linux-cross.result }}
           WINDOWS: ${{ steps.windows-tests.outcome }}
         run: |
           set -eu
-          echo "Event=$EVENT detection=$DETECT build=$BUILD Linux=$LINUX Windows=$WINDOWS"
-          if [[ $EVENT == pull_request ]]; then
-            [[ $DETECT == success ]]
-            if [[ $BUILD == false ]]; then
-              [[ $LINUX == skipped && $WINDOWS == skipped ]]
-              exit
-            fi
-            [[ $BUILD == true ]]
+          echo "Event=$EVENT detection=$DETECT build=$BUILD Portable=$PORTABLE cross=$LINUX Windows=$WINDOWS"
+          if [[ $EVENT == pull_request && $DETECT == success && $BUILD == false ]]; then
+            [[ $PORTABLE == skipped && $LINUX == skipped && $WINDOWS == skipped ]]
+            exit
           fi
-          [[ $LINUX == success && $WINDOWS == success ]]
+          [[ $PORTABLE == success && $LINUX == success && $WINDOWS == success ]]

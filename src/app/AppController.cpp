@@ -41,6 +41,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <map>
 #include <mutex>
@@ -51,6 +52,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <windows.h>
 
 namespace JiStats {
 
@@ -139,6 +142,58 @@ bool isProviderTrackingEnabled(
     }
     return true;
 }
+
+// Consent writes and source scans share the same lock across JiStats processes.
+class CodexProfileLock {
+  public:
+    CodexProfileLock(const std::string& databasePath, DWORD waitMs) {
+        const auto path = std::filesystem::path(databasePath).wstring();
+        const HANDLE database =
+            CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (database == INVALID_HANDLE_VALUE) {
+            return;
+        }
+        BY_HANDLE_FILE_INFORMATION identity{};
+        const bool identified = GetFileInformationByHandle(database, &identity) != FALSE;
+        CloseHandle(database);
+        if (!identified) {
+            return;
+        }
+
+        // The file identity also matches when a peer opened the database through a path alias.
+        const std::wstring name =
+            L"Global\\JiStats.CodexAttribution." + std::to_wstring(identity.dwVolumeSerialNumber) + L"." +
+            std::to_wstring(identity.nFileIndexHigh) + L"." + std::to_wstring(identity.nFileIndexLow);
+        // An existing mutex may allow synchronization without granting security-control rights.
+        const HANDLE mutex = CreateMutexExW(nullptr, name.c_str(), 0, SYNCHRONIZE | MUTEX_MODIFY_STATE);
+        if (mutex != nullptr) {
+            const DWORD status = WaitForSingleObject(mutex, waitMs);
+            if (status == WAIT_OBJECT_0 || status == WAIT_ABANDONED) {
+                mutex_ = mutex;
+            } else {
+                CloseHandle(mutex);
+            }
+        }
+    }
+
+    ~CodexProfileLock() {
+        if (mutex_ != nullptr) {
+            ReleaseMutex(mutex_);
+            CloseHandle(mutex_);
+        }
+    }
+
+    CodexProfileLock(const CodexProfileLock&) = delete;
+    CodexProfileLock& operator=(const CodexProfileLock&) = delete;
+
+    bool ownsLock() const {
+        return mutex_ != nullptr;
+    }
+
+  private:
+    HANDLE mutex_ = nullptr;
+};
 
 struct RefreshWatcherFileSample {
     std::filesystem::path path;
@@ -3731,6 +3786,7 @@ DashboardViewModel buildDashboardViewModelFromProviders(
 namespace preference_keys {
 const char* const TASKBAR_OVERLAY_ENABLED = "ui.taskbar_overlay_enabled";
 const char* const OPENAI_SUBSCRIPTION_TRACKING_ENABLED = "runtime.openai_subscription_tracking_enabled";
+const char* const CODEX_MODEL_ATTRIBUTION_GENERATION = "runtime.codex_model_attribution_generation";
 const char* const MINIMAX_SUBSCRIPTION_TRACKING_ENABLED = "runtime.minimax_subscription_tracking_enabled";
 const char* const CLAUDE_CODE_ENABLED = "runtime.claude_code_enabled";
 const char* const KIMI_CODE_ENABLED = "runtime.kimi_code_enabled";
@@ -3816,9 +3872,24 @@ public:
     std::time_t latestPersistedMetricSnapshotAt = 0;
     PersistedMetricSnapshotMode latestPersistedMetricSnapshotMode = PersistedMetricSnapshotMode::Full;
     bool persistedMetricSnapshotDirty = true;
+    struct CodexAttributionChange {
+        bool enabled;
+        std::uint64_t revocations;
+        std::uint64_t request = 0;
+    };
+    std::mutex codexModelAttributionMutex;
+    // Keep attribution transactions off the connection shared by runtime and retention work.
+    StorageService codexAttributionStorage;
+    SettingsService codexAttributionSettings{codexAttributionStorage};
+    std::atomic<bool> codexModelAttributionEnabled{false};
+    // Off requests block scans immediately and survive coalescing with a later On.
+    std::atomic<std::uint64_t> requestedCodexRevocations{0};
+    std::atomic<std::uint64_t> savedCodexRevocations{0};
+    std::atomic<std::uint64_t> completedCodexAttributionRequest{0};
+    std::atomic<CodexAttributionSaveError> codexAttributionSaveError{CodexAttributionSaveError::None};
+    int lastCodexLocalSqliteGeneration = 0;
     std::filesystem::path lastCodexLocalSqlitePath;
     std::string lastCodexLocalSqliteFingerprint;
-    bool codexLocalSqliteImportedOnce = false;
     std::string databasePath = "jistats.db";
     std::shared_ptr<MiniMaxAdapter> miniMaxCredentialAdapter;
     std::shared_ptr<WindowsCredentialStore> miniMaxCredentialStore;
@@ -3845,6 +3916,7 @@ public:
     std::optional<DashboardPreferences> pendingInteractionPreferences;
     std::optional<DashboardPreferences> activeInteractionPreferences;
     std::optional<AnalysisScopeState> pendingAnalysisScope;
+    std::optional<CodexAttributionChange> pendingCodexModelAttribution;
     bool pendingProviderDiscoveryRefresh = false;
     bool pendingPersistedActivityRefresh = false;
     std::vector<std::thread> miniMaxValidationThreads;
@@ -3884,6 +3956,7 @@ public:
     std::shared_future<void> miniMaxValidationReleaseForTesting;
     std::function<void()> afterSettingsDequeueForTesting;
     std::function<void()> beforeRuntimePublicationForTesting;
+    std::function<void()> beforeCodexSourceReadForTesting;
     std::optional<std::time_t> currentTimeForTesting;
 #endif
 
@@ -3991,6 +4064,18 @@ public:
         interactionWorkCv.notify_one();
     }
 
+    CodexAttributionChange makeCodexAttributionChange(bool enabled, std::uint64_t request = 0) {
+        return {enabled, enabled ? requestedCodexRevocations.load() : ++requestedCodexRevocations, request};
+    }
+
+    void requestCodexModelAttributionChange(bool enabled, std::uint64_t request) {
+        {
+            std::lock_guard<std::mutex> lock(interactionWorkMutex);
+            pendingCodexModelAttribution = makeCodexAttributionChange(enabled, request);
+        }
+        interactionWorkCv.notify_all();
+    }
+
     void requestProviderDiscoveryRefresh() {
         {
             std::lock_guard<std::mutex> lock(interactionWorkMutex);
@@ -4014,29 +4099,48 @@ public:
         while (true) {
             std::optional<DashboardPreferences> preferences;
             std::optional<AnalysisScopeState> analysisScope;
+            std::optional<CodexAttributionChange> codexModelAttribution;
             bool requiresProviderDiscoveryRefresh = false;
             bool requiresPersistedActivityRefresh = false;
             {
                 std::unique_lock<std::mutex> lock(interactionWorkMutex);
-                interactionWorkCv.wait(lock, [this]() {
+                const auto workReady = [this]() {
                     return shuttingDown.load() || pendingInteractionPreferences.has_value() ||
-                           pendingAnalysisScope.has_value() || pendingProviderDiscoveryRefresh ||
-                           pendingPersistedActivityRefresh;
-                });
+                           pendingAnalysisScope.has_value() || pendingCodexModelAttribution.has_value() ||
+                           pendingProviderDiscoveryRefresh || pendingPersistedActivityRefresh;
+                };
+                if (codexAttributionSaveError.load() == CodexAttributionSaveError::Revocation) {
+                    if (!interactionWorkCv.wait_for(lock, std::chrono::seconds(15), workReady)) {
+                        pendingCodexModelAttribution = CodexAttributionChange{false, requestedCodexRevocations.load()};
+                    }
+                } else {
+                    interactionWorkCv.wait(lock, workReady);
+                }
                 if (shuttingDown.load() && !pendingInteractionPreferences.has_value() &&
-                    !pendingAnalysisScope.has_value() && !pendingProviderDiscoveryRefresh) {
+                    !pendingAnalysisScope.has_value() && !pendingCodexModelAttribution.has_value() &&
+                    !pendingProviderDiscoveryRefresh) {
                     pendingPersistedActivityRefresh = false;
                     break;
                 }
                 preferences = pendingInteractionPreferences;
                 activeInteractionPreferences = preferences;
                 analysisScope = pendingAnalysisScope;
+                codexModelAttribution = pendingCodexModelAttribution;
                 requiresProviderDiscoveryRefresh = pendingProviderDiscoveryRefresh;
                 requiresPersistedActivityRefresh = pendingPersistedActivityRefresh;
                 pendingInteractionPreferences.reset();
                 pendingAnalysisScope.reset();
+                pendingCodexModelAttribution.reset();
                 pendingProviderDiscoveryRefresh = false;
                 pendingPersistedActivityRefresh = false;
+            }
+
+            if (codexModelAttribution.has_value()) {
+                applyCodexModelAttributionPreference(*codexModelAttribution);
+                if (codexModelAttribution->request != 0) {
+                    completedCodexAttributionRequest.store(codexModelAttribution->request);
+                }
+                refreshPersistedActivityPresenters(std::time(nullptr));
             }
 
             if (preferences.has_value()) {
@@ -6533,6 +6637,9 @@ public:
             if (connectivityUpdates.has_value()) {
                 persistConnectivityForPublication(*connectivityUpdates, now);
             }
+            presentedViewModel.completedCodexAttributionRequest = completedCodexAttributionRequest.load();
+            presentedViewModel.preferences.codexModelAttributionEnabled = codexModelAttributionEnabled.load();
+            presentedViewModel.codexAttributionSaveError = codexAttributionSaveError.load();
             updateOfflineNotice(presentedViewModel, now);
             publishDashboardWithOfflineNotice(presentedViewModel);
         }
@@ -6549,7 +6656,98 @@ public:
         }
     }
 
+    bool openCodexAttributionStorage() {
+        if (codexAttributionStorage.isOpen()) {
+            return true;
+        }
+        if (storageAvailable && codexAttributionStorage.init(storageService.getDbPath())) {
+            return true;
+        }
+        codexAttributionStorage.close();
+        return false;
+    }
+
+    int readCodexAttributionGeneration() {
+        const int generation =
+            openCodexAttributionStorage()
+                ? codexAttributionSettings.getInt(preference_keys::CODEX_MODEL_ATTRIBUTION_GENERATION).value_or(0)
+                : 0;
+        codexModelAttributionEnabled.store(generation > 0);
+        return generation;
+    }
+
+    bool saveCodexAttributionGeneration(bool enabled) {
+        if (!openCodexAttributionStorage()) {
+            return false;
+        }
+        const CodexProfileLock profileLock(codexAttributionStorage.getDbPath(), 5000);
+        if (!profileLock.ownsLock()) {
+            return false;
+        }
+        // Update from the current profile value so another instance cannot make us reuse a grant.
+        // Positive numbers grant consent. Negating a number revokes it while preserving its identity.
+        const auto saved = codexAttributionStorage.execute(
+            "INSERT INTO settings (key, value, updated_at_utc) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) "
+            "ON CONFLICT(key) DO UPDATE SET value = CASE "
+            "WHEN excluded.value = '1' AND CAST(settings.value AS INTEGER) <= 0 "
+            "THEN 1 - CAST(settings.value AS INTEGER) "
+            "WHEN excluded.value = '0' AND CAST(settings.value AS INTEGER) > 0 "
+            "THEN -CAST(settings.value AS INTEGER) ELSE settings.value END, "
+            "updated_at_utc = excluded.updated_at_utc "
+            "WHERE excluded.value = '0' OR CAST(settings.value AS INTEGER) >= ?;",
+            {preference_keys::CODEX_MODEL_ATTRIBUTION_GENERATION, enabled ? "1" : "0",
+             std::to_string(1 - std::numeric_limits<int>::max())});
+        if (!saved.success() || saved.rowsAffected() != 1) {
+            return false;
+        }
+        codexModelAttributionEnabled.store(enabled);
+        return true;
+    }
+
+    void applyCodexModelAttributionPreference(CodexAttributionChange change) {
+        std::lock_guard<std::mutex> lock(codexModelAttributionMutex);
+        if (change.revocations != requestedCodexRevocations.load()) {
+            return;
+        }
+
+        if (change.revocations != savedCodexRevocations.load()) {
+            if (!saveCodexAttributionGeneration(false)) {
+                codexAttributionSaveError.store(CodexAttributionSaveError::Revocation);
+                JISTATS_LOG_WARN(LogCategory::Db, "Failed to save Codex model attribution revocation");
+                return;
+            }
+            savedCodexRevocations.store(change.revocations);
+        }
+
+        if (change.enabled && change.revocations == requestedCodexRevocations.load() &&
+            !saveCodexAttributionGeneration(true)) {
+            codexAttributionSaveError.store(CodexAttributionSaveError::Enable);
+            JISTATS_LOG_WARN(LogCategory::Db, "Failed to save Codex model attribution consent");
+            return;
+        }
+        codexAttributionSaveError.store(CodexAttributionSaveError::None);
+    }
+
+    bool hasPendingCodexRevocation() const {
+        return requestedCodexRevocations.load() != savedCodexRevocations.load();
+    }
+
     void refreshCodexLocalSqliteUsage(std::time_t now) {
+        std::lock_guard<std::mutex> lock(codexModelAttributionMutex);
+        if (hasPendingCodexRevocation()) {
+            return;
+        }
+        // A launch in the same profile may have changed consent since the previous refresh.
+        const int generation = readCodexAttributionGeneration();
+        if (generation <= 0 || hasPendingCodexRevocation()) {
+            return;
+        }
+
+        const CodexProfileLock profileLock(codexAttributionStorage.getDbPath(), 0);
+        if (!profileLock.ownsLock() || readCodexAttributionGeneration() != generation || hasPendingCodexRevocation()) {
+            return;
+        }
+
         const std::string sourcePath = CodexLocalSqliteReader::resolveDefaultStateDbPath();
         if (sourcePath.empty()) {
             return;
@@ -6561,18 +6759,25 @@ public:
             return;
         }
 
-        if (codexLocalSqliteImportedOnce &&
-            path == lastCodexLocalSqlitePath &&
+        if (generation == lastCodexLocalSqliteGeneration && path == lastCodexLocalSqlitePath &&
             fingerprint == lastCodexLocalSqliteFingerprint) {
             return;
         }
 
-        CodexLocalUsageImporter importer(storageService);
-        auto result = importer.importFromSource(sourcePath, now);
+        if (hasPendingCodexRevocation()) {
+            return;
+        }
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (beforeCodexSourceReadForTesting) {
+            beforeCodexSourceReadForTesting();
+        }
+#endif
+        CodexLocalUsageImporter importer(codexAttributionStorage);
+        auto result = importer.importFromSource(sourcePath, now, generation);
         if (result.success) {
             lastCodexLocalSqlitePath = path;
             lastCodexLocalSqliteFingerprint = fingerprint;
-            codexLocalSqliteImportedOnce = true;
+            lastCodexLocalSqliteGeneration = generation;
         }
     }
 
@@ -6764,6 +6969,10 @@ public:
 #endif
         flushObservedActivities("during shutdown", false);
         localObservationService.shutdown();
+        if (hasPendingCodexRevocation()) {
+            applyCodexModelAttributionPreference({false, requestedCodexRevocations.load()});
+        }
+        codexAttributionStorage.close();
         if (storageService.isOpen()) {
             storageService.close();
         }
@@ -6828,6 +7037,7 @@ public:
         DashboardPreferences preferences;
         preferences.taskbarOverlayEnabled = true; // enabled for current validation work
         preferences.openaiSubscriptionTrackingEnabled = false;
+        preferences.codexModelAttributionEnabled = codexModelAttributionEnabled.load();
         preferences.miniMaxSubscriptionTrackingEnabled = false;
         preferences.claudeCodeEnabled = false;
         preferences.kimiCodeEnabled = false;
@@ -7005,6 +7215,7 @@ public:
         }
 
         viewModel.preferences = preferences;
+        viewModel.preferences.codexModelAttributionEnabled = codexModelAttributionEnabled.load();
         applyDashboardOperationalStatus(viewModel);
         dashboardPresenter.updateViewModel(viewModel);
     }
@@ -7136,6 +7347,9 @@ bool AppController::init(bool launchInBackground) {
                 "StorageService unavailable: " + pImpl->storageService.getLastError());
             JISTATS_LOG_WARN(LogCategory::Startup, "Preferences will use safe defaults");
         }
+
+        pImpl->codexModelAttributionEnabled.store(false);
+        pImpl->lastCodexLocalSqliteGeneration = 0;
 
         if (pImpl->localObservationService.init()) {
             if (pImpl->storageAvailable) {
@@ -7299,6 +7513,9 @@ bool AppController::init(bool launchInBackground) {
         pImpl->startInteractionWorkThread();
         pImpl->dashboardPresenter.setPreferencesChangedCallback(
             [this](const DashboardPreferences& preferences) { pImpl->requestPreferencesChange(preferences); });
+        pImpl->dashboardPresenter.setCodexModelAttributionChangedCallback([this](bool enabled, std::uint64_t request) {
+            pImpl->requestCodexModelAttributionChange(enabled, request);
+        });
         pImpl->dashboardPresenter.setPreferencesOpenedCallback([this]() {
             pImpl->requestProviderDiscoveryRefresh();
         });
@@ -7525,6 +7742,10 @@ bool AppController::dispatchDashboardShellCommandForTesting(DashboardShellComman
     return pImpl->dashboardPresenter.dispatchShellCommandForTesting(command);
 }
 
+bool AppController::selectDashboardPreferencesTabForTesting(int tabIndex) {
+    return pImpl->dashboardPresenter.selectPreferencesTabForTesting(tabIndex);
+}
+
 bool AppController::clickDashboardOfflineRetryForTesting() {
     return pImpl->dashboardPresenter.clickOfflineRetryForTesting();
 }
@@ -7603,8 +7824,17 @@ void AppController::setBeforeRuntimePublicationForTesting(std::function<void()> 
     pImpl->beforeRuntimePublicationForTesting = std::move(callback);
 }
 
+void AppController::setBeforeCodexSourceReadForTesting(std::function<void()> callback) {
+    pImpl->beforeCodexSourceReadForTesting = std::move(callback);
+}
+
 void AppController::applyDashboardPreferencesForTesting(const DashboardPreferences& preferences) {
     DashboardPreferences effectivePreferences = pImpl->applyStartupPreferences(preferences);
+    if (effectivePreferences.codexModelAttributionEnabled != pImpl->codexModelAttributionEnabled.load() ||
+        pImpl->hasPendingCodexRevocation()) {
+        pImpl->applyCodexModelAttributionPreference(
+            pImpl->makeCodexAttributionChange(effectivePreferences.codexModelAttributionEnabled));
+    }
     pImpl->savePreferences(effectivePreferences);
     pImpl->saveAnalysisScope(Impl::analysisScopeFromPreferences(effectivePreferences));
     pImpl->applyProviderPreferences(effectivePreferences);

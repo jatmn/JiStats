@@ -2,14 +2,13 @@ name: Pullfrog checks
 
 on:
   pull_request:
-    paths:
-      - '.github/workflows/pullfrog*.yml'
-      - 'scripts/pullfrog*.mjs'
+  merge_group:
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/pullfrog*.yml'
-      - 'scripts/pullfrog*.mjs'
+
+concurrency:
+  group: pullfrog-checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 permissions:
   contents: read
@@ -22,5 +21,26 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          filter: blob:none
           persist-credentials: false
-      - run: node --test scripts/pullfrog-review-check.test.mjs
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.5
+      - name: Restore installed JavaScript dependencies
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: node_modules
+          key: js-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json') }}
+      - run: bun install --frozen-lockfile
+      - name: Lint, format-check, typecheck and test JavaScript
+        run: bash scripts/check_js_ci.sh
+      - name: Test authorization on its production Node runtime
+        if: ${{ !cancelled() }}
+        run: node --test scripts/pullfrog-review-check.test.mjs
+      - name: Seed installed dependencies from main
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: node_modules
+          key: ${{ steps.deps.outputs.cache-primary-key }}

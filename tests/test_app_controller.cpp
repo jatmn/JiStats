@@ -18,6 +18,9 @@
 #include <thread>
 #include <vector>
 
+#include <windows.h>
+#include <sddl.h>
+
 #include "app/AppController.hpp"
 #include "app/TrayController.hpp"
 #include "core/Logger.hpp"
@@ -34,6 +37,7 @@
 #include "providers/openai/OpenAIAdapter.hpp"
 #include "providers/openai/OpenAIExportImport.hpp"
 #include "taskbar/TaskbarPresenter.hpp"
+#include "app_controller_test_support.hpp"
 #include "runtime_test_support.hpp"
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
@@ -60,57 +64,12 @@ namespace {
 const std::filesystem::path kOpenAIExportFixturePath =
     std::filesystem::path("docs/fixtures/openai/chatgpt-export-redacted/conversations.json");
 
-class ScopedEnvironmentVariable {
-public:
-    ScopedEnvironmentVariable(const char* name, const std::string& value)
-        : name_(name ? name : "") {
-        char* current = nullptr;
-        std::size_t currentLength = 0;
-        if (!name_.empty() &&
-            _dupenv_s(&current, &currentLength, name_.c_str()) == 0 &&
-            current != nullptr) {
-            previousValue_ = current;
-            free(current);
-        }
-        hadPreviousValue_ = previousValue_.has_value();
-
-        if (!name_.empty()) {
-            _putenv_s(name_.c_str(), value.c_str());
-        }
-    }
-
-    ~ScopedEnvironmentVariable() {
-        if (name_.empty()) {
-            return;
-        }
-
-        if (hadPreviousValue_) {
-            _putenv_s(name_.c_str(), previousValue_->c_str());
-        } else {
-            _putenv_s(name_.c_str(), "");
-        }
-    }
-
-private:
-    std::string name_;
-    std::optional<std::string> previousValue_;
-    bool hadPreviousValue_ = false;
-};
-
 void writeFile(const std::filesystem::path& path, const std::string& contents) {
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     std::ofstream output(path, std::ios::binary);
     REQUIRE(output.is_open());
     output << contents;
-}
-
-std::string toUtcIso(std::time_t value) {
-    std::tm utcTime{};
-    gmtime_s(&utcTime, &value);
-    char buffer[32]{};
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utcTime);
-    return buffer;
 }
 
 std::string formatReportDayLabelForTest(std::time_t value) {
@@ -334,26 +293,19 @@ StartupManager::TestHooks makeStartupHooks(const std::shared_ptr<FakeStartupHook
     return hooks;
 }
 
-void seedStartupPreferences(
-    const std::string& path,
-    bool enabled,
-    bool startBackground,
-    bool openaiSubscriptionTrackingEnabled = false,
-    bool miniMaxSubscriptionTrackingEnabled = false,
-    bool claudeCodeEnabled = false,
-    bool kimiCodeEnabled = false,
-    bool scheduledExportEnabled = false,
-    int scheduledExportIntervalMinutes = 1440,
-    const std::string& scheduledExportPath = "",
-    const std::string& lastSelectedProviderId = "",
-    const std::string& lastSelectedAccountId = "",
-    const std::string& analysisSelectedProviderId = "",
-    const std::string& analysisSelectedAccountId = "",
-    const std::string& analysisDateRangePreset = "last_7_days",
-    const std::string& analysisCustomRangeStartUtc = "",
-    const std::string& analysisCustomRangeEndUtc = "") {
+} // namespace
+
+void JiStats::TestSupport::seedStartupPreferences(
+    const std::string& path, bool enabled, bool startBackground, bool openaiSubscriptionTrackingEnabled,
+    bool miniMaxSubscriptionTrackingEnabled, bool claudeCodeEnabled, bool kimiCodeEnabled, bool scheduledExportEnabled,
+    int scheduledExportIntervalMinutes, const std::string& scheduledExportPath,
+    const std::string& lastSelectedProviderId, const std::string& lastSelectedAccountId,
+    const std::string& analysisSelectedProviderId, const std::string& analysisSelectedAccountId,
+    const std::string& analysisDateRangePreset, const std::string& analysisCustomRangeStartUtc,
+    const std::string& analysisCustomRangeEndUtc) {
     StorageService storage;
     REQUIRE(storage.init(path));
+    REQUIRE(storage.beginTransaction());
 
     const auto setSetting = [&storage](const std::string& key, const std::string& value) {
         return storage.execute(
@@ -387,12 +339,11 @@ void seedStartupPreferences(
     REQUIRE(setSetting("ui.analysis_custom_range_start_utc", analysisCustomRangeStartUtc));
     REQUIRE(setSetting("ui.analysis_custom_range_end_utc", analysisCustomRangeEndUtc));
 
+    REQUIRE(storage.commitTransaction());
     storage.close();
 }
 
-void seedAllProviderTrackingEnabled(const std::string& path) {
-    seedStartupPreferences(path, false, false, true, true, true, true);
-}
+namespace {
 
 DashboardPreferences loadStartupPreferences(const std::string& path) {
     StorageService storage;
@@ -454,17 +405,6 @@ void enableAllProviderTracking(AppController& app) {
     preferences.claudeCodeEnabled = true;
     preferences.kimiCodeEnabled = true;
     app.applyDashboardPreferencesForTesting(preferences);
-}
-
-std::optional<int> loadProviderId(StorageService& storage, const std::string& providerKey) {
-    const QueryResult result = storage.execute(
-        "SELECT id FROM providers WHERE provider_key = ? LIMIT 1;",
-        {providerKey});
-    if (!result.success() || result.rowCount() == 0) {
-        return std::nullopt;
-    }
-
-    return result.getInt(0, 0);
 }
 
 std::optional<int> loadRuntimeAccountId(StorageService& storage, const std::string& providerKey) {
@@ -535,45 +475,6 @@ std::vector<PersistedGapMarker> loadRuntimeGapMarkersForProvider(
     return markers;
 }
 
-std::string makeCodexRolloutPayload(double usedPercent, std::time_t eventTime, std::time_t resetsAt) {
-    return "{\"timestamp\":\"" + toUtcIso(eventTime) +
-        "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"rate_limits\":"
-        "{\"limit_id\":\"codex\",\"primary\":{\"used_percent\":" + std::to_string(usedPercent) +
-        ",\"window_minutes\":300,\"resets_at\":" + std::to_string(resetsAt) +
-        "},\"secondary\":null,\"plan_type\":\"prolite\"}}}\n";
-}
-
-void writeCodexRolloutFile(
-    const std::filesystem::path& path,
-    double usedPercent,
-    std::time_t eventTime,
-    std::time_t resetsAt) {
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    REQUIRE_FALSE(ec);
-
-    std::ofstream out(path, std::ios::trunc);
-    REQUIRE(out.is_open());
-    out << makeCodexRolloutPayload(usedPercent, eventTime, resetsAt);
-    out.close();
-}
-
-void seedRuntimeState(
-    const std::string& path,
-    std::time_t lastLaunchAt,
-    std::time_t lastSuccessfulSyncAt,
-    const std::string& recoveryMarker = "") {
-    StorageService storage;
-    REQUIRE(storage.init(path));
-
-    PersistedRuntimeState state;
-    state.lastLaunchAt = lastLaunchAt;
-    state.lastSuccessfulSyncAt = lastSuccessfulSyncAt;
-    state.recoveryMarker = recoveryMarker;
-    REQUIRE(storage.upsertRuntimeState(state));
-    storage.close();
-}
-
 UsageResponse makeBackfillUsageResponseWithOneEvent(std::time_t eventTime) {
     UsageResponse usage;
     usage.success = true;
@@ -598,38 +499,6 @@ UsageResponse makeBackfillUsageResponseWithOneEvent(std::time_t eventTime) {
     usage.totalCost = event.costMinorUnits;
     usage.isBackfilled = true;
     return usage;
-}
-
-long long requireSingleId(const QueryResult& result) {
-    REQUIRE(result.success());
-    REQUIRE(result.rowCount() == 1);
-    return result.getInt64(0, 0);
-}
-
-int requireProviderId(StorageService& storage, const std::string& providerKey) {
-    return static_cast<int>(requireSingleId(
-        storage.execute(
-            "SELECT id FROM providers WHERE provider_key = ? LIMIT 1;",
-            {providerKey})));
-}
-
-int requireAccountId(StorageService& storage, int providerId, const std::string& accountKey) {
-    return static_cast<int>(requireSingleId(
-        storage.execute(
-            "SELECT id FROM accounts WHERE provider_id = ? AND account_key = ? LIMIT 1;",
-            {std::to_string(providerId), accountKey})));
-}
-
-int ensureProviderId(StorageService& storage, const std::string& providerKey, const std::string& displayName) {
-    if (const auto existing = loadProviderId(storage, providerKey)) {
-        return *existing;
-    }
-
-    auto insert = storage.execute(
-        "INSERT INTO providers (provider_key, display_name) VALUES (?, ?);",
-        {providerKey, displayName});
-    REQUIRE(insert.success());
-    return static_cast<int>(insert.lastInsertRowId());
 }
 
 int ensureRuntimeAccountId(
@@ -817,29 +686,6 @@ std::vector<std::filesystem::path> listHtmlReports(const std::filesystem::path& 
     return reports;
 }
 
-const ProviderStatus* findProviderStatus(
-    const DashboardViewModel& viewModel,
-    const std::string& providerKey) {
-    const auto it = std::find_if(
-        viewModel.providers.begin(),
-        viewModel.providers.end(),
-        [&providerKey](const ProviderStatus& provider) {
-            return provider.providerKey == providerKey;
-        });
-    return it == viewModel.providers.end() ? nullptr : &(*it);
-}
-
-class ScopedTrayTestHandler {
-public:
-    explicit ScopedTrayTestHandler(TrayController::TestOperationHandler handler) {
-        TrayController::setTestOperationHandler(std::move(handler));
-    }
-
-    ~ScopedTrayTestHandler() {
-        TrayController::clearTestOperationHandler();
-    }
-};
-
 class FakeWindowsCredentialBackend final : public IWindowsCredentialBackend {
 public:
     bool writeGenericCredential(
@@ -930,15 +776,6 @@ std::optional<MiniMaxCredentialProfileSummary> findMiniMaxSummary(
     return *it;
 }
 
-std::string formatTimeUtcIsoForTest(std::time_t time) {
-    std::tm tm{};
-    gmtime_s(&tm, &time);
-
-    char buffer[32]{};
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &tm);
-    return buffer;
-}
-
 void seedMiniMaxCredentialMetadata(
     const std::string& path,
     const std::string& planKey,
@@ -991,167 +828,6 @@ void seedMiniMaxCredentialMetadata(
     REQUIRE(storage.upsertCredentialProfile(profile));
     storage.close();
 }
-
-void seedPersistedQuotaSnapshot(
-    const std::string& path,
-    const std::string& providerKey,
-    const std::string& accountKey,
-    const std::string& accountDisplayName,
-    const std::string& planKey,
-    const std::string& planDisplayName,
-    const std::string& quotaWindow,
-    std::time_t snapshotTime,
-    long long usedValue,
-    long long limitValue,
-    long long remainingValue,
-    const std::string& confidenceTier = "high") {
-    StorageService storage;
-    REQUIRE(storage.init(path));
-
-    const QueryResult providerResult = storage.execute(
-        "SELECT id FROM providers WHERE provider_key = ? LIMIT 1;",
-        {providerKey});
-    REQUIRE(providerResult.success());
-    REQUIRE(providerResult.rowCount() == 1);
-    const int providerId = providerResult.getInt(0, 0);
-
-    const auto accountInsert = storage.execute(
-        "INSERT INTO accounts (provider_id, account_key, display_name, scope_type, scope_identifier) "
-        "VALUES (?, ?, ?, ?, ?);",
-        {
-            std::to_string(providerId),
-            accountKey,
-            accountDisplayName,
-            "subscription",
-            accountKey
-        });
-    REQUIRE(accountInsert.success());
-    const int accountId = static_cast<int>(accountInsert.lastInsertRowId());
-
-    const auto planInsert = storage.execute(
-        "INSERT INTO plans (account_id, plan_key, plan_type, display_name, quota_window, limit_value) "
-        "VALUES (?, ?, ?, ?, ?, ?);",
-        {
-            std::to_string(accountId),
-            planKey,
-            "subscription",
-            planDisplayName,
-            quotaWindow,
-            std::to_string(limitValue)
-        });
-    REQUIRE(planInsert.success());
-    const int planId = static_cast<int>(planInsert.lastInsertRowId());
-
-    REQUIRE(storage.execute(
-        "INSERT INTO quota_snapshots ("
-        "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
-        "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-        {
-            std::to_string(providerId),
-            std::to_string(accountId),
-            std::to_string(planId),
-            formatTimeUtcIsoForTest(snapshotTime),
-            formatTimeUtcIsoForTest(snapshotTime - 3600),
-            formatTimeUtcIsoForTest(snapshotTime),
-            std::to_string(usedValue),
-            std::to_string(limitValue),
-            confidenceTier,
-            "Persisted test snapshot",
-            "requests",
-            std::to_string(remainingValue),
-            "0"
-        }).success());
-
-    storage.close();
-}
-
-class ControlledQuotaProviderAdapter final : public IProviderAdapter {
-public:
-    ControlledQuotaProviderAdapter(
-        std::string providerKey,
-        std::string displayName,
-        QuotaResponse quotaResponse,
-        std::shared_future<void> releaseQuota = {},
-        int firstBlockedFetch = 1,
-        std::optional<QuotaResponse> firstQuotaResponse = std::nullopt)
-        : providerKey_(std::move(providerKey)),
-          displayName_(std::move(displayName)),
-          quotaResponse_(std::move(quotaResponse)),
-          releaseQuota_(std::move(releaseQuota)),
-          firstBlockedFetch_(firstBlockedFetch),
-          firstQuotaResponse_(std::move(firstQuotaResponse)) {}
-
-    void setQuotaResponse(QuotaResponse response) {
-        std::lock_guard<std::mutex> lock(quotaMutex_);
-        quotaResponse_ = std::move(response);
-    }
-
-    UsageResponse fetchUsage(std::time_t from, std::time_t to) override {
-        (void)from;
-        (void)to;
-        return makeUsageResponse(std::time(nullptr));
-    }
-
-    QuotaResponse fetchQuota() override {
-        const int fetchNumber = ++quotaFetchCount_;
-        const bool released = fetchNumber < firstBlockedFetch_ || !releaseQuota_.valid() ||
-            releaseQuota_.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
-        ++completedQuotaFetchCount_;
-        if (!released) {
-            return makeFailedQuotaResponse("Timed out waiting for the test to release quota");
-        }
-        if (fetchNumber == 1 && firstQuotaResponse_.has_value()) {
-            return *firstQuotaResponse_;
-        }
-        std::lock_guard<std::mutex> lock(quotaMutex_);
-        return quotaResponse_;
-    }
-
-    bool validateCredentials() override {
-        return true;
-    }
-
-    std::vector<Capability> getCapabilities() override {
-        return {{"quota_api", "Quota API access", true, ""}};
-    }
-
-    std::string getProviderKey() const override {
-        return providerKey_;
-    }
-
-    std::string getDisplayName() const override {
-        return displayName_;
-    }
-
-    bool isEnabled() const override {
-        return enabled_;
-    }
-
-    void setEnabled(bool enabled) override {
-        enabled_ = enabled;
-    }
-
-    int getQuotaFetchCount() const {
-        return quotaFetchCount_.load();
-    }
-
-    int getCompletedQuotaFetchCount() const {
-        return completedQuotaFetchCount_.load();
-    }
-
-private:
-    std::string providerKey_;
-    std::string displayName_;
-    std::mutex quotaMutex_;
-    QuotaResponse quotaResponse_;
-    std::shared_future<void> releaseQuota_;
-    const int firstBlockedFetch_;
-    const std::optional<QuotaResponse> firstQuotaResponse_;
-    bool enabled_ = true;
-    std::atomic<int> quotaFetchCount_{0};
-    std::atomic<int> completedQuotaFetchCount_{0};
-};
 
 class CountingDetectionProviderAdapter final : public IProviderAdapter {
 public:
@@ -1215,18 +891,6 @@ private:
     std::atomic<int> validateCredentialsCount_{0};
     std::atomic<int> quotaFetchCount_{0};
 };
-
-bool waitForCondition(const std::function<bool()>& predicate,
-                      std::chrono::milliseconds timeout = std::chrono::milliseconds(1000)) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (predicate()) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return predicate();
-}
 
 } // namespace
 
@@ -2341,703 +2005,6 @@ TEST_CASE("AppController keeps dashboard, tray, taskbar, and offline notice in s
 
     storage.close();
 
-    app.shutdown();
-}
-
-TEST_CASE("AppController dashboard dismiss and tray retry keep offline notice low-noise across recovery transitions", "[app][runtime][offline_notice]") {
-    requireSqlite();
-
-    TempTestDatabase dbPath;
-    seedAllProviderTrackingEnabled(dbPath.path());
-    const std::time_t now = std::time(nullptr);
-    ScopedTrayTestHandler handler([](TrayController::TestOperation,
-                                     TrayStatus,
-                                     const std::string&,
-                                     std::string&) -> std::optional<bool> {
-        return true;
-    });
-
-    AppController app;
-    std::future<void> refresh;
-    std::promise<void> releaseQuota;
-    auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
-        "minimax", "MiniMax", makeFailedQuotaResponse("network unreachable"),
-        releaseQuota.get_future().share(), 2);
-    auto providerManager = std::make_shared<ProviderManager>();
-    providerManager->addProvider(provider);
-    app.setTaskbarTestModeForTesting(true);
-    app.setDatabasePathForTesting(dbPath.path());
-    app.setProviderManagerForTesting(providerManager);
-
-    REQUIRE(app.init());
-    REQUIRE(waitForCondition([&app]() {
-        return app.isDashboardOfflineNoticeVisibleForTesting();
-    }, std::chrono::milliseconds(4000)));
-
-    // The initial fetch makes the notice visible. Hold the next refresh's response.
-    refresh = std::async(std::launch::async, [&app]() { app.refreshRuntimeForTesting(); });
-    REQUIRE(waitForCondition([&provider]() {
-        return provider->getQuotaFetchCount() > 1;
-    }, std::chrono::seconds(4)));
-    REQUIRE(provider->getCompletedQuotaFetchCount() == 1);
-
-    REQUIRE(app.clickDashboardOfflineDismissForTesting());
-    REQUIRE(waitForCondition([&app]() {
-        return !app.isDashboardOfflineNoticeVisibleForTesting() &&
-            !app.getActiveNoticeForTesting(NoticeType::Offline).has_value();
-    }, std::chrono::milliseconds(4000)));
-    REQUIRE(provider->getCompletedQuotaFetchCount() == 1);
-    CHECK(app.getTrayStateForTesting().status == TrayStatus::Offline);
-
-    const auto dismissedConnectivity = app.getConnectivityStateForTesting("minimax");
-    REQUIRE(dismissedConnectivity.has_value());
-    CHECK(dismissedConnectivity->status == "offline");
-    CHECK(dismissedConnectivity->noticeDismissedAt > 0);
-
-    releaseQuota.set_value();
-    refresh.get();
-    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
-    CHECK_FALSE(app.getActiveNoticeForTesting(NoticeType::Offline).has_value());
-    const auto stillOffline = app.getConnectivityStateForTesting("minimax");
-    REQUIRE(stillOffline.has_value());
-    CHECK(stillOffline->status == "offline");
-    CHECK(stillOffline->noticeDismissedAt == dismissedConnectivity->noticeDismissedAt);
-
-    provider->setQuotaResponse(
-        makeQuotaResponse(now, 120, 1000, "daily", "minimax_subscription_coding_plan"));
-    REQUIRE(app.clickDashboardOfflineRetryForTesting());
-    REQUIRE(waitForCondition([&app]() {
-        const auto connectivity = app.getConnectivityStateForTesting("minimax");
-        const DashboardViewModel viewModel = app.getDashboardViewModelForTesting();
-        return connectivity.has_value() &&
-            connectivity->status == "online" &&
-            viewModel.runtimeState != RuntimeState::Offline &&
-            !viewModel.offlineNoticeVisible &&
-            !app.getActiveNoticeForTesting(NoticeType::Offline).has_value();
-    }, std::chrono::milliseconds(4000)));
-
-    const auto recoveredConnectivity = app.getConnectivityStateForTesting("minimax");
-    REQUIRE(recoveredConnectivity.has_value());
-    CHECK(recoveredConnectivity->status == "online");
-    CHECK(recoveredConnectivity->noticeDismissedAt == 0);
-    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
-
-    provider->setQuotaResponse(makeFailedQuotaResponse("offline"));
-    app.refreshRuntimeForTesting();
-    REQUIRE(waitForCondition([&app]() {
-        return app.isDashboardOfflineNoticeVisibleForTesting() &&
-            app.getActiveNoticeForTesting(NoticeType::Offline).has_value();
-    }, std::chrono::milliseconds(4000)));
-
-    const DashboardViewModel finalViewModel = app.getDashboardViewModelForTesting();
-    CHECK(finalViewModel.runtimeState == RuntimeState::Offline);
-    CHECK(finalViewModel.offlineRetryAvailable);
-    CHECK(finalViewModel.offlineNoticeVisible);
-
-    app.shutdown();
-}
-
-TEST_CASE("AppController persists dismissal when the quota check after catch-up is offline", "[app][runtime][offline_notice][recovery]") {
-    requireSqlite();
-
-    TempTestDatabase dbPath;
-    seedStartupPreferences(dbPath.path(), false, false, false, true, false, false);
-    const std::time_t now = std::time(nullptr);
-    seedRuntimeState(dbPath.path(), now - 3 * 3600, now - 3 * 3600);
-    ScopedTrayTestHandler handler([](TrayController::TestOperation,
-                                     TrayStatus,
-                                     const std::string&,
-                                     std::string&) -> std::optional<bool> {
-        return true;
-    });
-
-    AppController app;
-    std::promise<void> releaseQuota;
-    auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
-        "minimax", "MiniMax", makeFailedQuotaResponse("network unreachable"),
-        releaseQuota.get_future().share(), 3,
-        makeQuotaResponse(now, 120, 1000, "daily", "minimax_subscription_coding_plan"));
-    auto providerManager = std::make_shared<ProviderManager>();
-    providerManager->addProvider(provider);
-    app.setDatabasePathForTesting(dbPath.path());
-    app.setProviderManagerForTesting(providerManager);
-    app.setDisableTaskbarForTesting(true);
-
-    REQUIRE(app.init());
-    // The first response allowed catch-up and the second showed the notice.
-    // Hold the deferred startup refresh so it cannot replace the saved result.
-    REQUIRE(waitForCondition([&provider]() {
-        return provider->getQuotaFetchCount() == 3;
-    }, std::chrono::seconds(4)));
-    REQUIRE(provider->getCompletedQuotaFetchCount() == 2);
-    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
-
-    const auto connectivity = app.getConnectivityStateForTesting("minimax");
-    REQUIRE(connectivity.has_value());
-    CHECK(connectivity->status == "offline");
-    CHECK(connectivity->noticeDismissedAt == 0);
-
-    REQUIRE(app.clickDashboardOfflineDismissForTesting());
-    REQUIRE(waitForCondition([&app]() {
-        return !app.isDashboardOfflineNoticeVisibleForTesting();
-    }, std::chrono::seconds(4)));
-    REQUIRE(provider->getCompletedQuotaFetchCount() == 2);
-    const auto dismissed = app.getConnectivityStateForTesting("minimax");
-    REQUIRE(dismissed.has_value());
-    REQUIRE(dismissed->noticeDismissedAt > 0);
-
-    releaseQuota.set_value();
-    app.refreshRuntimeForTesting();
-    const auto refreshed = app.getConnectivityStateForTesting("minimax");
-    REQUIRE(refreshed.has_value());
-    CHECK(refreshed->status == "offline");
-    CHECK(refreshed->noticeDismissedAt == dismissed->noticeDismissedAt);
-    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
-
-    app.shutdown();
-}
-
-TEST_CASE("AppController keeps an offline dismissal across a provider handoff and restart", "[app][runtime][offline_notice]") {
-    requireSqlite();
-
-    TempTestDatabase dbPath;
-    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
-    const std::time_t now = std::time(nullptr);
-    auto openai = std::make_shared<ControlledQuotaProviderAdapter>(
-        "openai", "OpenAI", makeQuotaResponse(now, 25, 100, "interval", "openai_subscription_codex_local"),
-        std::shared_future<void>{}, 1, makeFailedQuotaResponse("network unreachable"));
-    auto miniMax = std::make_shared<ControlledQuotaProviderAdapter>(
-        "minimax", "MiniMax", makeFailedQuotaResponse("network unreachable"),
-        std::shared_future<void>{}, 1,
-        makeQuotaResponse(now, 120, 1000, "daily", "minimax_subscription_coding_plan"));
-    auto providerManager = std::make_shared<ProviderManager>();
-    providerManager->addProvider(openai);
-    providerManager->addProvider(miniMax);
-    ScopedTrayTestHandler handler([](TrayController::TestOperation,
-                                     TrayStatus,
-                                     const std::string&,
-                                     std::string&) -> std::optional<bool> {
-        return true;
-    });
-
-    std::promise<void> reachedPublication;
-    auto publicationReached = reachedPublication.get_future();
-    AppController app;
-    std::promise<void> releasePublication;
-    auto publicationReleased = releasePublication.get_future().share();
-    app.setDatabasePathForTesting(dbPath.path());
-    app.setProviderManagerForTesting(providerManager);
-    app.setDisableTaskbarForTesting(true);
-    app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
-        if (publicationReleased.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-            reachedPublication.set_value();
-            publicationReleased.wait();
-        }
-    });
-    REQUIRE(app.init());
-    // The deferred startup refresh has resolved both quota responses. Hold it
-    // before it publishes the new provider set to the dashboard.
-    REQUIRE(publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
-    const DashboardViewModel before = app.getDashboardViewModelForTesting();
-    REQUIRE(before.offlineNoticeVisible);
-    const auto* beforeOpenAI = findProviderStatus(before, "openai");
-    const auto* beforeMiniMax = findProviderStatus(before, "minimax");
-    REQUIRE(beforeOpenAI != nullptr);
-    REQUIRE(beforeMiniMax != nullptr);
-    CHECK(beforeOpenAI->state == ProviderState::Offline);
-    CHECK(beforeMiniMax->state == ProviderState::Live);
-
-    REQUIRE(app.clickDashboardOfflineDismissForTesting());
-    REQUIRE(waitForCondition([&app]() {
-        return !app.isDashboardOfflineNoticeVisibleForTesting();
-    }, std::chrono::seconds(5)));
-    const auto dismissed = app.getConnectivityStateForTesting("openai");
-    REQUIRE(dismissed.has_value());
-    CHECK(dismissed->status == "offline");
-    CHECK(dismissed->noticeDismissedAt > 0);
-
-    releasePublication.set_value();
-    app.refreshRuntimeForTesting();
-    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
-    const auto recovered = app.getConnectivityStateForTesting("openai");
-    const auto stillOffline = app.getConnectivityStateForTesting("minimax");
-    REQUIRE(recovered.has_value());
-    REQUIRE(stillOffline.has_value());
-    CHECK(recovered->status == "online");
-    CHECK(recovered->noticeDismissedAt == 0);
-    CHECK(stillOffline->status == "offline");
-    CHECK(stillOffline->noticeDismissedAt == dismissed->noticeDismissedAt);
-    app.shutdown();
-
-    AppController restarted;
-    restarted.setDatabasePathForTesting(dbPath.path());
-    restarted.setProviderManagerForTesting(providerManager);
-    restarted.setDisableTaskbarForTesting(true);
-    REQUIRE(restarted.init());
-    restarted.refreshRuntimeForTesting();
-    CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
-    CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
-
-    // OpenAI recovered earlier and has no direct quota API, so its result
-    // does not confirm that MiniMax's outage ended.
-    auto preferences = restarted.getDashboardViewModelForTesting().preferences;
-    preferences.miniMaxSubscriptionTrackingEnabled = false;
-    restarted.applyDashboardPreferencesForTesting(preferences);
-    REQUIRE(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Current);
-    const auto disabled = restarted.getConnectivityStateForTesting("minimax");
-    REQUIRE(disabled.has_value());
-    CHECK(disabled->status == "offline");
-    CHECK(disabled->noticeDismissedAt == dismissed->noticeDismissedAt);
-
-    preferences.miniMaxSubscriptionTrackingEnabled = true;
-    restarted.applyDashboardPreferencesForTesting(preferences);
-    CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
-    CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
-    restarted.shutdown();
-}
-
-TEST_CASE("AppController keeps an offline dismissal when the handoff write fails", "[app][runtime][offline_notice]") {
-    requireSqlite();
-
-    TempTestDatabase dbPath;
-    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
-    const std::time_t now = std::time(nullptr);
-    auto miniMax = std::make_shared<ControlledQuotaProviderAdapter>(
-        "minimax", "MiniMax", makeQuotaResponse(now, 120, 1000, "daily", "minimax_subscription_coding_plan"),
-        std::shared_future<void>{}, 1, makeFailedQuotaResponse("network unreachable"));
-    auto openai = std::make_shared<ControlledQuotaProviderAdapter>(
-        "openai", "OpenAI", makeFailedQuotaResponse("network unreachable"),
-        std::shared_future<void>{}, 1,
-        makeQuotaResponse(now, 25, 100, "interval", "openai_subscription_codex_local"));
-    auto providerManager = std::make_shared<ProviderManager>();
-    providerManager->addProvider(openai);
-    providerManager->addProvider(miniMax);
-    ScopedTrayTestHandler handler([](TrayController::TestOperation,
-                                     TrayStatus,
-                                     const std::string&,
-                                     std::string&) -> std::optional<bool> {
-        return true;
-    });
-
-    std::promise<void> reachedPublication;
-    auto publicationReached = reachedPublication.get_future();
-    AppController app;
-    std::promise<void> releasePublication;
-    auto publicationReleased = releasePublication.get_future().share();
-    app.setDatabasePathForTesting(dbPath.path());
-    app.setProviderManagerForTesting(providerManager);
-    app.setDisableTaskbarForTesting(true);
-    app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
-        if (publicationReleased.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-            reachedPublication.set_value();
-            publicationReleased.wait();
-        }
-    });
-    REQUIRE(app.init());
-    // Hold the deferred refresh in which MiniMax recovers and OpenAI goes offline.
-    REQUIRE(publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
-    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
-    REQUIRE(app.clickDashboardOfflineDismissForTesting());
-    REQUIRE(waitForCondition([&app]() {
-        return !app.isDashboardOfflineNoticeVisibleForTesting();
-    }, std::chrono::seconds(5)));
-    const auto dismissed = app.getConnectivityStateForTesting("minimax");
-    REQUIRE(dismissed.has_value());
-    REQUIRE(dismissed->status == "offline");
-    REQUIRE(dismissed->noticeDismissedAt > 0);
-
-    {
-        StorageService storage;
-        REQUIRE(storage.init(dbPath.path()));
-        const int openaiAccountId =
-            requireAccountId(storage, requireProviderId(storage, "openai"), "openai.runtime_status");
-        REQUIRE(storage.execute(
-            "CREATE TRIGGER reject_openai_offline_row BEFORE INSERT ON connectivity_state "
-            "WHEN NEW.status = 'offline' AND NEW.account_id = " + std::to_string(openaiAccountId) + " "
-            "BEGIN SELECT RAISE(ABORT, 'test rejects the handoff write'); END;").success());
-    }
-
-    releasePublication.set_value();
-    app.refreshRuntimeForTesting();
-    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
-    app.shutdown();
-
-    {
-        StorageService storage;
-        REQUIRE(storage.init(dbPath.path()));
-        const int miniMaxProviderId = requireProviderId(storage, "minimax");
-        const auto source = storage.getConnectivityState(
-            miniMaxProviderId, requireAccountId(storage, miniMaxProviderId, "minimax.runtime_status"));
-        REQUIRE(source.has_value());
-        CHECK(source->status == "online");
-        CHECK(source->noticeDismissedAt == dismissed->noticeDismissedAt);
-        REQUIRE(storage.execute("DROP TRIGGER reject_openai_offline_row;").success());
-    }
-
-    AppController restarted;
-    restarted.setDatabasePathForTesting(dbPath.path());
-    restarted.setProviderManagerForTesting(providerManager);
-    restarted.setDisableTaskbarForTesting(true);
-    REQUIRE(restarted.init());
-    restarted.refreshRuntimeForTesting();
-    CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
-    CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
-    const auto carried = restarted.getConnectivityStateForTesting("openai");
-    REQUIRE(carried.has_value());
-    CHECK(carried->status == "offline");
-    CHECK(carried->noticeDismissedAt == dismissed->noticeDismissedAt);
-    restarted.shutdown();
-}
-
-TEST_CASE("AppController keeps an offline dismissal when the newly offline provider has no saved row", "[app][runtime][offline_notice]") {
-    requireSqlite();
-
-    TempTestDatabase dbPath;
-    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false);
-    const std::time_t now = std::time(nullptr);
-    auto openai = std::make_shared<ControlledQuotaProviderAdapter>(
-        "openai", "OpenAI", makeQuotaResponse(now, 25, 100, "interval", "openai_subscription_codex_local"),
-        std::shared_future<void>{}, 1, makeFailedQuotaResponse("network unreachable"));
-    // No providers row exists for this key, so its connectivity cannot be saved.
-    auto unregistered = std::make_shared<ControlledQuotaProviderAdapter>(
-        "unregistered_provider", "Unregistered", makeFailedQuotaResponse("network unreachable"),
-        std::shared_future<void>{}, 1,
-        makeQuotaResponse(now, 120, 1000, "daily", "unregistered_quota"));
-    auto providerManager = std::make_shared<ProviderManager>();
-    providerManager->addProvider(openai);
-    providerManager->addProvider(unregistered);
-    ScopedTrayTestHandler handler([](TrayController::TestOperation,
-                                     TrayStatus,
-                                     const std::string&,
-                                     std::string&) -> std::optional<bool> {
-        return true;
-    });
-
-    std::promise<void> reachedPublication;
-    auto publicationReached = reachedPublication.get_future();
-    AppController app;
-    std::promise<void> releasePublication;
-    auto publicationReleased = releasePublication.get_future().share();
-    app.setDatabasePathForTesting(dbPath.path());
-    app.setProviderManagerForTesting(providerManager);
-    app.setDisableTaskbarForTesting(true);
-    app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
-        if (publicationReleased.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-            reachedPublication.set_value();
-            publicationReleased.wait();
-        }
-    });
-    REQUIRE(app.init());
-    // Hold the deferred refresh in which OpenAI recovers and the unregistered provider goes offline.
-    REQUIRE(publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
-    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
-    REQUIRE(app.clickDashboardOfflineDismissForTesting());
-    REQUIRE(waitForCondition([&app]() {
-        return !app.isDashboardOfflineNoticeVisibleForTesting();
-    }, std::chrono::seconds(5)));
-    const auto dismissed = app.getConnectivityStateForTesting("openai");
-    REQUIRE(dismissed.has_value());
-    REQUIRE(dismissed->status == "offline");
-    REQUIRE(dismissed->noticeDismissedAt > 0);
-
-    releasePublication.set_value();
-    app.refreshRuntimeForTesting();
-    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
-    CHECK_FALSE(app.getConnectivityStateForTesting("unregistered_provider").has_value());
-    const auto recovered = app.getConnectivityStateForTesting("openai");
-    REQUIRE(recovered.has_value());
-    CHECK(recovered->status == "online");
-    CHECK(recovered->noticeDismissedAt == dismissed->noticeDismissedAt);
-    app.shutdown();
-
-    AppController restarted;
-    restarted.setDatabasePathForTesting(dbPath.path());
-    restarted.setProviderManagerForTesting(providerManager);
-    restarted.setDisableTaskbarForTesting(true);
-    REQUIRE(restarted.init());
-    restarted.refreshRuntimeForTesting();
-    CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
-    CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
-    restarted.shutdown();
-}
-
-TEST_CASE("AppController keeps an omitted provider's dismissal when a local provider recovers after restart", "[app][runtime][offline_notice]") {
-    requireSqlite();
-
-    TempTestDatabase dbPath;
-    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
-    auto openai = std::make_shared<ControlledQuotaProviderAdapter>(
-        "openai", "OpenAI", makeFailedQuotaResponse("network unreachable"));
-    auto miniMax = makeOfflineQuotaProvider("minimax", "MiniMax");
-    auto providerManager = std::make_shared<ProviderManager>();
-    providerManager->addProvider(openai);
-    providerManager->addProvider(miniMax);
-    ScopedTrayTestHandler handler([](TrayController::TestOperation,
-                                     TrayStatus,
-                                     const std::string&,
-                                     std::string&) -> std::optional<bool> {
-        return true;
-    });
-
-    AppController app;
-    app.setDatabasePathForTesting(dbPath.path());
-    app.setProviderManagerForTesting(providerManager);
-    app.setDisableTaskbarForTesting(true);
-    REQUIRE(app.init());
-    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
-    REQUIRE(app.clickDashboardOfflineDismissForTesting());
-    REQUIRE(waitForCondition([&app]() {
-        return !app.isDashboardOfflineNoticeVisibleForTesting();
-    }, std::chrono::seconds(5)));
-
-    auto preferences = app.getDashboardViewModelForTesting().preferences;
-    preferences.miniMaxSubscriptionTrackingEnabled = false;
-    app.applyDashboardPreferencesForTesting(preferences);
-    REQUIRE(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    const auto dismissed = app.getConnectivityStateForTesting("minimax");
-    REQUIRE(dismissed.has_value());
-    REQUIRE(dismissed->noticeDismissedAt > 0);
-    app.shutdown();
-
-    const std::time_t now = std::time(nullptr);
-    seedPersistedQuotaSnapshot(
-        dbPath.path(), "openai", "acct-openai-cached", "OpenAI Cached Account",
-        "openai_subscription", "OpenAI Subscription", "interval", now - 60, 60, 100, 40);
-    openai->setQuotaResponse(
-        makeQuotaResponse(now, 25, 100, "interval", "openai_subscription_codex_local"));
-
-    std::promise<void> reachedPublication;
-    auto publicationReached = reachedPublication.get_future();
-    AppController restarted;
-    std::promise<void> releasePublication;
-    auto publicationReleased = releasePublication.get_future().share();
-    restarted.setDatabasePathForTesting(dbPath.path());
-    restarted.setProviderManagerForTesting(providerManager);
-    restarted.setDisableTaskbarForTesting(true);
-    restarted.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
-        if (publicationReleased.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-            reachedPublication.set_value();
-            publicationReleased.wait();
-        }
-    });
-    REQUIRE(restarted.init());
-    REQUIRE(publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
-    const DashboardViewModel cached = restarted.getDashboardViewModelForTesting();
-    CHECK(cached.runtimeState != RuntimeState::Offline);
-    const auto* cachedOpenAI = findProviderStatus(cached, "openai");
-    REQUIRE(cachedOpenAI != nullptr);
-    REQUIRE_FALSE(cachedOpenAI->quotas.empty());
-    CHECK(cachedOpenAI->quotas.front().used == 60);
-    const auto beforeRecovery = restarted.getConnectivityStateForTesting("minimax");
-    REQUIRE(beforeRecovery.has_value());
-    CHECK(beforeRecovery->noticeDismissedAt == dismissed->noticeDismissedAt);
-
-    // OpenAI has no provider quota API, so its recovery ends only its own outage.
-    releasePublication.set_value();
-    restarted.refreshRuntimeForTesting();
-    REQUIRE(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Current);
-    const auto recoveredOpenAI = restarted.getConnectivityStateForTesting("openai");
-    REQUIRE(recoveredOpenAI.has_value());
-    CHECK(recoveredOpenAI->status == "online");
-    CHECK(recoveredOpenAI->noticeDismissedAt == 0);
-    const auto afterRecovery = restarted.getConnectivityStateForTesting("minimax");
-    REQUIRE(afterRecovery.has_value());
-    CHECK(afterRecovery->status == "offline");
-    CHECK(afterRecovery->noticeDismissedAt == dismissed->noticeDismissedAt);
-
-    preferences = restarted.getDashboardViewModelForTesting().preferences;
-    preferences.miniMaxSubscriptionTrackingEnabled = true;
-    restarted.applyDashboardPreferencesForTesting(preferences);
-    CHECK(restarted.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(restarted.isDashboardOfflineNoticeVisibleForTesting());
-    CHECK_FALSE(restarted.getActiveNoticeForTesting(NoticeType::Offline).has_value());
-    restarted.shutdown();
-}
-
-TEST_CASE("AppController preserves saved offline dismissal through inconclusive quota checks", "[app][runtime][offline_notice][kimi]") {
-    requireSqlite();
-
-    TempTestDirectory profile("jistats_offline_profile");
-    ScopedEnvironmentVariable userProfile("USERPROFILE", profile.path().string());
-    // This Codex rollout predates the dismissal and does not change.
-    const std::time_t rolloutTime = std::time(nullptr) - 30 * 60;
-    writeCodexRolloutFile(
-        profile.path() / ".codex" / "sessions" / "2026" / "04" / "19" / "rollout-existing.jsonl",
-        25.0, rolloutTime, rolloutTime + 5 * 3600);
-    ScopedEnvironmentVariable codexHome("CODEX_HOME", (profile.path() / ".codex").string());
-    TempTestDatabase dbPath;
-    seedStartupPreferences(dbPath.path(), false, false, false, false, false, true);
-    {
-        StorageService storage;
-        REQUIRE(storage.init(dbPath.path()));
-        REQUIRE(ensureProviderId(storage, "kimi", "Kimi Code") > 0);
-    }
-    const auto offline = makeFailedQuotaResponse("network unreachable");
-    auto kimi = std::make_shared<ControlledQuotaProviderAdapter>("kimi", "Kimi Code", offline);
-    auto claude = std::make_shared<ClaudeCodeAdapter>();
-    claude->setMockStatsCachePath("docs/fixtures/claude/stats-cache.redacted.json");
-    auto openai = std::make_shared<OpenAIAdapter>();
-    auto providerManager = std::make_shared<ProviderManager>();
-    providerManager->addProvider(kimi);
-    providerManager->addProvider(claude);
-    providerManager->addProvider(openai);
-    ScopedTrayTestHandler handler([](TrayController::TestOperation,
-                                     TrayStatus,
-                                     const std::string&,
-                                     std::string&) -> std::optional<bool> {
-        return true;
-    });
-
-    AppController app;
-    app.setDatabasePathForTesting(dbPath.path());
-    app.setProviderManagerForTesting(providerManager);
-    app.setDisableTaskbarForTesting(true);
-    REQUIRE(app.init());
-    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
-    REQUIRE(app.clickDashboardOfflineDismissForTesting());
-    REQUIRE(waitForCondition([&app]() {
-        return !app.isDashboardOfflineNoticeVisibleForTesting();
-    }, std::chrono::seconds(5)));
-    const auto dismissed = app.getConnectivityStateForTesting("kimi");
-    REQUIRE(dismissed.has_value());
-    REQUIRE(dismissed->noticeDismissedAt > 0);
-
-    kimi->setQuotaResponse(makeFailedQuotaResponse("Kimi quota API credentials are not available"));
-    app.refreshRuntimeForTesting();
-    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Unknown);
-    const auto withoutCredentials = app.getConnectivityStateForTesting("kimi");
-    REQUIRE(withoutCredentials.has_value());
-    CHECK(withoutCredentials->noticeDismissedAt == dismissed->noticeDismissedAt);
-
-    auto preferences = app.getDashboardViewModelForTesting().preferences;
-    preferences.claudeCodeEnabled = true;
-    preferences.openaiSubscriptionTrackingEnabled = true;
-    app.applyDashboardPreferencesForTesting(preferences);
-    const DashboardViewModel localOnly = app.getDashboardViewModelForTesting();
-    CHECK(localOnly.runtimeState != RuntimeState::Offline);
-    CHECK(findProviderStatus(localOnly, "kimi") == nullptr);
-    const auto* localClaude = findProviderStatus(localOnly, "claude_code");
-    REQUIRE(localClaude != nullptr);
-    CHECK(localClaude->state == ProviderState::Live);
-    REQUIRE_FALSE(localClaude->quotas.empty());
-    CHECK(localClaude->quotas.front().used > 0);
-    const auto* localCodex = findProviderStatus(localOnly, "openai");
-    REQUIRE(localCodex != nullptr);
-    CHECK(localCodex->state == ProviderState::Live);
-    REQUIRE_FALSE(localCodex->quotas.empty());
-    CHECK(localCodex->quotas.front().limit == 100);
-    const auto afterLocalStats = app.getConnectivityStateForTesting("kimi");
-    REQUIRE(afterLocalStats.has_value());
-    CHECK(afterLocalStats->noticeDismissedAt == dismissed->noticeDismissedAt);
-
-    kimi->setQuotaResponse(offline);
-    app.refreshRuntimeForTesting();
-    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
-
-    const std::time_t now = std::time(nullptr);
-    kimi->setQuotaResponse(makeQuotaResponse(now, 4, 10, "interval", "kimi_code_local"));
-    app.refreshRuntimeForTesting();
-    const DashboardViewModel sample = app.getDashboardViewModelForTesting();
-    const auto* sampleKimi = findProviderStatus(sample, "kimi");
-    REQUIRE(sampleKimi != nullptr);
-    CHECK(sampleKimi->state == ProviderState::Sample);
-    const auto withSample = app.getConnectivityStateForTesting("kimi");
-    REQUIRE(withSample.has_value());
-    CHECK(withSample->noticeDismissedAt == dismissed->noticeDismissedAt);
-
-    kimi->setQuotaResponse(offline);
-    app.refreshRuntimeForTesting();
-    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
-
-    kimi->setQuotaResponse(makeQuotaResponse(now, 4, 10, "interval", "kimi_subscription_api"));
-    app.refreshRuntimeForTesting();
-    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Current);
-    const auto recovered = app.getConnectivityStateForTesting("kimi");
-    REQUIRE(recovered.has_value());
-    CHECK(recovered->noticeDismissedAt == 0);
-
-    kimi->setQuotaResponse(offline);
-    app.refreshRuntimeForTesting();
-    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK(app.isDashboardOfflineNoticeVisibleForTesting());
-    app.shutdown();
-}
-
-TEST_CASE("AppController keeps offline dismissal when remaining quota comes from the polling cache", "[app][runtime][offline_notice][polling]") {
-    requireSqlite();
-
-    TempTestDatabase dbPath;
-    seedStartupPreferences(dbPath.path(), false, false, false, true, false, true);
-    {
-        StorageService storage;
-        REQUIRE(storage.init(dbPath.path()));
-        REQUIRE(ensureProviderId(storage, "kimi", "Kimi Code") > 0);
-    }
-    const std::time_t now = std::time(nullptr);
-    auto miniMax = makeCurrentQuotaProvider(
-        "minimax", "MiniMax", 120, 1000, now, "daily", "minimax_subscription_coding_plan");
-    miniMax->setDirectQuotaApiConfigured(true, "minimax:coding_plan_remains");
-    auto kimi = makeOfflineQuotaProvider("kimi", "Kimi Code");
-    auto providerManager = makeProviderManager({miniMax, kimi});
-    ScopedTrayTestHandler handler([](TrayController::TestOperation,
-                                     TrayStatus,
-                                     const std::string&,
-                                     std::string&) -> std::optional<bool> {
-        return true;
-    });
-
-    AppController app;
-    app.setDatabasePathForTesting(dbPath.path());
-    app.setProviderManagerForTesting(providerManager);
-    app.setDisableTaskbarForTesting(true);
-    REQUIRE(app.init());
-    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
-    REQUIRE(miniMax->getQuotaFetchCount() == 1);
-    REQUIRE(app.clickDashboardOfflineDismissForTesting());
-    REQUIRE(waitForCondition([&app]() {
-        return !app.isDashboardOfflineNoticeVisibleForTesting();
-    }, std::chrono::seconds(5)));
-    const auto dismissed = app.getConnectivityStateForTesting("kimi");
-    REQUIRE(dismissed.has_value());
-    REQUIRE(dismissed->noticeDismissedAt > 0);
-
-    auto preferences = app.getDashboardViewModelForTesting().preferences;
-    preferences.kimiCodeEnabled = false;
-    app.applyDashboardPreferencesForTesting(preferences);
-    const DashboardViewModel cached = app.getDashboardViewModelForTesting();
-    CHECK(cached.runtimeState == RuntimeState::Current);
-    CHECK(miniMax->getQuotaFetchCount() == 1);
-    const auto* cachedMiniMax = findProviderStatus(cached, "minimax");
-    REQUIRE(cachedMiniMax != nullptr);
-    REQUIRE_FALSE(cachedMiniMax->quotas.empty());
-    CHECK(cachedMiniMax->quotas.front().used == 120);
-    const auto afterCache = app.getConnectivityStateForTesting("kimi");
-    REQUIRE(afterCache.has_value());
-    CHECK(afterCache->noticeDismissedAt == dismissed->noticeDismissedAt);
-
-    preferences.kimiCodeEnabled = true;
-    app.applyDashboardPreferencesForTesting(preferences);
-    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
-    CHECK_FALSE(app.isDashboardOfflineNoticeVisibleForTesting());
-
-    preferences.kimiCodeEnabled = false;
-    app.applyDashboardPreferencesForTesting(preferences);
-    CHECK(miniMax->getQuotaFetchCount() == 1);
-    app.setCurrentTimeForTesting(now + 301);
-    app.refreshRuntimeForTesting();
-    REQUIRE(miniMax->getQuotaFetchCount() == 2);
-    const auto afterFetch = app.getConnectivityStateForTesting("kimi");
-    REQUIRE(afterFetch.has_value());
-    CHECK(afterFetch->noticeDismissedAt == 0);
     app.shutdown();
 }
 
@@ -4942,6 +3909,360 @@ TEST_CASE("AppController defaults all shipped provider tracking to disabled on a
     CHECK_FALSE(storedPreferences.kimiCodeEnabled);
 
     app.shutdown();
+}
+
+namespace {
+
+constexpr const char* kCodexAttributionSetting = "runtime.codex_model_attribution_generation";
+
+class CodexAttributionTestProfile {
+  public:
+    CodexAttributionTestProfile() {
+        REQUIRE(source.init((codexHome.path() / "state_5.sqlite").string()));
+        // Each fixture update appends a WAL frame even when the main file timestamp is unchanged.
+        const auto journal = source.execute("PRAGMA journal_mode = WAL;");
+        REQUIRE(journal.success());
+        REQUIRE(journal.getString(0, 0) == "wal");
+        REQUIRE(
+            source
+                .execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT, "
+                         "reasoning_effort TEXT, tokens_used INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER);")
+                .success());
+        const std::string createdAtMs = std::to_string((std::time(nullptr) - 60) * 1000LL);
+        REQUIRE(source
+                    .execute("INSERT INTO threads VALUES ('thread-1', 'hicap-ai', 'gpt-test', 'high', 100, ?, ?);",
+                             {createdAtMs, createdAtMs})
+                    .success());
+        REQUIRE(storage.init(database.path()));
+    }
+
+    int generation() {
+        return SettingsService(storage).getInt(kCodexAttributionSetting).value_or(0);
+    }
+
+    int sourceCount() {
+        const auto result = storage.execute("SELECT COUNT(*) FROM codex_local_sources;");
+        REQUIRE(result.success());
+        return result.getInt(0, 0);
+    }
+
+    long long tokens() {
+        const auto result = storage.execute("SELECT COALESCE(SUM(total_tokens), 0) FROM usage_events "
+                                            "WHERE source_type = 'codex_local_sqlite';");
+        REQUIRE(result.success());
+        return result.getInt64(0, 0);
+    }
+
+    void updateSource(int tokens) {
+        REQUIRE(source
+                    .execute("UPDATE threads SET tokens_used = ?, updated_at_ms = updated_at_ms + 1000 "
+                             "WHERE id = 'thread-1';",
+                             {std::to_string(tokens)})
+                    .success());
+    }
+
+    void startController(AppController& app, bool headless = true) {
+        app.setHeadlessForTesting(headless);
+        app.setDisableTaskbarForTesting(true);
+        app.setDatabasePathForTesting(database.path());
+        REQUIRE(app.init());
+    }
+
+    TempTestDatabase database;
+    StorageService storage;
+
+  private:
+    TempTestDirectory codexHome{"jistats_codex_attribution"};
+    ScopedEnvironmentVariable codexHomeVariable{"CODEX_HOME", codexHome.path().string()};
+    StorageService source;
+};
+
+} // namespace
+
+TEST_CASE("AppController requires explicit consent to read Codex SQLite model attribution", "[app][runtime][codex]") {
+    requireSqlite();
+
+    CodexAttributionTestProfile profile;
+    seedStartupPreferences(profile.database.path(), false, false, true);
+
+    AppController app;
+    profile.startController(app);
+    DashboardPreferences preferences = app.getDashboardViewModelForTesting().preferences;
+    REQUIRE(preferences.openaiSubscriptionTrackingEnabled);
+    CHECK_FALSE(preferences.codexModelAttributionEnabled);
+    CHECK(profile.sourceCount() == 0);
+
+    profile.updateSource(200);
+    app.refreshRuntimeForTesting();
+    CHECK(profile.sourceCount() == 0);
+    CHECK(profile.tokens() == 0);
+
+    preferences.openaiSubscriptionTrackingEnabled = false;
+    preferences.codexModelAttributionEnabled = true;
+    app.applyDashboardPreferencesForTesting(preferences);
+    REQUIRE(app.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+    REQUIRE(profile.sourceCount() == 1);
+    CHECK(profile.tokens() == 0);
+
+    profile.updateSource(250);
+    app.refreshRuntimeForTesting();
+    CHECK(profile.tokens() == 50);
+    app.shutdown();
+
+    profile.updateSource(300);
+    AppController restarted;
+    profile.startController(restarted);
+    preferences = restarted.getDashboardViewModelForTesting().preferences;
+    CHECK_FALSE(preferences.openaiSubscriptionTrackingEnabled);
+    REQUIRE(preferences.codexModelAttributionEnabled);
+    CHECK(profile.sourceCount() == 1);
+    CHECK(profile.tokens() == 100);
+
+    AppController peer;
+    profile.startController(peer);
+    REQUIRE(peer.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+
+    preferences.codexModelAttributionEnabled = false;
+    restarted.applyDashboardPreferencesForTesting(preferences);
+    CHECK_FALSE(restarted.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+    profile.updateSource(900);
+    restarted.refreshRuntimeForTesting();
+    peer.refreshRuntimeForTesting();
+    CHECK_FALSE(peer.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+    CHECK(profile.tokens() == 100);
+    peer.shutdown();
+    restarted.shutdown();
+
+    AppController disabled;
+    profile.startController(disabled);
+    preferences = disabled.getDashboardViewModelForTesting().preferences;
+    REQUIRE_FALSE(preferences.codexModelAttributionEnabled);
+    CHECK(profile.tokens() == 100);
+
+    preferences.codexModelAttributionEnabled = true;
+    disabled.applyDashboardPreferencesForTesting(preferences);
+    REQUIRE(profile.sourceCount() == 2);
+    CHECK(profile.tokens() == 100);
+    profile.updateSource(950);
+    disabled.refreshRuntimeForTesting();
+    CHECK(profile.tokens() == 150);
+}
+
+TEST_CASE("AppController serializes a peer Codex scan with profile revocation", "[app][runtime][codex]") {
+    requireSqlite();
+
+    CodexAttributionTestProfile profile;
+    REQUIRE(SettingsService(profile.storage).setInt(kCodexAttributionSetting, 1));
+    AppController revoking;
+    profile.startController(revoking);
+    AppController scanning;
+    profile.startController(scanning);
+    REQUIRE(profile.sourceCount() == 1);
+
+    std::promise<void> aboutToRead;
+    auto sourceReadReached = aboutToRead.get_future();
+    std::promise<void> releaseRead;
+    auto sourceReadReleased = releaseRead.get_future();
+    scanning.setBeforeCodexSourceReadForTesting([&]() {
+        aboutToRead.set_value();
+        sourceReadReleased.wait_for(std::chrono::seconds(5));
+    });
+    profile.updateSource(150);
+    auto peerScan = std::async(std::launch::async, [&]() { scanning.refreshRuntimeForTesting(); });
+    REQUIRE(sourceReadReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+
+    auto preferences = revoking.getDashboardViewModelForTesting().preferences;
+    preferences.codexModelAttributionEnabled = false;
+    std::promise<void> attemptOff;
+    auto offStarted = attemptOff.get_future();
+    auto peerRevocation = std::async(std::launch::async, [&]() {
+        attemptOff.set_value();
+        revoking.applyDashboardPreferencesForTesting(preferences);
+    });
+    REQUIRE(offStarted.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const bool savedBeforeRead =
+        waitForCondition([&]() { return profile.generation() == -1; }, std::chrono::milliseconds(600));
+    CHECK_FALSE(savedBeforeRead);
+    if (savedBeforeRead) {
+        // Reproduce a new counter arriving after a durable Off while the old scan is paused.
+        profile.updateSource(250);
+    }
+    releaseRead.set_value();
+    peerScan.get();
+    peerRevocation.get();
+    scanning.setBeforeCodexSourceReadForTesting({});
+
+    REQUIRE(profile.generation() == -1);
+    CHECK(profile.tokens() == 50);
+    profile.updateSource(300);
+    scanning.refreshRuntimeForTesting();
+    CHECK(profile.tokens() == 50);
+    CHECK_FALSE(scanning.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+}
+
+TEST_CASE("AppController revokes Codex consent with restricted profile mutex access", "[app][runtime][codex]") {
+    requireSqlite();
+
+    CodexAttributionTestProfile profile;
+    REQUIRE(SettingsService(profile.storage).setInt(kCodexAttributionSetting, 1));
+    AppController app;
+    profile.startController(app);
+    REQUIRE(profile.sourceCount() == 1);
+
+    const auto path = std::filesystem::path(profile.database.path()).wstring();
+    const HANDLE database =
+        CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(database != INVALID_HANDLE_VALUE);
+    BY_HANDLE_FILE_INFORMATION identity{};
+    const bool identified = GetFileInformationByHandle(database, &identity) != FALSE;
+    CloseHandle(database);
+    REQUIRE(identified);
+    const std::wstring name = L"Global\\JiStats.CodexAttribution." + std::to_wstring(identity.dwVolumeSerialNumber) +
+                              L"." + std::to_wstring(identity.nFileIndexHigh) + L"." +
+                              std::to_wstring(identity.nFileIndexLow);
+
+    // Model a peer that can use the lock but cannot request all access.
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    REQUIRE(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(D;;SD;;;WD)(A;;0x00100001;;;WD)",
+                                                                 SDDL_REVISION_1, &descriptor, nullptr));
+    const std::unique_ptr<void, decltype(&LocalFree)> security(descriptor, LocalFree);
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), security.get(), FALSE};
+    const std::unique_ptr<void, decltype(&CloseHandle)> held(
+        CreateMutexExW(&attributes, name.c_str(), CREATE_MUTEX_INITIAL_OWNER, SYNCHRONIZE | MUTEX_MODIFY_STATE),
+        CloseHandle);
+    const DWORD creationStatus = GetLastError();
+    REQUIRE(held);
+    REQUIRE(creationStatus != ERROR_ALREADY_EXISTS);
+
+    const std::unique_ptr<void, decltype(&CloseHandle)> fullAccess(OpenMutexW(MUTEX_ALL_ACCESS, FALSE, name.c_str()),
+                                                                   CloseHandle);
+    const DWORD accessStatus = GetLastError();
+    REQUIRE_FALSE(fullAccess);
+    REQUIRE(accessStatus == ERROR_ACCESS_DENIED);
+
+    auto preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.codexModelAttributionEnabled = false;
+    std::promise<void> attemptingOff;
+    auto offStarted = attemptingOff.get_future();
+    auto off = std::async(std::launch::async, [&]() {
+        attemptingOff.set_value();
+        app.applyDashboardPreferencesForTesting(preferences);
+    });
+    CHECK(offStarted.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    CHECK_FALSE(waitForCondition([&]() { return profile.generation() == -1; }, std::chrono::milliseconds(200)));
+    REQUIRE(ReleaseMutex(held.get()));
+    off.get();
+
+    CHECK(profile.generation() == -1);
+    CHECK_FALSE(app.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+    const DWORD wait = WaitForSingleObject(held.get(), 0);
+    CHECK(wait == WAIT_OBJECT_0);
+    if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) {
+        CHECK(ReleaseMutex(held.get()));
+    }
+}
+
+TEST_CASE("AppController preserves queued Codex revocation and retries a failed save", "[app][runtime][codex]") {
+    requireSqlite();
+
+    CodexAttributionTestProfile profile;
+    REQUIRE(SettingsService(profile.storage).setInt(kCodexAttributionSetting, 1));
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    std::promise<void> settingsDequeued;
+    auto dequeued = settingsDequeued.get_future();
+    std::promise<void> releaseSettings;
+    const auto settingsReleased = releaseSettings.get_future();
+
+    AppController app;
+    app.setStartupManagerTestHooks(makeStartupHooks(std::make_shared<FakeStartupHooksState>()));
+    app.setAfterSettingsDequeueForTesting([&]() {
+        settingsDequeued.set_value();
+        settingsReleased.wait_for(std::chrono::seconds(15));
+    });
+    profile.startController(app, false);
+    REQUIRE(profile.sourceCount() == 1);
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition(
+        [&app]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+    const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    REQUIRE(settings != nullptr);
+    const HWND startup = FindWindowExW(settings, nullptr, L"Button", L"Start with Windows");
+    REQUIRE(startup != nullptr);
+
+    const auto selectAttributionTab = [&]() {
+        REQUIRE(app.selectDashboardPreferencesTabForTesting(1));
+        const HWND checkbox = FindWindowExW(settings, nullptr, L"Button", L"Enable Codex model attribution");
+        REQUIRE(checkbox != nullptr);
+        REQUIRE(waitForCondition([checkbox]() { return IsWindowVisible(checkbox) != FALSE; }));
+        return checkbox;
+    };
+
+    SECTION("Off and On are queued while the interaction worker is busy") {
+        SendMessageW(startup, BM_CLICK, 0, 0);
+        REQUIRE(dequeued.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+
+        const HWND checkbox = selectAttributionTab();
+        REQUIRE(SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        SendMessageW(checkbox, BM_CLICK, 0, 0);
+        // Redraw Settings while the worker is still blocked and the saved choice is still On.
+        REQUIRE(app.selectDashboardPreferencesTabForTesting(1));
+        CHECK(SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_UNCHECKED);
+        SendMessageW(checkbox, BM_CLICK, 0, 0);
+
+        profile.updateSource(900);
+        app.refreshRuntimeForTesting();
+        CHECK(profile.generation() == 1);
+        CHECK(profile.tokens() == 0);
+        releaseSettings.set_value();
+
+        const bool newBaseline = waitForCondition(
+            [&]() { return profile.generation() == 2 && profile.sourceCount() == 2; }, std::chrono::seconds(5));
+        INFO("Saved generation: " << profile.generation() << ", sources: " << profile.sourceCount());
+        REQUIRE(newBaseline);
+        CHECK(profile.tokens() == 0);
+        profile.updateSource(950);
+        app.refreshRuntimeForTesting();
+        CHECK(profile.tokens() == 50);
+    }
+
+    SECTION("SQLite rejects the Off write and an explicit retry persists it") {
+        const HWND checkbox = selectAttributionTab();
+        REQUIRE(
+            profile.storage
+                .execute(
+                    "CREATE TRIGGER fail_codex_revocation_insert BEFORE INSERT ON settings "
+                    "WHEN NEW.key = 'runtime.codex_model_attribution_generation' AND CAST(NEW.value AS INTEGER) < 0 "
+                    "BEGIN SELECT RAISE(ABORT, 'test revocation write failure'); END;"
+                    "CREATE TRIGGER fail_codex_revocation_update BEFORE UPDATE ON settings "
+                    "WHEN NEW.key = 'runtime.codex_model_attribution_generation' AND CAST(NEW.value AS INTEGER) < 0 "
+                    "BEGIN SELECT RAISE(ABORT, 'test revocation write failure'); END;")
+                .success());
+        SendMessageW(checkbox, BM_CLICK, 0, 0);
+        REQUIRE(waitForCondition([&]() {
+            return app.getDashboardViewModelForTesting().codexAttributionSaveError ==
+                   CodexAttributionSaveError::Revocation;
+        }));
+        CHECK(profile.generation() == 1);
+        CHECK(app.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+        profile.updateSource(1200);
+        app.refreshRuntimeForTesting();
+        CHECK(profile.tokens() == 0);
+
+        REQUIRE(profile.storage
+                    .execute("DROP TRIGGER fail_codex_revocation_insert; DROP TRIGGER fail_codex_revocation_update;")
+                    .success());
+        REQUIRE(waitForCondition([&]() { return SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED; }));
+        SendMessageW(checkbox, BM_CLICK, 0, 0);
+        REQUIRE(waitForCondition([&]() { return profile.generation() == -1; }));
+        app.shutdown();
+
+        AppController restarted;
+        profile.startController(restarted);
+        CHECK_FALSE(restarted.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+        CHECK(profile.tokens() == 0);
+    }
 }
 
 TEST_CASE("AppController rehydrates persisted provider tracking preferences", "[app][runtime]") {
