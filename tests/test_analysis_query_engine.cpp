@@ -550,10 +550,10 @@ TEST_CASE("Codex rollout replay links requests to their previously saved cumulat
         seedCodexUsageEvent(storage, first, 100, rollout.string());
     }
 
-    const auto snapshots = OpenAIAdapter::parseCodexTokenUsageFromRolloutFile(rollout.string());
-    REQUIRE(snapshots.size() == 2);
-    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, snapshots));
-    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, snapshots));
+    const auto batch = OpenAIAdapter::collectCodexTokenUsageSnapshots(fixture.path().string());
+    REQUIRE(batch.observations.size() == 2);
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
 
     const auto rows = storage.getUsageEvents(providerId, accountId, first, now);
     REQUIRE(rows.size() == (hasLegacyBaseline ? 3 : 2));
@@ -574,6 +574,57 @@ TEST_CASE("Codex rollout replay links requests to their previously saved cumulat
     REQUIRE(analysis.codexHourlyHistory.points.size() == 2);
     CHECK(analysis.codexHourlyHistory.points.front().tokensPerMinute == Catch::Approx(50));
     CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(hasLegacyBaseline ? 100 : 0));
+}
+
+TEST_CASE("Codex rollout replay preserves the sequence of saved same-second counters", "[analysis][codex]") {
+    requireSqlite();
+    const bool laterHasPrecision = GENERATE(true, false);
+    CAPTURE(laterHasPrecision);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    JiStats::TestSupport::TempTestDirectory fixture("jistats_codex_order");
+    const auto rollout = fixture.path() / "rollout-upgrade.jsonl";
+    {
+        std::ofstream out(rollout);
+        out << R"json({"timestamp":"2026-04-20T17:57:00.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":50,"total_tokens":100}}}}
+{"timestamp":"2026-04-20T17:58:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":25,"output_tokens":25,"total_tokens":50},"total_token_usage":{"input_tokens":75,"output_tokens":75,"total_tokens":150}}}}
+{"timestamp":"2026-04-20T17:58:00.700Z","type":"token_usage_record","payload":{"response_id":"response-2","usage":{"input_tokens":25,"output_tokens":25,"total_tokens":50}}}
+{"timestamp":"2026-04-20T17:58:00)json";
+        out << (laterHasPrecision ? ".800" : "");
+        out << R"json(Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":100,"total_tokens":200}}}}
+{"type":"turn_context","payload":{}}
+{"timestamp":"2026-04-20T17:59:00.300Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":125,"output_tokens":125,"total_tokens":250}}}}
+)json";
+        REQUIRE(out.good());
+    }
+
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    seedCodexUsageEvent(storage, now - 180, 100, rollout.string());
+    seedCodexUsageEvent(storage, now - 120, 150, rollout.string());
+    seedCodexUsageEvent(storage, now - 120, 200, rollout.string());
+    seedCodexUsageEvent(storage, now - 60, 250, rollout.string());
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    const auto batch = OpenAIAdapter::collectCodexTokenUsageSnapshots(fixture.path().string());
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 150);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(100));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(50));
+
+    const auto rows = storage.getUsageEvents(providerId, accountId, now - 180, now);
+    REQUIRE(rows.size() == 6);
+    const auto laterCounter =
+        std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.totalTokens == 200; });
+    REQUIRE(laterCounter != rows.end());
+    CHECK(laterCounter->eventSubsecondNs == (laterHasPrecision ? std::optional<int>(800000000) : std::nullopt));
 }
 
 TEST_CASE("AnalysisQueryEngine limits Codex throughput chart history to the active thirty-minute window", "[analysis][query_engine][analysis_query_engine][codex]") {

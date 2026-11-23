@@ -679,7 +679,8 @@ TEST_CASE("OpenAI Codex token-usage collection aggregates and sorts across files
             std::string(R"json({"timestamp":")json") + ts1 +
             R"json(","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200,"output_tokens":100,"total_tokens":300}},"rate_limits":null}})json");
 
-    const auto snapshots = OpenAIAdapter::collectCodexTokenUsageSnapshots(fixtureDirectory.path().string());
+    const auto snapshots =
+        OpenAIAdapter::collectCodexTokenUsageSnapshots(fixtureDirectory.path().string()).observations;
     REQUIRE(snapshots.size() == 3);
     REQUIRE(snapshots[0].totalTokens == 150);
     REQUIRE(snapshots[1].totalTokens == 300);

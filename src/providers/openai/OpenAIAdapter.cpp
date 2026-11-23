@@ -815,8 +815,9 @@ CodexRateLimitSnapshot OpenAIAdapter::parseLatestCodexRateLimitSnapshotFromRollo
     return latestSnapshot;
 }
 
-std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::parseCodexTokenUsageFromRolloutFile(
-    const std::string& filePath) {
+std::vector<CodexTokenUsageSnapshot>
+OpenAIAdapter::parseCodexTokenUsageFromRolloutFile(const std::string& filePath,
+                                                   std::vector<CodexTokenUsageSnapshot>* savedCounters) {
     std::vector<CodexTokenUsageSnapshot> snapshots;
 
     std::ifstream in(filePath);
@@ -905,7 +906,14 @@ std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::parseCodexTokenUsageFromRoll
         if (hasCumulative) {
             cumulative = nextCumulative;
         }
+        const auto rememberSavedCounter = [&] {
+            // A counter suppressed for new collection may still be present in older SQLite history.
+            if (savedCounters && hasCumulative && nextCumulative.eventSubsecondNs.has_value()) {
+                savedCounters->push_back(nextCumulative);
+            }
+        };
         if (repeatedCounter || hasRequestLedger) {
+            rememberSavedCounter();
             continue;
         }
 
@@ -921,6 +929,7 @@ std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::parseCodexTokenUsageFromRoll
             (hasCumulative && (snapshot.inputTokens > nextCumulative.inputTokens ||
                                snapshot.outputTokens > nextCumulative.outputTokens)) ||
             (!hasCumulative && lastStandalone && sameCodexUsage(*lastStandalone, snapshot))) {
+            rememberSavedCounter();
             continue;
         }
         lastStandalone = snapshot;
@@ -935,18 +944,17 @@ std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::parseCodexTokenUsageFromRoll
     return snapshots;
 }
 
-std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::collectCodexTokenUsageSnapshots(
-    const std::string& directoryPath) {
-    std::vector<CodexTokenUsageSnapshot> allSnapshots;
+CodexTokenUsageBatch OpenAIAdapter::collectCodexTokenUsageSnapshots(const std::string& directoryPath) {
+    CodexTokenUsageBatch batch;
 
     if (directoryPath.empty()) {
-        return allSnapshots;
+        return batch;
     }
 
     std::error_code ec;
     const std::filesystem::path root(directoryPath);
     if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
-        return allSnapshots;
+        return batch;
     }
 
     // A resumed session keeps its original filename and directory.
@@ -969,30 +977,29 @@ std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::collectCodexTokenUsageSnapsh
     const auto filesToScan = std::min(recent.size(), kMaxRolloutFilesToScan);
     std::partial_sort(recent.begin(), recent.begin() + filesToScan, recent.end(), std::greater<>());
     for (std::size_t index = 0; index < filesToScan; ++index) {
-        auto snapshots = parseCodexTokenUsageFromRolloutFile(recent[index].second.string());
-        allSnapshots.insert(allSnapshots.end(), std::make_move_iterator(snapshots.begin()),
-                            std::make_move_iterator(snapshots.end()));
+        auto snapshots = parseCodexTokenUsageFromRolloutFile(recent[index].second.string(), &batch.savedCounters);
+        batch.observations.insert(batch.observations.end(), std::make_move_iterator(snapshots.begin()),
+                                  std::make_move_iterator(snapshots.end()));
     }
 
-    std::stable_sort(
-        allSnapshots.begin(), allSnapshots.end(),
-        [](const CodexTokenUsageSnapshot& a, const CodexTokenUsageSnapshot& b) { return a.eventTime < b.eventTime; });
-
-    constexpr std::size_t kMaxSnapshotsToRetain = 1000;
-    if (allSnapshots.size() > kMaxSnapshotsToRetain) {
-        allSnapshots.erase(
-            allSnapshots.begin(),
-            allSnapshots.begin() + (allSnapshots.size() - kMaxSnapshotsToRetain));
-    }
-
-    return allSnapshots;
+    const auto retainRecent = [](std::vector<CodexTokenUsageSnapshot>& snapshots) {
+        std::stable_sort(snapshots.begin(), snapshots.end(),
+                         [](const CodexTokenUsageSnapshot& a, const CodexTokenUsageSnapshot& b) {
+                             return a.eventTime < b.eventTime;
+                         });
+        constexpr std::size_t kMaxSnapshotsToRetain = 1000;
+        if (snapshots.size() > kMaxSnapshotsToRetain) {
+            snapshots.erase(snapshots.begin(), snapshots.end() - kMaxSnapshotsToRetain);
+        }
+    };
+    retainRecent(batch.observations);
+    retainRecent(batch.savedCounters);
+    return batch;
 }
 
 bool OpenAIAdapter::persistCodexTokenUsageSnapshots(StorageService& storage, int providerId, int accountId,
-                                                    const std::vector<CodexTokenUsageSnapshot>& snapshots) {
-    std::vector<PersistedUsageEvent> events;
-    events.reserve(snapshots.size());
-    for (const auto& snapshot : snapshots) {
+                                                    const CodexTokenUsageBatch& batch) {
+    const auto makeEvent = [&](const CodexTokenUsageSnapshot& snapshot) {
         PersistedUsageEvent event;
         event.providerId = providerId;
         event.accountId = accountId;
@@ -1006,18 +1013,29 @@ bool OpenAIAdapter::persistCodexTokenUsageSnapshots(StorageService& storage, int
         event.outputTokens = snapshot.outputTokens;
         event.totalTokens = snapshot.totalTokens;
         event.rawReference = snapshot.sourcePath;
-        events.push_back(event);
+        return event;
+    };
 
+    std::vector<PersistedUsageEvent> events;
+    std::vector<PersistedUsageEvent> savedCounters;
+    events.reserve(batch.observations.size());
+    savedCounters.reserve(batch.savedCounters.size());
+    for (const auto& snapshot : batch.observations) {
+        events.push_back(makeEvent(snapshot));
         if (const auto& totals = snapshot.cumulativeAtRequest) {
+            auto event = events.back();
             // Link a legacy baseline to the request from the same token_count record.
             event.requestType = "codex_turn";
             event.inputTokens = totals->inputTokens;
             event.outputTokens = totals->outputTokens;
             event.totalTokens = totals->totalTokens;
-            events.push_back(std::move(event));
+            savedCounters.push_back(std::move(event));
         }
     }
-    return storage.insertUsageEvents(events);
+    for (const auto& snapshot : batch.savedCounters) {
+        savedCounters.push_back(makeEvent(snapshot));
+    }
+    return storage.insertUsageEvents(events, savedCounters);
 }
 
 std::string OpenAIAdapter::resolveCodexRolloutDirectory() {

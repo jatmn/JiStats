@@ -52,6 +52,11 @@ struct CodexTokenUsageSnapshot {
     std::optional<CumulativeTotals> cumulativeAtRequest;
 };
 
+struct CodexTokenUsageBatch {
+    std::vector<CodexTokenUsageSnapshot> observations;
+    std::vector<CodexTokenUsageSnapshot> savedCounters;
+};
+
 class OpenAIAdapter : public IProviderAdapter {
 public:
     OpenAIAdapter(const std::string& apiKey = "", const std::string& groupId = "");
@@ -74,12 +79,12 @@ public:
         const std::string& directoryPath);
 
     // Codex token-usage extraction
-    static std::vector<CodexTokenUsageSnapshot> parseCodexTokenUsageFromRolloutFile(
-        const std::string& filePath);
-    static std::vector<CodexTokenUsageSnapshot> collectCodexTokenUsageSnapshots(
-        const std::string& directoryPath);
+    static std::vector<CodexTokenUsageSnapshot>
+    parseCodexTokenUsageFromRolloutFile(const std::string& filePath,
+                                        std::vector<CodexTokenUsageSnapshot>* savedCounters = nullptr);
+    static CodexTokenUsageBatch collectCodexTokenUsageSnapshots(const std::string& directoryPath);
     static bool persistCodexTokenUsageSnapshots(StorageService& storage, int providerId, int accountId,
-                                                const std::vector<CodexTokenUsageSnapshot>& snapshots);
+                                                const CodexTokenUsageBatch& batch);
     static std::string resolveCodexRolloutDirectory();
 
 private:

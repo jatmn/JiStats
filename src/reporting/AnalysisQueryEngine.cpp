@@ -1976,7 +1976,10 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             formatTimeUtcIso(throughputNow)};
         appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
         appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");
-        sql += " ORDER BY ue.event_time_utc ASC, ue.event_subsecond_ns ASC, ue.id ASC;";
+        // Use stored row order for a rollout second if any counter still has whole-second precision.
+        sql += " ORDER BY ue.event_time_utc, "
+               "CASE WHEN MAX(ue.request_type = 'codex_turn' AND ue.event_subsecond_ns IS NULL) "
+               "OVER (PARTITION BY ue.raw_reference, ue.event_time_utc) = 0 THEN ue.event_subsecond_ns END, ue.id;";
 
         QueryResult result = storage_->execute(sql, params);
         if (result.success() && result.rowCount() > 0) {
@@ -2054,8 +2057,12 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
 
                 const UsageSample baseline = previous->second;
                 previous->second = counter;
-                legacyEstimated = legacyEstimated || counter.time.seconds - baseline.time.seconds > 300;
-                if (!definitelyBefore(baseline.time, counter.time) || counter.tokens <= baseline.tokens) {
+                const bool usesStoredOrder = baseline.time.seconds == counter.time.seconds &&
+                                             (!baseline.time.subsecondNs || !counter.time.subsecondNs);
+                legacyEstimated =
+                    legacyEstimated || usesStoredOrder || counter.time.seconds - baseline.time.seconds > 300;
+                if ((!usesStoredOrder && !definitelyBefore(baseline.time, counter.time)) ||
+                    counter.tokens <= baseline.tokens) {
                     continue;
                 }
 

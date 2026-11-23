@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- Codex replay recovers the time of saved counters that were superseded by recorded requests. Analysis preserves stored counter order when any counter in that second still lacks fractional timing. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 459 Windows cases passed under Wine.
+
 - Codex replay links saved cumulative counters to requests recovered from the same source line. Analysis credits that request to the interval ending at its counter. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 458 Windows cases passed under Wine.
 
 - Codex throughput uses subsecond source timestamps when reconciling recorded requests with counters. Subscription histories retain known billing dates across partial observations and start fresh when a reset is established. The dashboard rollup test uses a fixed UTC time of day. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 457 Windows cases passed under Wine.

@@ -4467,14 +4467,14 @@ public:
             if (!codexRolloutDir.empty()) {
                 std::error_code ec;
                 if (std::filesystem::exists(codexRolloutDir, ec)) {
-                    const auto snapshots = OpenAIAdapter::collectCodexTokenUsageSnapshots(codexRolloutDir);
-                    if (!snapshots.empty()) {
+                    const auto batch = OpenAIAdapter::collectCodexTokenUsageSnapshots(codexRolloutDir);
+                    if (!batch.observations.empty() || !batch.savedCounters.empty()) {
                         const auto providerId = findProviderIdByKey(storageService, "openai");
                         const auto accountId =
                             ensureRuntimeTrackingAccountId(storageService, "openai", "OpenAI");
                         if (providerId && accountId &&
                             OpenAIAdapter::persistCodexTokenUsageSnapshots(storageService, *providerId, *accountId,
-                                                                           snapshots)) {
+                                                                           batch)) {
                             importedActivity = true;
                         }
                     }

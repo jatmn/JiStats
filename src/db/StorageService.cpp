@@ -3002,13 +3002,14 @@ bool StorageService::upsertCodexThreadImportState(const PersistedCodexThreadImpo
     return true;
 }
 
-bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& events) {
+bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& events,
+                                       const std::vector<PersistedUsageEvent>& savedCodexCounters) {
     if (!isOpen()) {
         pImpl->lastError = "Database not open";
         return false;
     }
 
-    if (events.empty()) {
+    if (events.empty() && savedCodexCounters.empty()) {
         return true;
     }
 
@@ -3082,9 +3083,10 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
     }
 
     bool success = true;
-    for (const auto& event : events) {
-        const bool linksCodexBaseline = event.sourceType == "codex_local_rollout" &&
-                                        event.requestType == "codex_turn" && event.sourceRunId.rfind("line:", 0) == 0;
+    for (std::size_t i = 0; i < events.size() + savedCodexCounters.size(); ++i) {
+        const bool updateOnly = i >= events.size();
+        const auto& event = updateOnly ? savedCodexCounters[i - events.size()] : events[i];
+        const bool linksCodexBaseline = updateOnly && event.sourceRunId.rfind("line:", 0) == 0;
         const auto existing = findUsageEvent(event, linksCodexBaseline);
         if (!existing.success()) {
             pImpl->lastError = "Failed to check for duplicate usage event";
@@ -3109,8 +3111,7 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
             }
             continue;
         }
-        // A paired counter upgrades existing history only. The request is the fresh observation.
-        if (linksCodexBaseline) {
+        if (updateOnly) {
             continue;
         }
 

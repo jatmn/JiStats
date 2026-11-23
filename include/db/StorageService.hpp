@@ -417,7 +417,8 @@ public:
     bool deleteUsageRollupsOlderThan(UsageRollupResolution resolution, std::time_t olderThan);
 
     // Batch persist usage events for backfill/recovery
-    bool insertUsageEvents(const std::vector<PersistedUsageEvent>& events);
+    bool insertUsageEvents(const std::vector<PersistedUsageEvent>& events,
+                           const std::vector<PersistedUsageEvent>& savedCodexCounters = {});
     std::vector<PersistedUsageEvent> getUsageEvents(
         int providerId,
         int accountId,
