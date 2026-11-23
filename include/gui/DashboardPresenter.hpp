@@ -75,6 +75,7 @@ public:
 
     // Subscribe to preference changes from the dashboard UI
     void setPreferencesChangedCallback(std::function<void(const DashboardPreferences&)> callback);
+    void setCodexModelAttributionChangedCallback(std::function<void(bool)> callback);
     void setPreferencesOpenedCallback(std::function<void()> callback);
     void setPeriodicRefreshCallback(std::function<void()> callback);
 
@@ -176,6 +177,7 @@ private:
 struct DashboardPreferences {
     bool taskbarOverlayEnabled = true;
     bool openaiSubscriptionTrackingEnabled = false;
+    bool codexModelAttributionEnabled = false;
     bool miniMaxSubscriptionTrackingEnabled = false;
     bool claudeCodeEnabled = false;
     bool kimiCodeEnabled = false;

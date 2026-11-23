@@ -81,7 +81,8 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromDefaultSource(std
     return importFromSource({}, now);
 }
 
-CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std::string& sourcePath, std::time_t now) {
+CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std::string& sourcePath, std::time_t now,
+                                                                      int attributionGeneration) {
     if (now <= 0) now = std::time(nullptr);
     CodexLocalUsageImportResult result;
 
@@ -95,8 +96,11 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
 
     result.rowsRead = static_cast<int>(readResult.threads.size());
 
-    const auto existingSource =
-        storage_.getCodexLocalSource(readResult.sourcePath, readResult.sourceIdentity);
+    // Each consent period starts with independent checkpoints.
+    const std::string sourceIdentity =
+        attributionGeneration > 0 ? readResult.sourceIdentity + "#attribution-" + std::to_string(attributionGeneration)
+                                  : readResult.sourceIdentity;
+    const auto existingSource = storage_.getCodexLocalSource(readResult.sourcePath, sourceIdentity);
     const bool sourceBaselineEstablished = existingSource.has_value();
     const std::time_t sourceBaselineAt = existingSource.has_value() && existingSource->firstSeenAt > 0
         ? existingSource->firstSeenAt
@@ -105,7 +109,7 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
     PersistedCodexLocalSource source;
     source.sourcePath = readResult.sourcePath;
     source.sourceKind = "codex_state_sqlite";
-    source.sourceIdentity = readResult.sourceIdentity;
+    source.sourceIdentity = sourceIdentity;
     source.firstSeenAt = sourceBaselineEstablished && existingSource->firstSeenAt > 0
         ? existingSource->firstSeenAt
         : now;

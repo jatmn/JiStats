@@ -4944,6 +4944,108 @@ TEST_CASE("AppController defaults all shipped provider tracking to disabled on a
     app.shutdown();
 }
 
+TEST_CASE("AppController requires explicit consent to read Codex SQLite model attribution", "[app][runtime][codex]") {
+    requireSqlite();
+
+    TempTestDirectory codexHome("jistats_codex_attribution");
+    ScopedEnvironmentVariable codexHomeVariable("CODEX_HOME", codexHome.path().string());
+    StorageService codexDb;
+    REQUIRE(codexDb.init((codexHome.path() / "state_5.sqlite").string()));
+    REQUIRE(codexDb
+                .execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT, "
+                         "reasoning_effort TEXT, tokens_used INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER);")
+                .success());
+    const std::string createdAtMs = std::to_string((std::time(nullptr) - 60) * 1000LL);
+    REQUIRE(codexDb
+                .execute("INSERT INTO threads VALUES ('thread-1', 'hicap-ai', 'gpt-test', 'high', 100, ?, ?);",
+                         {createdAtMs, createdAtMs})
+                .success());
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto sourceCount = [&storage]() {
+        const auto result = storage.execute("SELECT COUNT(*) FROM codex_local_sources;");
+        REQUIRE(result.success());
+        return result.getInt(0, 0);
+    };
+
+    const auto codexTokens = [&storage]() {
+        const auto result = storage.execute("SELECT COALESCE(SUM(total_tokens), 0) FROM usage_events "
+                                            "WHERE source_type = 'codex_local_sqlite';");
+        REQUIRE(result.success());
+        return result.getInt64(0, 0);
+    };
+    const auto updateSource = [&codexDb](int tokens) {
+        REQUIRE(codexDb
+                    .execute("UPDATE threads SET tokens_used = ?, updated_at_ms = updated_at_ms + 1000 "
+                             "WHERE id = 'thread-1';",
+                             {std::to_string(tokens)})
+                    .success());
+    };
+    const auto startController = [&dbPath](AppController& app) {
+        app.setHeadlessForTesting(true);
+        app.setDatabasePathForTesting(dbPath.path());
+        REQUIRE(app.init());
+    };
+
+    AppController app;
+    startController(app);
+    DashboardPreferences preferences = app.getDashboardViewModelForTesting().preferences;
+    REQUIRE(preferences.openaiSubscriptionTrackingEnabled);
+    CHECK_FALSE(preferences.codexModelAttributionEnabled);
+    CHECK(sourceCount() == 0);
+
+    updateSource(200);
+    app.refreshRuntimeForTesting();
+    CHECK(sourceCount() == 0);
+    CHECK(codexTokens() == 0);
+
+    preferences.openaiSubscriptionTrackingEnabled = false;
+    preferences.codexModelAttributionEnabled = true;
+    app.applyDashboardPreferencesForTesting(preferences);
+    REQUIRE(app.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+    REQUIRE(sourceCount() == 1);
+    CHECK(codexTokens() == 0);
+
+    updateSource(250);
+    app.refreshRuntimeForTesting();
+    CHECK(codexTokens() == 50);
+    app.shutdown();
+
+    updateSource(300);
+    AppController restarted;
+    startController(restarted);
+    preferences = restarted.getDashboardViewModelForTesting().preferences;
+    CHECK_FALSE(preferences.openaiSubscriptionTrackingEnabled);
+    REQUIRE(preferences.codexModelAttributionEnabled);
+    CHECK(sourceCount() == 1);
+    CHECK(codexTokens() == 100);
+
+    preferences.codexModelAttributionEnabled = false;
+    restarted.applyDashboardPreferencesForTesting(preferences);
+    CHECK_FALSE(restarted.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+    updateSource(900);
+    restarted.refreshRuntimeForTesting();
+    CHECK(codexTokens() == 100);
+    restarted.shutdown();
+
+    AppController disabled;
+    startController(disabled);
+    preferences = disabled.getDashboardViewModelForTesting().preferences;
+    REQUIRE_FALSE(preferences.codexModelAttributionEnabled);
+    CHECK(codexTokens() == 100);
+
+    preferences.codexModelAttributionEnabled = true;
+    disabled.applyDashboardPreferencesForTesting(preferences);
+    REQUIRE(sourceCount() == 2);
+    CHECK(codexTokens() == 100);
+    updateSource(950);
+    disabled.refreshRuntimeForTesting();
+    CHECK(codexTokens() == 150);
+}
+
 TEST_CASE("AppController rehydrates persisted provider tracking preferences", "[app][runtime]") {
     requireSqlite();
 
