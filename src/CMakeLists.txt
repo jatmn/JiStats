@@ -70,6 +70,7 @@ set(JISTATS_HEADERS
     include/analytics/AnalyticsEngine.hpp
     include/analytics/GapClassifier.hpp
     include/gui/DashboardPresenter.hpp
+    include/gui/DesktopTheme.hpp
     include/gui/NotificationService.hpp
     include/reporting/ReportingService.hpp
     include/reporting/HtmlExporter.hpp
@@ -328,6 +329,7 @@ if(WIN32)
     target_link_libraries(JiStats PRIVATE
         comctl32
         comdlg32
+        uxtheme
         gdiplus
         user32
         gdi32

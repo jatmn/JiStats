@@ -1,4 +1,5 @@
 #include "gui/AnalysisPresenter.hpp"
+#include "gui/DesktopTheme.hpp"
 
 #include <algorithm>
 #include <array>
@@ -322,6 +323,7 @@ class AnalysisPresenter::Impl {
             return false;
         }
         parent = owner;
+        theme.refresh();
         INITCOMMONCONTROLSEX commonControls{sizeof(INITCOMMONCONTROLSEX), ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES};
         InitCommonControlsEx(&commonControls);
 
@@ -358,7 +360,8 @@ class AnalysisPresenter::Impl {
         scopeSummary = makeLabel(parent, L"");
         scopeStatus = makeLabel(parent, L"");
 
-        tabs = makeControl(parent, WC_TABCONTROLW, L"History views", WS_TABSTOP | WS_CLIPSIBLINGS);
+        tabs = makeControl(parent, WC_TABCONTROLW, L"History views", WS_TABSTOP | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED);
+        theme.styleTab(tabs);
         for (int index = 0; index < static_cast<int>(std::size(kPageTitles)); ++index) {
             TCITEMW item{};
             item.mask = TCIF_TEXT;
@@ -369,6 +372,7 @@ class AnalysisPresenter::Impl {
         body = makeControl(viewport, L"STATIC", L"", WS_CLIPCHILDREN, 0, WS_EX_CONTROLPARENT);
         if (!body || !tabs || !scopeGroup || !providerCombo || !accountCombo || !rangeCombo || !customStartEdit ||
             !customEndEdit || !SetWindowSubclass(parent, parentSubclass, 1, reinterpret_cast<DWORD_PTR>(this)) ||
+            !SetWindowSubclass(viewport, viewportSubclass, 1, reinterpret_cast<DWORD_PTR>(this)) ||
             !SetWindowSubclass(body, bodySubclass, 1, reinterpret_cast<DWORD_PTR>(this))) {
             shutdown();
             return false;
@@ -417,6 +421,7 @@ class AnalysisPresenter::Impl {
             RemoveWindowSubclass(body, bodySubclass, 1);
         }
         if (viewport != nullptr) {
+            RemoveWindowSubclass(viewport, viewportSubclass, 1);
             DestroyWindow(viewport);
         }
         for (HWND window : headerControls()) {
@@ -823,6 +828,7 @@ class AnalysisPresenter::Impl {
     HWND qualityText = nullptr;
     HWND codexGroup = nullptr;
     HWND codexText = nullptr;
+    DesktopTheme theme;
     HFONT font = nullptr;
     UINT dpi = 96;
 
@@ -1409,9 +1415,32 @@ class AnalysisPresenter::Impl {
         return true;
     }
 
+    static LRESULT CALLBACK viewportSubclass(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR,
+                                             DWORD_PTR context) {
+        const auto& self = *reinterpret_cast<const Impl*>(context);
+        if (const auto result = self.theme.panelMessage(window, message, wParam, lParam)) {
+            return *result;
+        }
+        return DefSubclassProc(window, message, wParam, lParam);
+    }
+
     static LRESULT CALLBACK parentSubclass(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR,
                                            DWORD_PTR context) {
         auto& self = *reinterpret_cast<Impl*>(context);
+        if (const auto result = self.theme.panelMessage(window, message, wParam, lParam)) {
+            return *result;
+        }
+        if (message == WM_DRAWITEM && lParam != 0) {
+            const auto& draw = *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (draw.hwndItem == self.tabs) {
+                self.theme.drawTab(draw);
+                return TRUE;
+            }
+        }
+        if (message == WM_SETTINGCHANGE || message == WM_SYSCOLORCHANGE || message == WM_THEMECHANGED) {
+            self.theme.refresh();
+            RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+        }
         if (message == WM_NOTIFY && lParam != 0) {
             const auto& notification = *reinterpret_cast<const NMHDR*>(lParam);
             if (notification.hwndFrom == self.tabs && notification.code == TCN_SELCHANGE) {
@@ -1433,6 +1462,9 @@ class AnalysisPresenter::Impl {
     static LRESULT CALLBACK bodySubclass(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR,
                                          DWORD_PTR context) {
         auto& self = *reinterpret_cast<Impl*>(context);
+        if (const auto result = self.theme.panelMessage(window, message, wParam, lParam)) {
+            return *result;
+        }
         switch (message) {
             case WM_COMMAND:
                 if (self.handleCommand(LOWORD(wParam), HIWORD(wParam))) {
@@ -1552,7 +1584,7 @@ class AnalysisPresenter::Impl {
         for (size_t index = 0; index < points.size(); ++index) {
             const int x = activityX(index, plot);
             const bool selected = static_cast<int>(index) == selectedActivityPoint;
-            SetDCBrushColor(dc, GetSysColor(selected ? COLOR_WINDOWTEXT : COLOR_HIGHLIGHT));
+            SetDCBrushColor(dc, selected ? theme.color(RGB(160, 83, 12), COLOR_WINDOWTEXT) : theme.accentColor());
             if (points[index].activityCount > 0) {
                 const int y = plotY(static_cast<double>(points[index].activityCount) / peak->activityCount, plot);
                 const RECT bar{x - halfBar + 1, std::min<int>(y, plot.bottom - 1), x + halfBar, plot.bottom};
@@ -1580,7 +1612,7 @@ class AnalysisPresenter::Impl {
                 LineTo(dc, x, plot.bottom);
             }
         }
-        SetDCPenColor(dc, GetSysColor(COLOR_HIGHLIGHT));
+        SetDCPenColor(dc, theme.accentColor());
         MoveToEx(dc, quotaX(series, 0, plot), plotY(points.front().remainingPercentage / 100.0, plot), nullptr);
         for (size_t index = 1; index < points.size(); ++index) {
             LineTo(dc, quotaX(series, index, plot), plotY(points[index].remainingPercentage / 100.0, plot));
@@ -1594,7 +1626,7 @@ class AnalysisPresenter::Impl {
             const int y = plotY(points[index].remainingPercentage / 100.0, plot);
             const bool selected = static_cast<int>(index) == selectedQuotaPoint;
             const int radius = px(selected ? 4 : 2);
-            SetDCBrushColor(dc, GetSysColor(selected ? COLOR_WINDOWTEXT : COLOR_HIGHLIGHT));
+            SetDCBrushColor(dc, selected ? theme.color(RGB(160, 83, 12), COLOR_WINDOWTEXT) : theme.accentColor());
             const RECT marker{x - radius, y - radius, x + radius + 1, y + radius + 1};
             FillRect(dc, &marker, markerBrush);
         }

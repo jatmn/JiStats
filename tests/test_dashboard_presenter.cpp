@@ -440,6 +440,81 @@ TEST_CASE("DashboardPresenter runs MiniMax credential actions asynchronously", "
     presenter.shutdown();
 }
 
+TEST_CASE("Dashboard, Settings and Analysis share panel and label backgrounds", "[dashboard_presenter][theme]") {
+    AnalysisPresenter analysisPresenter;
+    DashboardPresenter presenter;
+    REQUIRE(presenter.init());
+    presenter.setAnalysisPresenter(&analysisPresenter);
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(
+        waitForCondition([&]() { return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    REQUIRE(dashboard != nullptr);
+    REQUIRE(settings != nullptr);
+    const HWND checkbox = FindWindowExW(settings, nullptr, L"BUTTON", L"Enable taskbar overlay");
+    const HWND settingsTab = FindWindowExW(settings, nullptr, WC_TABCONTROLW, nullptr);
+    const HWND history = FindWindowExW(dashboard, nullptr, L"BUTTON", L"&History...");
+    REQUIRE(checkbox != nullptr);
+    REQUIRE(settingsTab != nullptr);
+    REQUIRE(history != nullptr);
+
+    SendMessageW(history, BM_CLICK, 0, 0);
+    HWND analysis = nullptr;
+    REQUIRE(waitForCondition(
+        [&]() {
+            analysis = FindWindowW(L"JiStatsAnalysisWindow", nullptr);
+            return analysis != nullptr && IsWindowVisible(analysis);
+        },
+        std::chrono::milliseconds(4000)));
+    const HWND label = FindWindowExW(analysis, nullptr, L"STATIC", L"Provider");
+    REQUIRE(label != nullptr);
+
+    RECT pane{};
+    GetClientRect(settingsTab, &pane);
+    TabCtrl_AdjustRect(settingsTab, FALSE, &pane);
+    const HDC screen = GetDC(nullptr);
+    const HDC dc = CreateCompatibleDC(screen);
+    const HBITMAP bitmap = CreateCompatibleBitmap(screen, 1, 1);
+    ReleaseDC(nullptr, screen);
+    REQUIRE(dc != nullptr);
+    REQUIRE(bitmap != nullptr);
+    const HGDIOBJ previous = SelectObject(dc, bitmap);
+
+    auto paintPixel = [&](HWND window, UINT message, LPARAM argument, POINT position) {
+        SetWindowOrgEx(dc, position.x, position.y, nullptr);
+        SetPixel(dc, position.x, position.y, RGB(255, 0, 255));
+        const auto result = SendMessageW(window, message, reinterpret_cast<WPARAM>(dc), argument);
+        if (message == WM_CTLCOLORSTATIC || message == WM_CTLCOLORBTN) {
+            const RECT pixel{position.x, position.y, position.x + 1, position.y + 1};
+            FillRect(dc, &pixel, reinterpret_cast<HBRUSH>(result));
+        }
+        return GetPixel(dc, position.x, position.y);
+    };
+
+    const COLORREF dashboardPanel = paintPixel(dashboard, WM_ERASEBKGND, 0, {0, 100});
+    const COLORREF settingsPanel = paintPixel(settings, WM_ERASEBKGND, 0, {0, 0});
+    const COLORREF tabPane = paintPixel(settingsTab, WM_PRINTCLIENT, PRF_CLIENT, {pane.left + 12, pane.bottom - 12});
+    const COLORREF checkboxPanel = paintPixel(settings, WM_CTLCOLORBTN, reinterpret_cast<LPARAM>(checkbox), {0, 0});
+    const COLORREF analysisPanel = paintPixel(analysis, WM_ERASEBKGND, 0, {0, 0});
+    const COLORREF labelPanel = paintPixel(analysis, WM_CTLCOLORSTATIC, reinterpret_cast<LPARAM>(label), {0, 0});
+    SelectObject(dc, previous);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+
+    HIGHCONTRASTW contrast{};
+    contrast.cbSize = sizeof(contrast);
+    const bool highContrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) &&
+                              (contrast.dwFlags & HCF_HIGHCONTRASTON);
+    CHECK(dashboardPanel == (highContrast ? GetSysColor(COLOR_BTNFACE) : RGB(236, 233, 216)));
+    CHECK(settingsPanel == dashboardPanel);
+    CHECK(tabPane == settingsPanel);
+    CHECK(checkboxPanel == settingsPanel);
+    CHECK(analysisPanel == dashboardPanel);
+    CHECK(labelPanel == analysisPanel);
+}
+
 TEST_CASE("DashboardPresenter handles native close safely", "[dashboard_presenter]") {
     DashboardPresenter presenter;
     REQUIRE(presenter.init());

@@ -105,6 +105,7 @@ if(WIN32)
     target_link_libraries(JiStatsTests PRIVATE
         comctl32
         comdlg32
+        uxtheme
         user32
         gdi32
         gdiplus

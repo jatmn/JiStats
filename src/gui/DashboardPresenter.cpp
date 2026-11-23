@@ -1,5 +1,6 @@
 #include "gui/DashboardPresenter.hpp"
 #include "gui/AnalysisPresenter.hpp"
+#include "gui/DesktopTheme.hpp"
 #include "db/StorageService.hpp"
 #include "db/SettingsService.hpp"
 #include "platform/WindowsAppAssets.hpp"
@@ -1258,7 +1259,7 @@ public:
     std::string miniMaxFeedbackMessage;
     bool threadReady = false;
     bool viewModelSyncPending = false;
-    bool dashboardHighContrast = false;
+    DesktopTheme desktopTheme;
     HFONT titleFont = nullptr;
     HFONT bodyFont = nullptr;
     HFONT dashboardBodyFont = nullptr;
@@ -1732,21 +1733,13 @@ public:
         const auto setFont = [](HWND control, HFONT font) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
         };
-        const HWND bodyControls[] = {historyButton,
-                                     dashboardSettingsButton,
-                                     mainTab,
-                                     recoveryValue,
-                                     scheduledExportValue,
-                                     updatedValue,
-                                     offlineNoticeMessage,
-                                     offlineRetryButton,
-                                     offlineDismissButton,
-                                     quotaEmptyText,
-                                     activityText,
-                                     openAiUsageText,
-                                     hicapUsageText,
-                                     providerList,
-                                     statusBar};
+        const HWND bodyControls[] = {historyButton,      dashboardSettingsButton,
+                                     recoveryValue,      scheduledExportValue,
+                                     updatedValue,       offlineNoticeMessage,
+                                     offlineRetryButton, offlineDismissButton,
+                                     quotaEmptyText,     activityText,
+                                     openAiUsageText,    hicapUsageText,
+                                     providerList,       statusBar};
         for (HWND control : bodyControls) {
             setFont(control, dashboardBodyFont);
         }
@@ -1766,6 +1759,7 @@ public:
             setFont(row.bar, dashboardBodyFont);
         }
         setFont(titleLabel, dashboardTitleFont);
+        setFont(mainTab, dashboardLabelFont);
         SendMessageW(mainTab, TCM_SETITEMSIZE, 0, MAKELPARAM(scaledPixels(134), scaledPixels(26)));
         if (HWND header = ListView_GetHeader(providerList)) {
             setFont(header, dashboardLabelFont);
@@ -3045,6 +3039,7 @@ public:
             add(hwnd, L"BUTTON", L"&Settings...", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, kMenuFileSettingsId);
         mainTab = add(hwnd, WC_TABCONTROLW, L"",
                       WS_VISIBLE | WS_TABSTOP | TCS_BUTTONS | TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED, kMainTabId);
+        desktopTheme.styleTab(mainTab);
         const wchar_t* pageLabels[] = {L"Overview", L"Provider Details"};
         for (int index = 0; index < static_cast<int>(std::size(pageLabels)); ++index) {
             TCITEMW item{};
@@ -4245,18 +4240,10 @@ public:
 
     void createPreferencesControls(HWND hwnd) {
         preferencesTab = CreateWindowExW(
-            0,
-            WC_TABCONTROLW,
-            L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            12,
-            12,
-            520,
-            470,
-            hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesTabId)),
-            GetModuleHandleW(nullptr),
+            0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED, 12, 12,
+            520, 470, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesTabId)), GetModuleHandleW(nullptr),
             nullptr);
+        desktopTheme.styleTab(preferencesTab);
         const auto tabLabels = preferencesTabLabels();
         for (int index = 0; index < static_cast<int>(tabLabels.size()); ++index) {
             TCITEMW item{};
@@ -5174,10 +5161,27 @@ public:
     }
 
     LRESULT handlePreferencesMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (const auto result = desktopTheme.panelMessage(hwnd, msg, wParam, lParam)) {
+            return *result;
+        }
         switch (msg) {
-        case WM_CREATE:
-            createPreferencesControls(hwnd);
-            return 0;
+            case WM_SETTINGCHANGE:
+            case WM_SYSCOLORCHANGE:
+            case WM_THEMECHANGED:
+                desktopTheme.refresh();
+                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            case WM_CREATE:
+                createPreferencesControls(hwnd);
+                return 0;
+            case WM_DRAWITEM: {
+                const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+                if (draw != nullptr && draw->hwndItem == preferencesTab) {
+                    desktopTheme.drawTab(*draw);
+                    return TRUE;
+                }
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
         case WM_SIZE:
             layoutPreferencesControls(hwnd);
             return 0;
@@ -5418,31 +5422,43 @@ public:
     }
 
     LRESULT handleShellDialogMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (const auto result = desktopTheme.panelMessage(hwnd, msg, wParam, lParam)) {
+            return *result;
+        }
         const DashboardShellDialog dialog = shellDialogFromWindow(hwnd);
         switch (msg) {
-        case WM_CREATE:
-            createShellDialogControls(hwnd, dialog);
-            centerWindowOnOwner(hwnd, GetWindow(hwnd, GW_OWNER));
-            return 0;
-        case WM_COMMAND:
-            if (LOWORD(wParam) == kShellDialogCloseButtonId && HIWORD(wParam) == BN_CLICKED) {
+            case WM_SETTINGCHANGE:
+            case WM_SYSCOLORCHANGE:
+            case WM_THEMECHANGED:
+                desktopTheme.refresh();
+                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            case WM_CREATE:
+                createShellDialogControls(hwnd, dialog);
+                centerWindowOnOwner(hwnd, GetWindow(hwnd, GW_OWNER));
+                return 0;
+            case WM_COMMAND:
+                if (LOWORD(wParam) == kShellDialogCloseButtonId && HIWORD(wParam) == BN_CLICKED) {
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            case WM_CLOSE:
                 DestroyWindow(hwnd);
                 return 0;
-            }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
-        case WM_CLOSE:
-            DestroyWindow(hwnd);
-            return 0;
-        case WM_DESTROY:
-            RemovePropW(hwnd, kShellDialogKindProperty);
-            clearShellDialogState(dialog);
-            return 0;
-        default:
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            case WM_DESTROY:
+                RemovePropW(hwnd, kShellDialogKindProperty);
+                clearShellDialogState(dialog);
+                return 0;
+            default:
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
     }
 
     LRESULT handleAnalysisMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (const auto result = desktopTheme.panelMessage(hwnd, msg, wParam, lParam)) {
+            return *result;
+        }
         switch (msg) {
             case WM_CREATE: {
                 {
@@ -5540,8 +5556,8 @@ public:
     void drawCodexThroughputSummaryCell(const DRAWITEMSTRUCT& draw) {
         HDC dc = draw.hDC;
         RECT rect = draw.rcItem;
-        fillDashboardRect(dc, rect, dashboardColor(RGB(240, 244, 250), COLOR_WINDOW));
-        if (dashboardHighContrast) {
+        DesktopTheme::fill(dc, rect, dashboardColor(RGB(240, 244, 250), COLOR_WINDOW));
+        if (desktopTheme.usesHighContrast()) {
             FrameRect(dc, &rect, GetSysColorBrush(COLOR_WINDOWTEXT));
         }
 
@@ -5621,7 +5637,7 @@ public:
             fitInitialDashboardBounds(hwnd);
             nextDashboardChartRefreshTick = GetTickCount64() + kDashboardChartRefreshIntervalMs;
             ensureFonts();
-            refreshDashboardColors();
+            desktopTheme.refresh();
             createMainMenuBar(hwnd);
             createMainControls(hwnd);
             syncViewModelToControls();
@@ -5647,18 +5663,18 @@ public:
         case WM_SETTINGCHANGE:
         case WM_SYSCOLORCHANGE:
         case WM_THEMECHANGED:
-            refreshDashboardColors();
+            desktopTheme.refresh();
             RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_ERASEBKGND: {
             RECT rect{};
             GetClientRect(hwnd, &rect);
             HDC dc = reinterpret_cast<HDC>(wParam);
-            fillDashboardRect(dc, rect, dashboardPanelColor());
+            DesktopTheme::fill(dc, rect, desktopTheme.panelColor());
             RECT banner{0, 0, rect.right, scaledPixels(46)};
-            fillDashboardRect(dc, banner, dashboardTitleColor());
+            DesktopTheme::fill(dc, banner, desktopTheme.accentColor());
             RECT bevel{0, banner.bottom, rect.right, banner.bottom + scaledPixels(3)};
-            fillDashboardRect(dc, bevel, dashboardColor(RGB(108, 160, 226), COLOR_3DSHADOW));
+            DesktopTheme::fill(dc, bevel, dashboardColor(RGB(108, 160, 226), COLOR_3DSHADOW));
             return 1;
         }
         case WM_MOUSEWHEEL:
@@ -5789,7 +5805,7 @@ public:
                     return FALSE;
                 }
                 if (draw->hwndItem == mainTab) {
-                    drawDashboardTab(*draw);
+                    desktopTheme.drawTab(*draw);
                     return TRUE;
                 }
                 if (isCodexThroughputSummaryControl(draw->hwndItem)) {
@@ -5815,7 +5831,7 @@ public:
             const bool header = control == titleLabel;
             const bool notice = control == offlineNoticeTitle || control == offlineNoticeMessage;
             const COLORREF background = notice   ? dashboardColor(RGB(255, 248, 216), COLOR_WINDOW)
-                                        : header ? dashboardTitleColor()
+                                        : header ? desktopTheme.accentColor()
                                                  : GetSysColor(COLOR_WINDOW);
             COLORREF foreground =
                 header ? dashboardColor(RGB(255, 255, 255), COLOR_HIGHLIGHTTEXT) : GetSysColor(COLOR_WINDOWTEXT);
@@ -6013,65 +6029,15 @@ public:
         }
     }
 
-    void refreshDashboardColors() {
-        HIGHCONTRASTW contrast{};
-        contrast.cbSize = sizeof(contrast);
-        dashboardHighContrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) &&
-                                (contrast.dwFlags & HCF_HIGHCONTRASTON);
-    }
-
     COLORREF dashboardColor(COLORREF color, int systemColor) const {
-        return dashboardHighContrast ? GetSysColor(systemColor) : color;
-    }
-
-    COLORREF dashboardPanelColor() const {
-        return dashboardColor(RGB(236, 233, 216), COLOR_3DFACE);
-    }
-
-    COLORREF dashboardTitleColor() const {
-        return dashboardColor(RGB(20, 68, 154), COLOR_HIGHLIGHT);
-    }
-
-    static void fillDashboardRect(HDC dc, const RECT& rect, COLORREF color) {
-        const COLORREF oldColor = SetDCBrushColor(dc, color);
-        FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
-        SetDCBrushColor(dc, oldColor);
-    }
-
-    void drawDashboardTab(const DRAWITEMSTRUCT& draw) {
-        const bool selected = static_cast<int>(draw.itemID) == TabCtrl_GetCurSel(mainTab);
-        HDC dc = draw.hDC;
-        RECT rect = draw.rcItem;
-        const int saved = SaveDC(dc);
-        fillDashboardRect(dc, rect,
-                          selected ? dashboardColor(RGB(255, 255, 255), COLOR_HIGHLIGHT) : dashboardPanelColor());
-        DrawEdge(dc, &rect, EDGE_RAISED, BF_RECT | BF_ADJUST);
-        if (selected && !dashboardHighContrast) {
-            RECT accent{rect.left, rect.top, rect.right, rect.top + scaledPixels(2)};
-            fillDashboardRect(dc, accent, RGB(232, 157, 43));
-        }
-        wchar_t label[64]{};
-        TCITEMW item{};
-        item.mask = TCIF_TEXT;
-        item.pszText = label;
-        item.cchTextMax = static_cast<int>(std::size(label));
-        SendMessageW(mainTab, TCM_GETITEMW, draw.itemID, reinterpret_cast<LPARAM>(&item));
-        SelectObject(dc, dashboardLabelFont);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, GetSysColor(selected && dashboardHighContrast ? COLOR_HIGHLIGHTTEXT : COLOR_BTNTEXT));
-        DrawTextW(dc, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        if (draw.itemState & ODS_FOCUS) {
-            InflateRect(&rect, -scaledPixels(2), -scaledPixels(2));
-            DrawFocusRect(dc, &rect);
-        }
-        RestoreDC(dc, saved);
+        return desktopTheme.color(color, systemColor);
     }
 
     void drawQuotaBar(const DRAWITEMSTRUCT& draw, const UsageProgressRow& row) {
         HDC dc = draw.hDC;
         const int saved = SaveDC(dc);
         const RECT rect = draw.rcItem;
-        fillDashboardRect(dc, rect, GetSysColor(COLOR_WINDOW));
+        DesktopTheme::fill(dc, rect, GetSysColor(COLOR_WINDOW));
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
 
@@ -6085,15 +6051,15 @@ public:
             }
 
             RECT track{left, rect.top + scaledPixels(17), right, rect.top + scaledPixels(28)};
-            fillDashboardRect(dc, track, dashboardColor(RGB(239, 241, 246), COLOR_WINDOW));
-            if (dashboardHighContrast) {
+            DesktopTheme::fill(dc, track, dashboardColor(RGB(239, 241, 246), COLOR_WINDOW));
+            if (desktopTheme.usesHighContrast()) {
                 FrameRect(dc, &track, GetSysColorBrush(COLOR_WINDOWTEXT));
                 InflateRect(&track, -1, -1);
             } else {
                 DrawEdge(dc, &track, EDGE_SUNKEN, BF_RECT | BF_ADJUST);
             }
             track.right = track.left + MulDiv(percentage, track.right - track.left, 100);
-            fillDashboardRect(dc, track, dashboardColor(color, COLOR_HIGHLIGHT));
+            DesktopTheme::fill(dc, track, dashboardColor(color, COLOR_HIGHLIGHT));
 
             RECT resetBounds{left, rect.top + scaledPixels(30), right, rect.bottom};
             SelectObject(dc, dashboardBodyFont);
@@ -6115,14 +6081,14 @@ public:
     void paintDashboardViewport(HWND hwnd) {
         PAINTSTRUCT paint{};
         HDC dc = BeginPaint(hwnd, &paint);
-        fillDashboardRect(dc, paint.rcPaint, dashboardPanelColor());
+        DesktopTheme::fill(dc, paint.rcPaint, desktopTheme.panelColor());
         const auto drawCard = [&](const RECT& card) {
             RECT visible{};
             if (!IntersectRect(&visible, &card, &paint.rcPaint)) {
                 return;
             }
-            fillDashboardRect(dc, card, GetSysColor(COLOR_WINDOW));
-            if (dashboardHighContrast) {
+            DesktopTheme::fill(dc, card, GetSysColor(COLOR_WINDOW));
+            if (desktopTheme.usesHighContrast()) {
                 FrameRect(dc, &card, GetSysColorBrush(COLOR_WINDOWTEXT));
             } else {
                 RECT edge = card;
@@ -6134,9 +6100,9 @@ public:
                 drawCard(card);
             }
             if (!IsRectEmpty(&noticeRect)) {
-                fillDashboardRect(dc, noticeRect, dashboardColor(RGB(255, 248, 216), COLOR_WINDOW));
+                DesktopTheme::fill(dc, noticeRect, dashboardColor(RGB(255, 248, 216), COLOR_WINDOW));
                 RECT accent{noticeRect.left, noticeRect.top, noticeRect.left + scaledPixels(3), noticeRect.bottom};
-                fillDashboardRect(dc, accent, dashboardColor(RGB(186, 114, 31), COLOR_WINDOWTEXT));
+                DesktopTheme::fill(dc, accent, dashboardColor(RGB(186, 114, 31), COLOR_WINDOWTEXT));
             }
         } else {
             drawCard(otherPageCard);
@@ -6597,8 +6563,8 @@ public:
         for (int tick = 0; tick <= 4; ++tick) {
             const int y = plot.bottom - (plot.bottom - plot.top) * tick / 4;
             RECT grid{plot.left, y, plot.right, y + 1};
-            fillDashboardRect(dc, grid,
-                              dashboardColor(tick == 0 ? RGB(185, 199, 221) : RGB(229, 235, 244), COLOR_WINDOWTEXT));
+            DesktopTheme::fill(dc, grid,
+                               dashboardColor(tick == 0 ? RGB(185, 199, 221) : RGB(229, 235, 244), COLOR_WINDOWTEXT));
             RECT left{plot.left - scaledPixels(55), y - labelHeight / 2, plot.left - gap, y + labelHeight / 2};
             const auto leftLabel = chartScaleLabel(leftScale * tick / 4);
             DrawTextW(dc, leftLabel.c_str(), -1, &left, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -6628,8 +6594,8 @@ public:
     }
 
     void drawEmptyChart(HDC dc, RECT rect, const wchar_t* text) {
-        fillDashboardRect(dc, rect, dashboardColor(RGB(245, 247, 251), COLOR_WINDOW));
-        if (dashboardHighContrast) {
+        DesktopTheme::fill(dc, rect, dashboardColor(RGB(245, 247, 251), COLOR_WINDOW));
+        if (desktopTheme.usesHighContrast()) {
             FrameRect(dc, &rect, GetSysColorBrush(COLOR_WINDOWTEXT));
         }
         SelectObject(dc, dashboardBodyFont);
@@ -6690,7 +6656,7 @@ public:
 
         const auto brush = static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
         const COLORREF previous = SetDCBrushColor(dc, modelSeriesColor(series));
-        const int saved = dashboardHighContrast ? SaveDC(dc) : 0;
+        const int saved = desktopTheme.usesHighContrast() ? SaveDC(dc) : 0;
         if (saved != 0 && ExtSelectClipRgn(dc, shape, RGN_AND) != ERROR) {
             FillRgn(dc, shape, GetSysColorBrush(COLOR_WINDOW));
             FrameRgn(dc, shape, brush, 1, 1);
@@ -6707,7 +6673,7 @@ public:
     void drawModelUsageSummary(const DRAWITEMSTRUCT& draw) {
         HDC dc = draw.hDC;
         const int saved = SaveDC(dc);
-        fillDashboardRect(dc, draw.rcItem, GetSysColor(COLOR_WINDOW));
+        DesktopTheme::fill(dc, draw.rcItem, GetSysColor(COLOR_WINDOW));
         SelectObject(dc, dashboardBodyFont);
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, dashboardColor(RGB(71, 88, 113), COLOR_WINDOWTEXT));
@@ -6775,7 +6741,7 @@ public:
                 points.push_back(plot.position(sample.bucketStartUtc, sample.totalTokens));
             }
         }
-        if (dashboardHighContrast) {
+        if (desktopTheme.usesHighContrast()) {
             plot.markers = contrastModelMarkers(plot.bounds, plot.seriesPoints);
         } else {
             for (size_t index = 0; index < plot.seriesPoints.size(); ++index) {
@@ -6909,7 +6875,7 @@ public:
     }
 
     void drawModelChartMarkers(HDC dc, const ModelChartPlot& plot) {
-        if (dashboardHighContrast) {
+        if (desktopTheme.usesHighContrast()) {
             const int saved = SaveDC(dc);
             SelectObject(dc, GetStockObject(DC_PEN));
             SetDCPenColor(dc, GetSysColor(COLOR_WINDOWTEXT));
@@ -6936,7 +6902,7 @@ public:
             return {};
         }
 
-        fillDashboardRect(dc, rect, GetSysColor(COLOR_WINDOW));
+        DesktopTheme::fill(dc, rect, GetSysColor(COLOR_WINDOW));
         const ModelChartPlot plot = modelChartPlot(rect, chart);
         drawChartAxes(dc, plot.bounds, plot.maxTokens);
         RECT units{rect.left, rect.top + scaledPixels(4), plot.bounds.right, plot.bounds.top};
@@ -6980,7 +6946,7 @@ public:
             return;
         }
 
-        fillDashboardRect(dc, rect, GetSysColor(COLOR_WINDOW));
+        DesktopTheme::fill(dc, rect, GetSysColor(COLOR_WINDOW));
         const RECT plot = dashboardPlotRect(rect, true);
         const LONG height = plot.bottom - plot.top;
         double maxTokens = 1.0;
@@ -7071,7 +7037,6 @@ public:
         preferencesClass.lpfnWndProc = &Impl::preferencesWindowProc;
         preferencesClass.hInstance = instance;
         preferencesClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        preferencesClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         preferencesClass.lpszClassName = preferencesWindowClassName();
         RegisterClassW(&preferencesClass);
 
@@ -7079,7 +7044,6 @@ public:
         analysisClass.lpfnWndProc = &Impl::analysisWindowProc;
         analysisClass.hInstance = instance;
         analysisClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        analysisClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         analysisClass.lpszClassName = analysisWindowClassName();
         RegisterClassW(&analysisClass);
 
@@ -7087,7 +7051,6 @@ public:
         shellDialogClass.lpfnWndProc = &Impl::shellDialogWindowProc;
         shellDialogClass.hInstance = instance;
         shellDialogClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        shellDialogClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         shellDialogClass.lpszClassName = shellDialogWindowClassName();
         RegisterClassW(&shellDialogClass);
 
