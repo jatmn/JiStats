@@ -9,9 +9,6 @@ jobs:
   image:
     name: Install and verify the native and MinGW tools
     runs-on: ${{ vars.JISTATS_IMAGE_GENERATOR || 'ubuntu-latest' }}
-    snapshot:
-      if: ${{ vars.JISTATS_IMAGE_GENERATOR != '' }}
-      image-name: jistats-linux-build
     steps:
       # Keep the snapshot free of repository credentials, sources and build outputs.
       - name: Install the toolchain
