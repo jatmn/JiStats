@@ -26,9 +26,10 @@ jobs:
     name: Detect build changes
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     outputs:
       build: ${{ steps.filter.outputs.build }}
+      selector: ${{ steps.selector.outcome }}
     steps:
       - name: Check out the tested revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,12 +37,17 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 2
           persist-credentials: false
+      - name: Verify required native CI inputs
+        id: selector
+        run: bash scripts/check_native_ci_selection.sh
       - name: Check whether the change can affect the build or tests
+        if: github.event_name == 'pull_request'
         id: filter
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          source scripts/native_ci_input.sh
           build=true
           files="$RUNNER_TEMP/jistats-changed-files"
           # Selection is safe only when the target branch enforces a merge queue.
@@ -56,20 +62,7 @@ jobs:
             git diff --no-ext-diff --no-renames --name-only -z "$GITHUB_SHA^1" "$GITHUB_SHA" -- > "$files"; then
             build=false
             while IFS= read -r -d '' file; do
-              case "$file" in
-                # Keep all files in test payload directories as build inputs.
-                docs/fixtures/kimi/synthetic_local_runtime/* | docs/fixtures/openai/chatgpt-export-redacted/*)
-                  ;;
-                *.md)
-                  continue ;;
-                docs/fixtures/* | .github/workflows/ci.yml | scripts/check_test_inventory.ps1)
-                  ;;
-                docs/*)
-                  continue ;;
-                # Keep the existing PR-only exemption for non-build metadata and scripts.
-                .github/* | scripts/* | LICENSE | .gitignore | .clang-format | .clang-tidy | assets/logo.png)
-                  continue ;;
-              esac
+              is_native_ci_input "$file" || continue
               build=true
               printf -v reason '%q' "$file"
               break
@@ -90,8 +83,9 @@ jobs:
     name: Portable tests with bundled SQLite
     needs: changes
     if: >-
-      ${{ !cancelled() && (github.event_name != 'pull_request' ||
-          needs.changes.result != 'success' || needs.changes.outputs.build != 'false') }}
+      ${{ !cancelled() && needs.changes.outputs.selector != 'failure' &&
+          (github.event_name != 'pull_request' || needs.changes.result != 'success' ||
+           needs.changes.outputs.build != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -138,8 +132,9 @@ jobs:
     name: Windows cross-build
     needs: changes
     if: >-
-      ${{ !cancelled() && (github.event_name != 'pull_request' ||
-          needs.changes.result != 'success' || needs.changes.outputs.build != 'false') }}
+      ${{ !cancelled() && needs.changes.outputs.selector != 'failure' &&
+          (github.event_name != 'pull_request' || needs.changes.result != 'success' ||
+           needs.changes.outputs.build != 'false') }}
     runs-on: ${{ vars.JISTATS_LINUX_BUILD_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     env:
@@ -152,6 +147,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Verify required native CI inputs after detector fallback
+        if: >-
+          ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
+              needs.changes.outputs.selector != 'success' }}
+        run: bash scripts/check_native_ci_selection.sh
       - name: Run Pullfrog authorization tests
         run: node --test scripts/pullfrog-review-check.test.mjs
       - name: Install MinGW-w64 and ImageMagick
