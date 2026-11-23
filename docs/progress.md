@@ -40,6 +40,18 @@ Record completed work, the revision and evidence, and any remaining verification
 
 - Refreshed the SHA-256-verified SQLite, spdlog (including bundled fmt), and Catch2 versions in [CMake](../CMakeLists.txt) and synced the [third-party notices](../THIRD_PARTY_NOTICES.md). Updated both Pullfrog action references and the owner command payload to 0.1.141. The [Linux CMake/Ninja build](../README.md#building-on-linux) passed CTest with bundled SQLite (125 cases, 920 assertions). The MinGW Release build produced the app, opt-in CLI and test executables, and UPX 5.3.0 verified the packed app. The workflow lint and seven Pullfrog authorization tests passed locally. CI covers the full Windows test run.
 
+### Test failure observation
+
+The observation window runs from 2026-11-23 00:00 UTC through 2026-12-06 23:59 UTC. Record each failure with its run, case and source file. Keep it open until the fix revision and classification are established. An open failure blocks removal of that file. Review the complete file history on December 7 before deciding whether a file only detects change.
+
+| Failing run and test | File | Disposition and evidence |
+|---|---|---|
+| [Dashboard fallback expected a request count](https://github.com/jatmn/JiStats/actions/runs/45086369768/job/137406613438) | `tests/test_app_controller.cpp` | Fixture clock defect. The six-hour rollup could cross midnight. The [clock fix](https://github.com/jatmn/JiStats/commit/e5a15b0) provides a deterministic reporting day and retains the assertion. |
+| [Queued Codex revocation lost its expected baseline](https://github.com/jatmn/JiStats/actions/runs/45107540627/job/137472872375) | `tests/test_app_controller.cpp` | Caught a privacy and concurrency regression on the [consent PR](https://github.com/jatmn/JiStats/pull/31). The [fix](https://github.com/jatmn/JiStats/commit/de18b373) preserves the pending checkbox choice during redraw until its matching save completes. |
+| [Native close did not dismiss all shell windows](https://github.com/jatmn/JiStats/actions/runs/45105323859/job/137466018472) | `tests/test_dashboard_presenter.cpp` | The observed failure is user-visible window behavior. Root cause remains unconfirmed. |
+| [Suite deadline during a startup preference INSERT](https://github.com/jatmn/JiStats/actions/runs/45109235550/job/137478230411) | `tests/test_app_controller.cpp` | Fixture setup cost. The [fixture PR](https://github.com/jatmn/JiStats/pull/32) batches 16 durable commits. The [runner temp experiment](https://github.com/jatmn/JiStats/pull/37) measured the full suite on the runner's temporary volume. |
+| [Mixed-provider activity was lost after retention completed](https://github.com/jatmn/JiStats/actions/runs/45118018191/job/137505400124) | `tests/test_app_controller.cpp` | Caught a concurrency regression. The hosted log establishes the order of events. A separate SQLite reproduction inserted a settings row between the account INSERT and the last-insert-ID read, which lost an activity on main. The same forced interleaving passed on [the binding fix at 8da5236](https://github.com/jatmn/JiStats/commit/8da523632ffd740f8f3da0dfe0123f72adbebce9). |
+
 ### Roadmap audit
 
 The audit covers [main at 326dcd4](https://github.com/jatmn/JiStats/tree/326dcd46dd29ee23a01c7204934105d66d24df9a). The [phase audit](plan.md#implementation-audit) links the product claims to their code and tests.

@@ -24,6 +24,10 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 - Route database writes through StorageService and place numbered SQL migrations in [db_migrations/](db_migrations/). Keep blocking network and database work off the UI thread. Dashboard, tray, and taskbar code should consume derived views.
 - Preserve startup responsiveness, offline recovery, and quota provenance. Keep the taskbar overlay scoped to subscription quota. Use [the TrafficMonitor research note](docs/reference/trafficmonitor-research.md) for taskbar reference.
 
+## Test failure evidence
+
+During the [two-week observation window](docs/progress.md#test-failure-observation), record each test failure when found with the failing run, case and file, the fix, and what behavior the test protected. Keep unresolved entries open and exclude their files from removal. On resolution, classify a caught regression or an assertion that only detected an intended implementation change. Record fixture and infrastructure defects explicitly when neither description fits. A whole file is eligible for removal only after the window, when its evidence shows exclusively change detection and its remaining assertions protect no behavior. Record the demonstrated pattern here when removing it. Keep authorization, privacy, migration and concurrency tests.
+
 ## Build and verify
 
 From Linux, run the portable tests before pushing code changes. For Windows-facing changes, also cross-build the app, CLI and full test executable with MinGW-w64. Both command sequences and dependencies are in the [Linux build instructions](README.md#building-on-linux). Add `-DJISTATS_BUILD_TESTS=ON` and `-DJISTATS_BUILD_MINIMAX_CLI=ON` to the cross-build configuration to include the full suite and the CLI.
