@@ -13,6 +13,7 @@
 #include "taskbar/TaskbarPresenter.hpp"
 #include "core/Logger.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <condition_variable>
 #include <cwctype>
@@ -21,6 +22,7 @@
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -356,7 +358,7 @@ public:
     HWND taskbarWindow = nullptr;
     UINT taskbarCreatedMessage = 0;
     bool threadReady = false;
-    bool stopRequested = false;
+    std::atomic<bool> stopRequested{false};
     bool embedded = false;
     std::wstring displayText = L"JiStats";
     std::wstring lastPaintedText;
@@ -1430,12 +1432,11 @@ public:
     }
 
 #ifdef _WIN32
-    void setHeartbeatTimerInterval(UINT intervalMs) {
-        if (controllerWindow == nullptr || currentHeartbeatTimerIntervalMs == intervalMs) {
-            return;
+    void setHeartbeatTimerInterval(HWND controller, UINT intervalMs) {
+        if (currentHeartbeatTimerIntervalMs != intervalMs &&
+            SetTimer(controller, kOverlayHeartbeatTimerId, intervalMs, nullptr) != 0) {
+            currentHeartbeatTimerIntervalMs = intervalMs;
         }
-        SetTimer(controllerWindow, kOverlayHeartbeatTimerId, intervalMs, nullptr);
-        currentHeartbeatTimerIntervalMs = intervalMs;
     }
 #endif
 
@@ -2237,48 +2238,47 @@ public:
         }
     }
 
+    void reportSurfaceUnavailable(const std::string& error) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            available = false;
+            if (lastError == error) {
+                return;
+            }
+            lastError = error;
+        }
+        JISTATS_LOG_ERROR(LogCategory::Taskbar, error);
+    }
+
     void ensureSurfaceWindow() {
         if (stopRequested) {
             return;
         }
         HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
         if (taskbar == nullptr) {
-            available = false;
-            lastError = "Shell_TrayWnd not available";
-            JISTATS_LOG_ERROR(LogCategory::Taskbar, lastError);
+            reportSurfaceUnavailable("Shell_TrayWnd not available");
             destroySurfaceWindow();
+            taskbarWindow = nullptr;
             return;
         }
 
-        if (shouldRecreateSurface(taskbar)) {
+        if (surfaceWindow != nullptr && !IsWindow(surfaceWindow)) {
+            destroySurfaceWindow();
+        } else if (shouldRecreateSurface(taskbar)) {
             JISTATS_LOG_INFO(LogCategory::Taskbar, "Taskbar window changed, recreating overlay surface");
             destroySurfaceWindow();
         }
 
         taskbarWindow = taskbar;
-        available = true;
 
-        // Only create and embed the window once
+        // Only create and embed a surface when the previous one is gone.
         if (surfaceWindow == nullptr) {
             HINSTANCE instance = GetModuleHandleW(nullptr);
-            surfaceWindow = CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_LAYERED,
-                surfaceClassName(),
-                L"",
-                WS_POPUP | WS_VISIBLE,
-                0,
-                0,
-                160,
-                24,
-                nullptr,
-                nullptr,
-                instance,
-                this);
+            surfaceWindow = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED, surfaceClassName(), L"", WS_POPUP, 0, 0,
+                                            160, 24, nullptr, nullptr, instance, this);
 
             if (surfaceWindow == nullptr) {
-                available = false;
-                lastError = "Failed to create taskbar surface window";
-                JISTATS_LOG_ERROR(LogCategory::Taskbar, lastError);
+                reportSurfaceUnavailable("Failed to create taskbar surface window");
                 return;
             }
             JISTATS_LOG_INFO(LogCategory::Taskbar, "Surface window created");
@@ -2295,37 +2295,24 @@ public:
                     LogCategory::Taskbar,
                     "Embedded taskbar surface into Shell_TrayWnd using TrafficMonitor-style parenting");
             } else {
-                available = false;
-                lastError = "Taskbar embedding failed, error: " + std::to_string(parentError);
-                JISTATS_LOG_ERROR(
-                    LogCategory::Taskbar,
-                    "Taskbar embedding failed; popup fallback disabled to stay aligned with TrafficMonitor-style behavior. Error: " +
-                        std::to_string(parentError));
-                DestroyWindow(surfaceWindow);
-                surfaceWindow = nullptr;
+                reportSurfaceUnavailable("Taskbar embedding failed, error: " + std::to_string(parentError));
+                destroySurfaceWindow();
                 return;
             }
         }
 
-        bool enabled = true;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            enabled = overlayEnabled;
+            available = true;
+            lastError.clear();
         }
-        if (!enabled) {
-            ShowWindow(surfaceWindow, SW_HIDE);
-            hideTooltipWindow();
-            return;
-        }
-
         updateSurfaceWindow();
         ensureSurfaceVisible();
     }
 
     void destroySurfaceWindow() {
-        if (surfaceWindow != nullptr) {
-            DestroyWindow(surfaceWindow);
-            surfaceWindow = nullptr;
+        if (const HWND surface = std::exchange(surfaceWindow, nullptr)) {
+            DestroyWindow(surface);
         }
         if (tooltipWindow != nullptr) {
             DestroyWindow(tooltipWindow);
@@ -2334,6 +2321,11 @@ public:
         embedded = false;
         tooltipVisible = false;
         hoveredRowIndex = -1;
+        trackingMouseLeave = false;
+        lastSurfaceX = std::numeric_limits<int>::min();
+        lastSurfaceY = std::numeric_limits<int>::min();
+        lastSurfaceWidth = 0;
+        lastSurfaceHeight = 0;
         lastPaintedText.clear();
         lastTooltipAnchor = POINT{std::numeric_limits<LONG>::min(), std::numeric_limits<LONG>::min()};
         lastTooltipSize = SIZE{0, 0};
@@ -2515,7 +2507,7 @@ public:
         switch (msg) {
         case WM_CREATE:
             currentHeartbeatTimerIntervalMs = 0;
-            setHeartbeatTimerInterval(kOverlayHeartbeatFastIntervalMs);
+            setHeartbeatTimerInterval(hwnd, kOverlayHeartbeatFastIntervalMs);
             ensureSurfaceWindow();
             return 0;
         case WM_TIMER:
@@ -2523,10 +2515,10 @@ public:
                 if (!stopRequested) {
                     if (surfaceWindow == nullptr || !IsWindow(surfaceWindow) ||
                         taskbarWindow == nullptr || !IsWindow(taskbarWindow)) {
-                        setHeartbeatTimerInterval(kOverlayHeartbeatFastIntervalMs);
+                        setHeartbeatTimerInterval(hwnd, kOverlayHeartbeatFastIntervalMs);
                         ensureSurfaceWindow();
                     } else {
-                        setHeartbeatTimerInterval(kOverlayHeartbeatSlowIntervalMs);
+                        setHeartbeatTimerInterval(hwnd, kOverlayHeartbeatSlowIntervalMs);
                         ensureSurfaceVisible();
                     }
                 }
@@ -2536,19 +2528,9 @@ public:
         case WM_DISPLAYCHANGE:
         case WM_DPICHANGED:
         case WM_THEMECHANGED:
-            ensureSurfaceWindow();
-            updateSurfaceWindow();
-            return 0;
         case WM_SETTINGCHANGE:
-            ensureSurfaceWindow();
-            updateSurfaceWindow();
-            return 0;
         case WM_JISTATS_REFRESH:
-            if (stopRequested) {
-                return 0;
-            }
             ensureSurfaceWindow();
-            updateSurfaceWindow();
             return 0;
         case WM_CLOSE:
             DestroyWindow(hwnd);
@@ -2557,7 +2539,10 @@ public:
             KillTimer(hwnd, kOverlayHeartbeatTimerId);
             currentHeartbeatTimerIntervalMs = 0;
             destroySurfaceWindow();
-            controllerWindow = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                controllerWindow = nullptr;
+            }
             taskbarWindow = nullptr;
             PostQuitMessage(0);
             return 0;
@@ -2567,6 +2552,13 @@ public:
     }
 
     LRESULT handleSurfaceMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (msg == WM_NCDESTROY && surfaceWindow == hwnd) {
+            surfaceWindow = nullptr;
+            destroySurfaceWindow();
+            std::lock_guard<std::mutex> lock(mutex);
+            available = false;
+        }
+
         switch (msg) {
         case WM_NCHITTEST:
             return HTCLIENT;
@@ -2764,13 +2756,15 @@ bool TaskbarPresenter::init() {
     });
 
     pImpl->initialized = (pImpl->controllerWindow != nullptr);
-    pImpl->available = pImpl->initialized;
     if (!pImpl->initialized && pImpl->lastError.empty()) {
         pImpl->lastError = "Taskbar presenter initialization failed";
     }
 #else
-    pImpl->available = false;
-    pImpl->lastError = "Taskbar presenter is only available on Windows";
+    {
+        std::lock_guard<std::mutex> lock(pImpl->mutex);
+        pImpl->available = false;
+        pImpl->lastError = "Taskbar presenter is only available on Windows";
+    }
 #endif
 
         if (pImpl->initialized) {
@@ -2809,6 +2803,7 @@ void TaskbarPresenter::shutdown() {
     {
         std::lock_guard<std::mutex> lock(pImpl->mutex);
         pImpl->currentMetrics.clear();
+        pImpl->available = false;
 #ifdef _WIN32
         pImpl->displayText = L"JiStats";
         pImpl->overlayLayout = {};
@@ -2822,12 +2817,12 @@ void TaskbarPresenter::shutdown() {
     }
 
     pImpl->initialized = false;
-    pImpl->available = false;
     JISTATS_LOG_INFO(LogCategory::Taskbar, "TaskbarPresenter shutdown");
 }
 
 void TaskbarPresenter::updateMetrics(const TaskbarMetrics& metrics) {
     if (!pImpl->initialized) {
+        std::lock_guard<std::mutex> lock(pImpl->mutex);
         pImpl->lastError = "TaskbarPresenter not initialized";
         return;
     }
@@ -2868,6 +2863,7 @@ void TaskbarPresenter::updateMetrics(const std::vector<TaskbarMetrics>& metricsL
 
 void TaskbarPresenter::replaceMetrics(const std::vector<TaskbarMetrics>& metricsList) {
     if (!pImpl->initialized) {
+        std::lock_guard<std::mutex> lock(pImpl->mutex);
         pImpl->lastError = "TaskbarPresenter not initialized";
         return;
     }
@@ -2927,26 +2923,7 @@ void TaskbarPresenter::setOverlayEnabled(bool enabled) {
     }
 
 #ifdef _WIN32
-    if (enabled) {
-        if (pImpl->initialized) {
-            pImpl->requestRefresh();
-        }
-        return;
-    }
-
-    HWND surface = nullptr;
-    HWND controller = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(pImpl->mutex);
-        surface = pImpl->surfaceWindow;
-        controller = pImpl->controllerWindow;
-    }
-    if (surface != nullptr) {
-        ShowWindow(surface, SW_HIDE);
-    }
-    if (controller != nullptr) {
-        PostMessageW(controller, Impl::WM_JISTATS_REFRESH, 0, 0);
-    }
+    pImpl->requestRefresh();
 #endif
 }
 
@@ -2988,12 +2965,11 @@ void TaskbarPresenter::setOfflineMenuState(bool retryAvailable, bool dismissAvai
 }
 
 void TaskbarPresenter::setProgress(double percentage, ProgressState state) {
-    if (!pImpl->initialized || !pImpl->available) {
-        return;
-    }
-
     {
         std::lock_guard<std::mutex> lock(pImpl->mutex);
+        if (!pImpl->initialized || !pImpl->available) {
+            return;
+        }
         if (!pImpl->currentMetrics.empty()) {
             auto& metric = pImpl->currentMetrics.front();
             metric.primaryMetric = pImpl->formatPercentage(percentage);
@@ -3024,10 +3000,12 @@ std::vector<TaskbarMetrics> TaskbarPresenter::getCurrentMetrics() const {
 }
 
 bool TaskbarPresenter::isAvailable() const {
+    std::lock_guard<std::mutex> lock(pImpl->mutex);
     return pImpl->available;
 }
 
 std::string TaskbarPresenter::getLastError() const {
+    std::lock_guard<std::mutex> lock(pImpl->mutex);
     return pImpl->lastError;
 }
 

@@ -3,7 +3,13 @@
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <ctime>
+#include <future>
+#include <thread>
+#include <utility>
+
+#include <windows.h>
 
 #include "runtime_test_support.hpp"
 #include "taskbar/TaskbarPresenter.hpp"
@@ -44,6 +50,66 @@ TaskbarMetrics makePersistedActivityMetrics(const std::string& providerKey) {
 TaskbarPresenter::GeometryRectForTesting makeRect(int left, int top, int right, int bottom) {
     return TaskbarPresenter::GeometryRectForTesting{left, top, right, bottom};
 }
+
+// A hosted runner may have no Explorer taskbar. Give the presenter a real Win32
+// parent in that case, with its own message loop for cross-thread parenting.
+class TaskbarWindowFixture {
+  public:
+    TaskbarWindowFixture() : window_(FindWindowW(L"Shell_TrayWnd", nullptr)) {
+        if (window_ != nullptr) {
+            return;
+        }
+        std::promise<HWND> ready;
+        auto window = ready.get_future();
+        thread_ = std::thread([ready = std::move(ready)]() mutable {
+            const HINSTANCE instance = GetModuleHandleW(nullptr);
+            WNDCLASSW windowClass{};
+            windowClass.hInstance = instance;
+            windowClass.lpszClassName = L"Shell_TrayWnd";
+            windowClass.lpfnWndProc = &windowProc;
+            if (RegisterClassW(&windowClass) == 0) {
+                ready.set_value(nullptr);
+                return;
+            }
+            const HWND hwnd = CreateWindowExW(WS_EX_NOACTIVATE, windowClass.lpszClassName, L"", WS_POPUP | WS_VISIBLE,
+                                              20, 50, 640, 48, nullptr, nullptr, instance, nullptr);
+            ready.set_value(hwnd);
+
+            if (hwnd != nullptr) {
+                MSG message{};
+                while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+                    DispatchMessageW(&message);
+                }
+            }
+            UnregisterClassW(windowClass.lpszClassName, instance);
+        });
+        window_ = window.get();
+    }
+
+    ~TaskbarWindowFixture() {
+        if (thread_.joinable()) {
+            if (window_ != nullptr) {
+                PostMessageW(window_, WM_CLOSE, 0, 0);
+            }
+            thread_.join();
+        }
+    }
+
+    HWND get() const {
+        return window_;
+    }
+
+  private:
+    static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+        if (message == WM_DESTROY) {
+            PostQuitMessage(0);
+        }
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+
+    HWND window_;
+    std::thread thread_;
+};
 
 } // namespace
 
@@ -612,6 +678,45 @@ TEST_CASE("TaskbarPresenter flags shell/taskbar handle changes that require over
     CHECK_FALSE(presenter.shouldRecreateSurfaceForTesting(100, 200, false));
     CHECK_FALSE(presenter.shouldRecreateSurfaceForTesting(0, 200, true));
     CHECK(presenter.shouldRecreateSurfaceForTesting(100, 200, true));
+}
+
+TEST_CASE("TaskbarPresenter recreates and repositions a lost surface without a refresh", "[taskbar]") {
+    const TaskbarWindowFixture taskbar;
+    REQUIRE(taskbar.get() != nullptr);
+
+    TaskbarPresenter presenter;
+    REQUIRE(presenter.init());
+
+    const auto findSurface = [&taskbar]() {
+        return FindWindowExW(taskbar.get(), nullptr, L"JiStatsTaskbarSurfaceWindow", nullptr);
+    };
+    const HWND initialSurface = findSurface();
+    REQUIRE(initialSurface != nullptr);
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(initialSurface, &processId);
+    REQUIRE(processId == GetCurrentProcessId());
+
+    RECT initialBounds{};
+    REQUIRE(GetWindowRect(initialSurface, &initialBounds) != 0);
+    DWORD_PTR result = 0;
+    REQUIRE(SendMessageTimeoutW(initialSurface, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 2000, &result) != 0);
+    REQUIRE_FALSE(IsWindow(initialSurface));
+
+    // The heartbeat runs at 1 s during recovery and 5 s while healthy.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    bool recovered = false;
+    do {
+        const HWND replacement = findSurface();
+        RECT bounds{};
+        recovered =
+            replacement != nullptr && GetWindowRect(replacement, &bounds) != 0 && EqualRect(&initialBounds, &bounds);
+        if (!recovered) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    } while (!recovered && std::chrono::steady_clock::now() < deadline);
+
+    CHECK(recovered);
 }
 
 TEST_CASE("TaskbarPresenter keeps hover suppressed and preserves popup visibility while context menu is active", "[taskbar]") {

@@ -31,7 +31,7 @@ Record all three results. The schema version must be `12`, and both existence ch
 
 - Enable, disable, and re-enable the overlay. Check compact width, readable text, color bands and low-quota emphasis, and placement around the clock, notification area, and TrafficMonitor if present.
 - Compare OpenAI, MiniMax, and Kimi subscription rows with the corresponding dashboard quota. Check dual-window formatting where data exists. With local activity only or no eligible quota, verify the overlay has no rows even in a degraded runtime state. Check that the dashboard and tray continue to show that state.
-- Check hover text, repeated right-click and dismiss, and hover recovery. Verify the overlay returns after Explorer restarts. Include resizing, auto-hide, or monitor changes when they affect the change under test.
+- Check hover text, repeated right-click and dismiss, and hover recovery. Verify the overlay returns to its tray-relative position after Explorer restarts, even while quota data is unchanged. Include resizing, auto-hide, or monitor changes when they affect the change under test.
 - Use the [taskbar shell signoff script](../../scripts/run_taskbar_shell_signoff.ps1) for repeated menu/click-away and Explorer restart checks in the desktop session. Use [controller](../../tests/test_app_controller.cpp) and [presenter](../../tests/test_taskbar_presenter.cpp) tests for deterministic row filtering, formatting, placement, and state transitions.
 
 ## Recorded coverage
