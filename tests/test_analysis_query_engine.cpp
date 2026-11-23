@@ -579,7 +579,8 @@ TEST_CASE("Codex rollout replay links requests to their previously saved cumulat
 TEST_CASE("Codex rollout replay preserves the sequence of saved same-second counters", "[analysis][codex]") {
     requireSqlite();
     const bool laterHasPrecision = GENERATE(true, false);
-    CAPTURE(laterHasPrecision);
+    const bool legacyRowsOutOfOrder = GENERATE(false, true);
+    CAPTURE(laterHasPrecision, legacyRowsOutOfOrder);
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
@@ -588,7 +589,9 @@ TEST_CASE("Codex rollout replay preserves the sequence of saved same-second coun
     const auto rollout = fixture.path() / "rollout-upgrade.jsonl";
     {
         std::ofstream out(rollout);
-        out << R"json({"timestamp":"2026-04-20T17:57:00.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":50,"total_tokens":100}}}}
+        const auto baselineTimestamp = legacyRowsOutOfOrder ? "17:58:00Z" : "17:57:00.200Z";
+        out << R"json({"timestamp":"2026-04-20T)json" << baselineTimestamp
+            << R"json(","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":50,"total_tokens":100}}}}
 {"timestamp":"2026-04-20T17:58:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":25,"output_tokens":25,"total_tokens":50},"total_token_usage":{"input_tokens":75,"output_tokens":75,"total_tokens":150}}}}
 {"timestamp":"2026-04-20T17:58:00.700Z","type":"token_usage_record","payload":{"response_id":"response-2","usage":{"input_tokens":25,"output_tokens":25,"total_tokens":50}}}
 {"timestamp":"2026-04-20T17:58:00)json";
@@ -601,9 +604,10 @@ TEST_CASE("Codex rollout replay preserves the sequence of saved same-second coun
     }
 
     const auto now = makeUtcTime(2026, 4, 20, 18);
-    seedCodexUsageEvent(storage, now - 180, 100, rollout.string());
-    seedCodexUsageEvent(storage, now - 120, 150, rollout.string());
-    seedCodexUsageEvent(storage, now - 120, 200, rollout.string());
+    const auto sameSecond = now - 120;
+    seedCodexUsageEvent(storage, legacyRowsOutOfOrder ? sameSecond : now - 180, 100, rollout.string());
+    seedCodexUsageEvent(storage, sameSecond, legacyRowsOutOfOrder ? 200 : 150, rollout.string());
+    seedCodexUsageEvent(storage, sameSecond, legacyRowsOutOfOrder ? 150 : 200, rollout.string());
     seedCodexUsageEvent(storage, now - 60, 250, rollout.string());
 
     const int providerId = requireProviderId(storage, "openai");
@@ -615,8 +619,10 @@ TEST_CASE("Codex rollout replay preserves the sequence of saved same-second coun
     const auto analysis =
         AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
     CHECK(analysis.codexThroughput.tokensLast1h == 150);
-    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
-    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(100));
+    REQUIRE(analysis.codexHourlyHistory.points.size() == (legacyRowsOutOfOrder ? 2 : 3));
+    const auto& firstRequestMinute = analysis.codexHourlyHistory.points[analysis.codexHourlyHistory.points.size() - 2];
+    CHECK(firstRequestMinute.snapshotTime == sameSecond);
+    CHECK(firstRequestMinute.tokensPerMinute == Catch::Approx(100));
     CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(50));
 
     const auto rows = storage.getUsageEvents(providerId, accountId, now - 180, now);
@@ -625,6 +631,31 @@ TEST_CASE("Codex rollout replay preserves the sequence of saved same-second coun
         std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.totalTokens == 200; });
     REQUIRE(laterCounter != rows.end());
     CHECK(laterCounter->eventSubsecondNs == (laterHasPrecision ? std::optional<int>(800000000) : std::nullopt));
+}
+
+TEST_CASE("Codex accounting preserves timed counter resets in a mixed-precision second", "[analysis][codex]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/current";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const auto sameSecond = now - 120;
+    seedCodexUsageEvent(storage, now - 180, 100, rollout);
+    seedCodexUsageEvent(storage, sameSecond, 50, rollout, {}, 800000000);
+    seedCodexUsageEvent(storage, sameSecond, 200, rollout);
+    seedCodexUsageEvent(storage, sameSecond, 25, rollout, {}, 500000000);
+    seedCodexUsageEvent(storage, sameSecond, 150, rollout, {}, 100000000);
+    seedCodexUsageEvent(storage, now - 60, 100, rollout);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 125);
+    CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(75));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(50));
 }
 
 TEST_CASE("AnalysisQueryEngine limits Codex throughput chart history to the active thirty-minute window", "[analysis][query_engine][analysis_query_engine][codex]") {

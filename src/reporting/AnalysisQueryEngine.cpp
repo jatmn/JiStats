@@ -1976,10 +1976,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             formatTimeUtcIso(throughputNow)};
         appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
         appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");
-        // Use stored row order for a rollout second if any counter still has whole-second precision.
-        sql += " ORDER BY ue.event_time_utc, "
-               "CASE WHEN MAX(ue.request_type = 'codex_turn' AND ue.event_subsecond_ns IS NULL) "
-               "OVER (PARTITION BY ue.raw_reference, ue.event_time_utc) = 0 THEN ue.event_subsecond_ns END, ue.id;";
+        sql += " ORDER BY ue.event_time_utc, ue.event_subsecond_ns, ue.id;";
 
         QueryResult result = storage_->execute(sql, params);
         if (result.success() && result.rowCount() > 0) {
@@ -2001,69 +1998,56 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                         result.getString(row, 5).empty() ? std::nullopt : std::optional<int>(result.getInt(row, 5))};
             };
 
-            std::set<std::pair<std::string, std::string>> linkedCounters;
-            std::map<std::string, std::vector<UsageSample>> requestsByRollout;
-            std::set<std::pair<std::string, std::string>> indexedResponses;
-            for (std::size_t row = 0; row < result.rowCount(); ++row) {
-                const auto type = result.getString(row, 3);
-                const auto id = result.getString(row, 4);
-                if (type == "codex_turn" && id.rfind("line:", 0) == 0) {
-                    linkedCounters.emplace(result.getString(row, 2), id);
-                } else if (type == "codex_request") {
-                    if (const auto seconds = parseUtcIso(result.getString(row, 0))) {
-                        const auto rollout = result.getString(row, 2);
-                        if (id.rfind("response:", 0) != 0 || indexedResponses.emplace(rollout, id).second) {
-                            requestsByRollout[rollout].push_back(
-                                {getEventTime(row, *seconds), result.getInt64(row, 1), id});
-                        }
-                    }
-                }
-            }
-
             struct TokenWindowTotals {
                 long long totalTokenDelta = 0;
                 long long promptDeltaCount = 0;
             };
-            std::map<std::string, UsageSample> previousCounters;
-            std::set<std::string> countedResponseIds;
             std::map<std::time_t, TokenWindowTotals> usageAt;
+            std::map<std::string, std::vector<UsageSample>> requestsByRollout;
+            std::map<std::string, std::vector<UsageSample>> countersByRollout;
+            std::set<std::pair<std::string, std::string>> linkedCounters;
+            std::set<std::pair<std::string, std::string>> indexedResponses;
+            std::set<std::string> countedResponseIds;
             std::size_t legacySampleCount = 0;
             bool legacyEstimated = false;
-            for (size_t row = 0; row < result.rowCount(); ++row) {
-                const auto time = parseUtcIso(result.getString(row, 0));
-                if (!time) {
+            for (std::size_t row = 0; row < result.rowCount(); ++row) {
+                const auto seconds = parseUtcIso(result.getString(row, 0));
+                if (!seconds) {
                     continue;
                 }
-                const auto tokens = result.getInt64(row, 1);
                 const auto rollout = result.getString(row, 2);
-                if (result.getString(row, 3) == "codex_request") {
-                    const auto id = result.getString(row, 4);
-                    if (id.rfind("response:", 0) == 0 && !countedResponseIds.insert(id).second) {
-                        continue;
+                const auto type = result.getString(row, 3);
+                UsageSample sample{getEventTime(row, *seconds), result.getInt64(row, 1), result.getString(row, 4)};
+                if (type == "codex_request") {
+                    const bool isResponse = sample.sourceId.rfind("response:", 0) == 0;
+                    if (!isResponse || countedResponseIds.insert(sample.sourceId).second) {
+                        auto& usage = usageAt[*seconds];
+                        usage.totalTokenDelta += sample.tokens;
+                        ++usage.promptDeltaCount;
                     }
-                    auto& usage = usageAt[*time];
-                    usage.totalTokenDelta += tokens;
-                    ++usage.promptDeltaCount;
+                    if (!isResponse || indexedResponses.emplace(rollout, sample.sourceId).second) {
+                        requestsByRollout[rollout].push_back(std::move(sample));
+                    }
                     continue;
                 }
 
+                if (type == "codex_turn" && sample.sourceId.rfind("line:", 0) == 0) {
+                    linkedCounters.emplace(rollout, sample.sourceId);
+                }
+                usageAt.try_emplace(*seconds);
+                countersByRollout[rollout].push_back(std::move(sample));
                 ++legacySampleCount;
-                auto& usage = usageAt[*time];
-                const UsageSample counter{getEventTime(row, *time), tokens, result.getString(row, 4)};
-                auto [previous, inserted] = previousCounters.try_emplace(rollout, counter);
-                if (inserted) {
-                    continue;
-                }
+            }
 
-                const UsageSample baseline = previous->second;
-                previous->second = counter;
-                const bool usesStoredOrder = baseline.time.seconds == counter.time.seconds &&
-                                             (!baseline.time.subsecondNs || !counter.time.subsecondNs);
+            const auto accountForInterval = [&](const std::string& rollout, const UsageSample& baseline,
+                                                const UsageSample& counter) {
+                const bool estimatedOrder = baseline.time.seconds == counter.time.seconds &&
+                                            (!baseline.time.subsecondNs || !counter.time.subsecondNs);
                 legacyEstimated =
-                    legacyEstimated || usesStoredOrder || counter.time.seconds - baseline.time.seconds > 300;
-                if ((!usesStoredOrder && !definitelyBefore(baseline.time, counter.time)) ||
+                    legacyEstimated || estimatedOrder || counter.time.seconds - baseline.time.seconds > 300;
+                if ((!estimatedOrder && !definitelyBefore(baseline.time, counter.time)) ||
                     counter.tokens <= baseline.tokens) {
-                    continue;
+                    return;
                 }
 
                 long long unrecordedTokens = counter.tokens - baseline.tokens;
@@ -2090,8 +2074,43 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     }
                 }
                 if (unrecordedTokens > 0) {
+                    auto& usage = usageAt[counter.time.seconds];
                     usage.totalTokenDelta += unrecordedTokens;
                     ++usage.promptDeltaCount;
+                }
+            };
+
+            const auto byTokens = [](const UsageSample& left, const UsageSample& right) {
+                return left.tokens < right.tokens;
+            };
+            for (auto& [rollout, counters] : countersByRollout) {
+                const UsageSample* baseline = nullptr;
+                for (auto first = counters.begin(); first != counters.end();) {
+                    const auto end = std::find_if(first + 1, counters.end(), [&](const UsageSample& sample) {
+                        return sample.time.seconds != first->time.seconds;
+                    });
+                    if (end - first > 1 && !first->time.subsecondNs) {
+                        // SQL places untimed samples first and keeps the rest in proven chronological order.
+                        const auto firstTimed = std::find_if(
+                            first, end, [](const UsageSample& sample) { return sample.time.subsecondNs.has_value(); });
+                        legacyEstimated = true;
+                        if (std::is_sorted(firstTimed, end, byTokens)) {
+                            // Within an increasing sequence, totals can place untimed samples without moving timed
+                            // ones.
+                            std::stable_sort(first, end, byTokens);
+                        } else {
+                            // A timed reset leaves no reliable way to assign an untimed sample to either side.
+                            for (; first != firstTimed; ++first) {
+                                linkedCounters.erase({rollout, first->sourceId});
+                            }
+                        }
+                    }
+                    for (; first != end; ++first) {
+                        if (baseline) {
+                            accountForInterval(rollout, *baseline, *first);
+                        }
+                        baseline = &*first;
+                    }
                 }
             }
 
@@ -2141,7 +2160,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             analysis.codexThroughput.averageMonthlyPrompts = totalsMonth.promptDeltaCount / monthElapsedDays;
             analysis.codexThroughput.hasData = totals30d.promptDeltaCount > 0 || legacySampleCount > 1;
             analysis.codexThroughput.confidenceLabel =
-                (legacyEstimated || previousCounters.size() > 1) ? "Estimated" : "LocalExact";
+                (legacyEstimated || countersByRollout.size() > 1) ? "Estimated" : "LocalExact";
 
             std::map<std::time_t, TokenWindowTotals> minutes;
             for (auto position = usageAt.lower_bound(window30mStart); position != usageAt.end(); ++position) {
