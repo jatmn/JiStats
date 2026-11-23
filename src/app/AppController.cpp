@@ -3915,6 +3915,8 @@ public:
     std::condition_variable interactionWorkCv;
     std::optional<DashboardPreferences> pendingInteractionPreferences;
     std::optional<DashboardPreferences> activeInteractionPreferences;
+    std::atomic<std::uint64_t> completedPreferencesRequest{0};
+    std::uint64_t completedProviderPreferencesRequest = 0; // Protected by runtimeRefreshMutex.
     std::optional<AnalysisScopeState> pendingAnalysisScope;
     std::optional<CodexAttributionChange> pendingCodexModelAttribution;
     bool pendingProviderDiscoveryRefresh = false;
@@ -4150,12 +4152,12 @@ public:
                 }
 #endif
                 const auto effectivePreferences =
-                    refreshProviderRuntimeState(std::time(nullptr), true, true, &*preferences, analysisScope);
+                    refreshProviderRuntimeState(std::time(nullptr), requiresProviderDiscoveryRefresh, true,
+                                                &*preferences, analysisScope, requiresPersistedActivityRefresh);
                 {
                     std::lock_guard<std::mutex> lock(interactionWorkMutex);
                     activeInteractionPreferences.reset();
                 }
-                runScheduledExportIfDue(std::time(nullptr));
                 refreshWatcherCv.notify_all();
 #ifdef JISTATS_ENABLE_TEST_HOOKS
                 if (!disableTaskbarForTesting) {
@@ -4164,6 +4166,7 @@ public:
 #else
                 applyTaskbarPreference(effectivePreferences);
 #endif
+                runScheduledExportIfDue(std::time(nullptr));
                 continue;
             }
 
@@ -6637,6 +6640,7 @@ public:
             if (connectivityUpdates.has_value()) {
                 persistConnectivityForPublication(*connectivityUpdates, now);
             }
+            presentedViewModel.completedPreferencesRequest = completedPreferencesRequest.load();
             presentedViewModel.completedCodexAttributionRequest = completedCodexAttributionRequest.load();
             presentedViewModel.preferences.codexModelAttributionEnabled = codexModelAttributionEnabled.load();
             presentedViewModel.codexAttributionSaveError = codexAttributionSaveError.load();
@@ -6992,7 +6996,8 @@ public:
     DashboardPreferences
     refreshProviderRuntimeState(std::time_t now, bool refreshProviderDiscovery, bool importLocalActivity,
                                 const DashboardPreferences* requestedSettings = nullptr,
-                                const std::optional<AnalysisScopeState>& requestedScope = std::nullopt) {
+                                const std::optional<AnalysisScopeState>& requestedScope = std::nullopt,
+                                bool refreshLocalPresenters = false) {
         std::lock_guard<std::mutex> refreshLock(runtimeRefreshMutex);
         DashboardViewModel currentViewModel = dashboardPresenter.getViewModel();
         DashboardPreferences preferences = storageAvailable
@@ -7000,14 +7005,40 @@ public:
             : (currentViewModel.appVersion.empty() ? loadPreferences() : currentViewModel.preferences);
         if (requestedSettings) {
             const auto scope = requestedScope ? *requestedScope : analysisScopeFromPreferences(preferences);
+            // A queued off/on edit can suppress a provider between refreshes even if the final value matches storage.
+            bool providerTrackingChanged =
+                requestedSettings->providerChangeRequest > completedProviderPreferencesRequest;
+            for (const auto* key : {"openai", "minimax", "claude_code", "kimi", "grok", "cursor"}) {
+                providerTrackingChanged |=
+                    isProviderTrackingEnabled(preferences, key) != isProviderTrackingEnabled(*requestedSettings, key);
+            }
+
             preferences = applyStartupPreferences(*requestedSettings);
             setAnalysisScope(preferences, scope);
             savePreferences(preferences);
             if (requestedScope) {
                 saveAnalysisScope(scope);
             }
+            completedPreferencesRequest.store(requestedSettings->changeRequest);
+
+            if (storageAvailable && !providerTrackingChanged) {
+                currentViewModel.preferences = preferences;
+                if (refreshProviderDiscovery) {
+                    runProviderDiscovery();
+                    applyProviderDiscoveryStatusToViewModel(currentViewModel);
+                }
+                if (refreshLocalPresenters) {
+                    applyPersistedActivitySummaries(currentViewModel, now);
+                }
+                if ((requestedScope || refreshLocalPresenters) && shouldRefreshAnalysisSurface()) {
+                    applyAnalysisSurface(currentViewModel, now);
+                }
+                applyDashboardOperationalStatus(currentViewModel);
+                applyRuntimeViewModel(currentViewModel, now);
+                return preferences;
+            }
         }
-        if (refreshProviderDiscovery) {
+        if (refreshProviderDiscovery || requestedSettings) {
             runProviderDiscovery();
         }
         applyProviderPreferences(preferences);
@@ -7030,6 +7061,10 @@ public:
         }
 #endif
         applyRuntimeViewModel(viewModel, now, std::move(connectivityUpdates));
+        if (requestedSettings) {
+            completedProviderPreferencesRequest =
+                std::max(completedProviderPreferencesRequest, requestedSettings->providerChangeRequest);
+        }
         return preferences;
     }
 

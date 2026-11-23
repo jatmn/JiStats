@@ -10,6 +10,8 @@ Hydrated startup restores preferences and cached quota before first paint. Keep 
 
 Provider toggles govern provider startup refresh and new local observation. A queued opt-out stops new runtime quota and catch-up requests while Settings waits for the refresh lock. Requests already admitted may finish. They preserve saved history. Startup and Analysis refresh scan [Codex SQLite](../providers/openai.md#codex-sqlite-privacy-boundary) only when the separate Codex model attribution setting is enabled. Keep background work small by using changed-file detection, cached state, and update suppression when presenter output is unchanged. The dashboard timer and tray or taskbar open actions queue local data refreshes on the existing interaction worker. The dashboard displays the last available data while the worker waits for an active refresh or reads history. Analysis opens with cached placement or default bounds. The placement worker loads optional Analysis bounds in the background and saves window bounds in SQLite. The placement worker preserves saved bounds when an untouched fallback window closes. Settings and Analysis scope requests save their own preference fields under the provider refresh lock, including when the worker handles both requests together.
 
+Settings keeps pending choices and text edits visible during background refresh. Changes to startup, taskbar visibility, report scheduling, or the selected provider row save on the interaction worker without fetching provider quota. Changes to provider tracking refresh the affected runtime state.
+
 ## Offline and catch-up behavior
 
 | State | Meaning |

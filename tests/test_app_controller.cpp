@@ -1313,6 +1313,151 @@ TEST_CASE("AppController applies a custom Analysis edit alongside a Settings cha
     CHECK(settings.getString("ui.analysis_custom_range_start_utc") == "2026-04-01T00:00:00Z");
 }
 
+TEST_CASE("AppController keeps Settings edits through a stale provider refresh", "[app][shell][preferences]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDirectory("jistats-settings-draft");
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false, true, 1440,
+                           exportDirectory.path().string());
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        SettingsService settings(storage);
+        REQUIRE(settings.setBool("ui.taskbar_overlay_enabled", true));
+    }
+    const auto reportPath = exportDirectory.path() / "usage.html";
+    const auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI",
+        makeQuotaResponse(std::time(nullptr), 20, 100, "interval", "openai_subscription_codex_local"));
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(provider);
+
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    std::promise<void> settingsDequeued;
+    auto dequeued = settingsDequeued.get_future();
+    std::promise<void> releaseSettings;
+    auto released = releaseSettings.get_future().share();
+    std::atomic<bool> firstEdit{true};
+    AppController app;
+    app.setAfterSettingsDequeueForTesting([&]() {
+        if (firstEdit.exchange(false)) {
+            settingsDequeued.set_value();
+            released.wait_for(std::chrono::seconds(6));
+        }
+    });
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+
+    HWND settingsWindow = nullptr;
+    HWND overlay = nullptr;
+    HWND exportPath = nullptr;
+    REQUIRE(waitForCondition([&]() {
+        settingsWindow = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+        overlay = GetDlgItem(settingsWindow, 1101);
+        exportPath = GetDlgItem(settingsWindow, 1115);
+        return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences) && overlay != nullptr &&
+               SendMessageW(overlay, BM_GETCHECK, 0, 0) == BST_CHECKED && exportPath != nullptr &&
+               IsWindowEnabled(exportPath);
+    }));
+
+    SendMessageW(overlay, BM_CLICK, 0, 0);
+    const bool queued = dequeued.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    SendMessageW(exportPath, EM_SETSEL, 0, -1);
+    SendMessageW(exportPath, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(reportPath.c_str()));
+
+    // This refresh publishes the old persisted prefs while the Settings worker is paused.
+    app.refreshRuntimeForTesting();
+    const int callsAfterExplicitRefresh = provider->getQuotaFetchCount();
+    const bool pendingChoicePreserved = !app.getDashboardViewModelForTesting().preferences.taskbarOverlayEnabled;
+    SendMessageW(settingsWindow, WM_COMMAND, MAKEWPARAM(1115, EN_KILLFOCUS), reinterpret_cast<LPARAM>(exportPath));
+    releaseSettings.set_value();
+    app.shutdown();
+
+    CHECK(queued);
+    CHECK(pendingChoicePreserved);
+    CHECK(provider->getQuotaFetchCount() == callsAfterExplicitRefresh);
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    SettingsService settings(storage);
+    CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
+    CHECK(settings.getString("reporting.scheduled_export_path") == reportPath.string());
+}
+
+TEST_CASE("AppController restores quota after queued provider tracking is turned off and back on",
+          "[app][shell][preferences]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        SettingsService settings(storage);
+        REQUIRE(settings.setBool("ui.taskbar_overlay_enabled", true));
+    }
+    auto providers = makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 20, 100, std::time(nullptr))});
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    std::promise<void> settingsDequeued;
+    auto dequeued = settingsDequeued.get_future();
+    std::promise<void> releaseSettings;
+    auto released = releaseSettings.get_future().share();
+    std::atomic<bool> firstEdit{true};
+    AppController app;
+    app.setAfterSettingsDequeueForTesting([&]() {
+        if (firstEdit.exchange(false)) {
+            settingsDequeued.set_value();
+            released.wait_for(std::chrono::seconds(6));
+        }
+    });
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+    const auto showsOpenAI = [&]() {
+        const auto view = app.getDashboardViewModelForTesting();
+        return std::any_of(view.providers.begin(), view.providers.end(), [](const auto& provider) {
+            return provider.providerKey == "openai" && !provider.quotas.empty();
+        });
+    };
+    REQUIRE(showsOpenAI());
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+
+    HWND settings = nullptr;
+    HWND overlay = nullptr;
+    HWND tracking = nullptr;
+    REQUIRE(waitForCondition([&]() {
+        settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+        overlay = GetDlgItem(settings, 1101);
+        tracking = GetDlgItem(settings, 1102);
+        return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences) && overlay != nullptr &&
+               SendMessageW(overlay, BM_GETCHECK, 0, 0) == BST_CHECKED && tracking != nullptr &&
+               SendMessageW(tracking, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }));
+
+    SendMessageW(overlay, BM_CLICK, 0, 0);
+    const bool queued = dequeued.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    const bool switchedToProviderTab = app.selectDashboardPreferencesTabForTesting(1);
+    const bool trackingVisible = waitForCondition([&]() { return IsWindowVisible(tracking) != FALSE; });
+    SendMessageW(tracking, BM_CLICK, 0, 0);
+    app.refreshRuntimeForTesting();
+    const bool removedDuringOptOut = !showsOpenAI();
+    SendMessageW(tracking, BM_CLICK, 0, 0);
+    const bool requestedReenable = app.getDashboardViewModelForTesting().preferences.openaiSubscriptionTrackingEnabled;
+    releaseSettings.set_value();
+
+    CHECK(queued);
+    CHECK(switchedToProviderTab);
+    CHECK(trackingVisible);
+    CHECK(removedDuringOptOut);
+    CHECK(requestedReenable);
+    CHECK(waitForCondition(showsOpenAI, std::chrono::seconds(5)));
+    app.shutdown();
+}
+
 TEST_CASE("AppController skips new quota requests after Settings dequeues an opt-out", "[app][runtime][polling]") {
     requireSqlite();
     TempTestDatabase dbPath;
