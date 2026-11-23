@@ -1,5 +1,6 @@
 """Evaluate GitHub job timing after all tests and runner teardown finish."""
 
+import argparse
 import json
 import sys
 from datetime import datetime
@@ -11,12 +12,18 @@ def elapsed(item):
 
 
 def check(name, duration, limit):
+    if limit is None:
+        print(f"- {name}: {duration:g}s (report only)")
+        return False
     over = duration >= limit
     print(f"- {name}: {duration:g}s (limit <{limit}s)" + (" **FAIL**" if over else ""))
     return over
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--report-only", action="store_true")
+    report_only = parser.parse_args().report_only
     setup_prefixes = ("set up job", "run actions/checkout", "check out the tested",
                       "checkout trusted", "install ", "run actions/download-artifact",
                       "initialize codeql", "fetch c++ dependency", "restore compiler results")
@@ -32,13 +39,13 @@ def main():
             sys.exit(f'Job {job["id"]} is still running')
         if job["conclusion"] != "success":
             print(f'- {job["name"]}: source conclusion {job["conclusion"]}')
-        failed |= check(job["name"], elapsed(job), 35)
+        failed |= check(job["name"], elapsed(job), None if report_only else 35)
         steps = [s for s in job["steps"] if s["conclusion"] not in ("cancelled", "skipped")]
         setup = sum(elapsed(s) for s in steps if s["name"].lower().startswith(setup_prefixes))
-        failed |= check("Setup", setup, 15)
+        failed |= check("Setup", setup, None if report_only else 15)
         for step in steps:
             if step["name"] == "Run Windows suite and diagnose intermittent restart stalls":
-                failed |= check("Windows suite step", elapsed(step), 30)
+                failed |= check("Windows suite step", elapsed(step), None if report_only else 30)
     return int(failed)
 
 

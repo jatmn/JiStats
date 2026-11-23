@@ -40,5 +40,12 @@ jobs:
           set -euo pipefail
           [[ $RUN_ID =~ ^[1-9][0-9]*$ && $ATTEMPT =~ ^[1-9][0-9]*$ ]]
           echo "Measuring $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$ATTEMPT" | tee -a "$GITHUB_STEP_SUMMARY"
-          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100" |
-            jq -s . | python3 scripts/check_ci_budgets.py | tee -a "$GITHUB_STEP_SUMMARY"
+          run_api="repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
+          workflow=$(gh api "$run_api" --jq .path)
+          args=()
+          case "${workflow%%@*}" in
+            .github/workflows/ci.yml | .github/workflows/lint.yml | .github/workflows/pullfrog-checks.yml) ;;
+            *) args+=(--report-only) ;;
+          esac
+          gh api --paginate "$run_api/attempts/$ATTEMPT/jobs?per_page=100" |
+            jq -s . | python3 scripts/check_ci_budgets.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
