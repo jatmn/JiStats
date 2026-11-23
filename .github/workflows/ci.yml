@@ -151,6 +151,8 @@ jobs:
         id: windows-tests
         if: needs.linux-cross.result == 'success'
         env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
           REPEAT_OFFLINE_NOTICE_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.repeat_offline_notice_tests }}
         shell: pwsh
         run: |
