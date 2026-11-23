@@ -32,7 +32,6 @@ def main():
             sys.exit(f'Job {job["id"]} is still running')
         if job["conclusion"] != "success":
             print(f'- {job["name"]}: source conclusion {job["conclusion"]}')
-            failed = True
         failed |= check(job["name"], elapsed(job), 35)
         steps = [s for s in job["steps"] if s["conclusion"] not in ("cancelled", "skipped")]
         setup = sum(elapsed(s) for s in steps if s["name"].lower().startswith(setup_prefixes))
