@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "module": "NodeNext",
+    "target": "ES2023",
+    "types": ["node"],
+    "strict": false
+  },
+  "include": ["scripts/*.mjs"]
+}

@@ -1,0 +1,43 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "devDependencies": {
+        "@types/node": "24.19.2",
+        "bun": "1.4.5-canary.20261122.1",
+      },
+    },
+  },
+  "packages": {
+    "@oven/bun-darwin-aarch64": ["@oven/bun-darwin-aarch64@1.4.5-canary.20261122.1", "", { "os": "darwin", "cpu": "arm64" }, "sha512-hlKJxr77ioz46htosxi1hEk4JSO2qbcZVhH9UdMTiWeKJtZEME9yqNPsTF2uEmNHSOP7+ZViFook7YBQzJSmug=="],
+
+    "@oven/bun-darwin-x64": ["@oven/bun-darwin-x64@1.4.5-canary.20261122.1", "", { "os": "darwin", "cpu": "x64" }, "sha512-LTv42pwkIaer8dqh65ECLY1p47l1uunQ7O3KmiWn4XUIMCpjWT2HWVb77XjDcvdjgd2mxWber7gNVS7L1zUiIQ=="],
+
+    "@oven/bun-freebsd-aarch64": ["@oven/bun-freebsd-aarch64@1.4.5-canary.20261122.1", "", { "os": "freebsd", "cpu": "arm64" }, "sha512-AuIjyaAyk6iQ/Vnt012NnLRCL/e8wADhpufKYmxx2r96Vgi3nqA3GGl07cgqDGh7c4lU9YdhCUJVUA8U6+/+2w=="],
+
+    "@oven/bun-freebsd-x64": ["@oven/bun-freebsd-x64@1.4.5-canary.20261122.1", "", { "os": "freebsd", "cpu": "x64" }, "sha512-0csuDNqFe/zwn68UWNT9HkoSm+rS+C0KoVoKjm0wwpQDDf5hVWHfSCeTMS0+k3A9DvKA5xvmLAuCL7YHFWyPVA=="],
+
+    "@oven/bun-linux-aarch64": ["@oven/bun-linux-aarch64@1.4.5-canary.20261122.1", "", { "os": "linux", "cpu": "arm64", "libc": "glibc" }, "sha512-IcMTGcKKhKzvp31e3u3XoIsLPw0iU9qgqofsEXCnkfxHEUN7f0yqmfy+kWzmJVTAstLGpaofMU9/K23Pb2XC8w=="],
+
+    "@oven/bun-linux-aarch64-android": ["@oven/bun-linux-aarch64-android@1.4.5-canary.20261122.1", "", { "os": "android", "cpu": "arm64" }, "sha512-XvTzVzCjOM5m26IC3KL9dyAaaFhdXNfBf02lsddxe3ZnTTNn94ygrIGGHWG5SZEfOHDMdnq8SgeJJIdFZ7xW5g=="],
+
+    "@oven/bun-linux-aarch64-musl": ["@oven/bun-linux-aarch64-musl@1.4.5-canary.20261122.1", "", { "os": "linux", "cpu": "arm64", "libc": "musl" }, "sha512-F+JenRSKBssZTsSFORkyul5mBughTXvjTOUySghWfMzG1Vq20ydKrFWl4Ym0aT0FWQUjKCADjj/x78eo0Qkitw=="],
+
+    "@oven/bun-linux-x64": ["@oven/bun-linux-x64@1.4.5-canary.20261122.1", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-RYDzU/feWphwaSqEW38Gt85Ux8j/yZZf113r911kixI8xFC0Khl3BBFeHVh/SWh7FoyHlLckuqyzBGssiXA58g=="],
+
+    "@oven/bun-linux-x64-android": ["@oven/bun-linux-x64-android@1.4.5-canary.20261122.1", "", { "os": "android", "cpu": "x64" }, "sha512-+n2XrrVjLNz3qrZmRYqtjIFRY8qLg5703FlKjli8aWrqSGPOozPS3ZuZs3/h8bCDphW1CZaEZ/qck+moT611OA=="],
+
+    "@oven/bun-linux-x64-musl": ["@oven/bun-linux-x64-musl@1.4.5-canary.20261122.1", "", { "os": "linux", "cpu": "x64", "libc": "musl" }, "sha512-rjRtVfW+9h4DJsEI5ijFmeNCIVn6cDiQrUBPhquJDcM2GcU4x80Ta5Qo0JWe3cp8vjS6FWQ4yswWiiVi34hBRw=="],
+
+    "@oven/bun-windows-aarch64": ["@oven/bun-windows-aarch64@1.4.5-canary.20261122.1", "", { "os": "win32", "cpu": "arm64" }, "sha512-IP/4AcUBnlz9jVSAQHsPrjYcKmx4JS9DfSUvEq0v7AQj2TWCxakO8CFjxJvkBwzGGidBAkJfgMoiQrj4j+XWOg=="],
+
+    "@oven/bun-windows-x64": ["@oven/bun-windows-x64@1.4.5-canary.20261122.1", "", { "os": "win32", "cpu": "x64" }, "sha512-nOZlOS52rGoCdDm2Y9FcsJoQwcilFw77xZdQg12PTOhGJhfB0zHMECB6tdYh4jXQ3ItYBUAYLPJ47FwO5tBszg=="],
+
+    "@types/node": ["@types/node@24.19.2", "", { "dependencies": { "undici-types": ">=7.24.0 <7.24.7" } }, "sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ=="],
+
+    "bun": ["bun@1.4.5-canary.20261122.1", "", { "optionalDependencies": { "@oven/bun-darwin-aarch64": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-darwin-x64": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-freebsd-aarch64": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-freebsd-x64": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-linux-aarch64": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-linux-aarch64-android": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-linux-aarch64-musl": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-linux-x64": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-linux-x64-android": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-linux-x64-musl": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-windows-aarch64": "1.4.5-canary.20261122.1+25c4fca", "@oven/bun-windows-x64": "1.4.5-canary.20261122.1+25c4fca" }, "os": [ "!aix", "!sunos", "!openbsd", ], "cpu": [ "x64", "arm64", ], "hasInstallScript": true, "bin": { "bun": "bin/bun.exe", "bunx": "bin/bunx.exe" } }, "sha512-kXDkANMROTdH1No9jPJUQNy/RYffkBHv5mYeNBjWKADZPisJsSnMaa8iatbfEPtXw1UdN/H2sVqXEFadVyG8rQ=="],
+
+    "undici-types": ["undici-types@7.24.6", "", {}, "sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg=="],
+  }
+}

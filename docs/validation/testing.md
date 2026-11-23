@@ -49,6 +49,10 @@ Set `JISTATS_CLANG_FORMAT` to the LLVM 18 executable if it has a different name 
 
 For full-tree formatting and static analysis on Windows, install `mingw-w64-ucrt-x86_64-clang-tools-extra` and `mingw-w64-ucrt-x86_64-clang` alongside the UCRT64 build tools. From the UCRT64 shell, run the [clang gate](../../scripts/run_clang_quality_gate.ps1) with `CC=gcc CXX=g++ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_clang_quality_gate.ps1`. Use a fresh build directory when changing compilers.
 
+## JavaScript checks
+
+The [Pullfrog checks workflow](../../.github/workflows/pullfrog-checks.yml) runs pinned Bun lint, formatting, type checking and tests, then runs the authorization tests under Node. It reports failures in the advisory `Pullfrog authorization tests` check. The required merge check on `main` is `CI passed`.
+
 ## CodeQL scanning
 
 The [repository CodeQL workflow](../../.github/workflows/codeql.yml) scans C/C++, JavaScript/TypeScript, and GitHub Actions on same-repository pull requests and pushes for `main` and `release/**`. It skips the analysis jobs when the tested diff contains only Markdown documentation. Markdown inside the synthetic Kimi runtime and redacted ChatGPT export payloads still triggers scans. The workflow also scans weekly, on manual dispatch, and when a diff cannot be verified. The C/C++ job runs without a build, so it first configures CMake to download the pinned dependency headers into `build-codeql/` and excludes that directory from the scan.
