@@ -14,7 +14,8 @@ on:
         default: false
 
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && github.run_id) || github.ref }}
+  # Push SHAs and manual runs are isolated. A delayed push must not cancel a newer tip.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && github.run_id) || github.ref }}-${{ github.event_name == 'push' && github.sha || 'latest' }}
   cancel-in-progress: true
 
 permissions:
@@ -44,10 +45,12 @@ jobs:
           build=true
           files="$RUNNER_TEMP/jistats-changed-files"
           # Selection is safe only when the target branch enforces a merge queue.
-          branch=$(jq -rn --arg branch "$GITHUB_BASE_REF" '$branch | @uri')
-          queued=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$branch" --paginate |
-            jq -s 'any(.[][]; .type == "merge_queue")')
-          if [[ "$queued" != true ]]; then
+          if ! branch=$(jq -rn --arg branch "$GITHUB_BASE_REF" '$branch | @uri') ||
+             ! queued=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$branch" --paginate |
+               jq -s 'if length > 0 and all(.[]; type == "array") then
+                 any(.[][]; .type == "merge_queue") else error("invalid rules response") end'); then
+            reason="could not check the target branch rules"
+          elif [[ "$queued" != true ]]; then
             reason="target branch has no merge queue"
           elif git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null &&
             git diff --no-ext-diff --no-renames --name-only -z "$GITHUB_SHA^1" "$GITHUB_SHA" -- > "$files"; then
@@ -252,12 +255,8 @@ jobs:
         run: |
           set -eu
           echo "Event=$EVENT detection=$DETECT build=$BUILD Linux=$LINUX Windows=$WINDOWS"
-          if [[ $EVENT == pull_request ]]; then
-            [[ $DETECT == success ]]
-            if [[ $BUILD == false ]]; then
-              [[ $LINUX == skipped && $WINDOWS == skipped ]]
-              exit
-            fi
-            [[ $BUILD == true ]]
+          if [[ $EVENT == pull_request && $DETECT == success && $BUILD == false ]]; then
+            [[ $LINUX == skipped && $WINDOWS == skipped ]]
+            exit
           fi
           [[ $LINUX == success && $WINDOWS == success ]]
