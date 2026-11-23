@@ -354,6 +354,7 @@ void seedStartupPreferences(
     const std::string& analysisCustomRangeEndUtc = "") {
     StorageService storage;
     REQUIRE(storage.init(path));
+    REQUIRE(storage.beginTransaction());
 
     const auto setSetting = [&storage](const std::string& key, const std::string& value) {
         return storage.execute(
@@ -387,6 +388,7 @@ void seedStartupPreferences(
     REQUIRE(setSetting("ui.analysis_custom_range_start_utc", analysisCustomRangeStartUtc));
     REQUIRE(setSetting("ui.analysis_custom_range_end_utc", analysisCustomRangeEndUtc));
 
+    REQUIRE(storage.commitTransaction());
     storage.close();
 }
 
