@@ -18,7 +18,9 @@ CMake downloads pinned dependencies during configuration and verifies their SHA-
 
 ### Building on Windows
 
-Open an [MSYS2 UCRT64 shell](https://www.msys2.org/docs/environments/) and run these commands from the repository root. If JiStats is already running from this build directory, close it before rebuilding.
+If JiStats is running from the build directory, choose **File → Exit** in the dashboard or right-click the JiStats tray icon and choose **Exit**. Wait for JiStats to exit before rebuilding so the linker can replace the executable.
+
+Open an [MSYS2 UCRT64 shell](https://www.msys2.org/docs/environments/) and run these commands from the repository root.
 
 ```bash
 pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
@@ -48,7 +50,7 @@ Cross-builds use bundled SQLite by default. With bundled or statically linked SQ
 
 For local test commands and CI coverage, see the [verification guide](docs/validation/testing.md). The Windows tests can open desktop windows as they exercise the UI.
 
-For a portable release, include `JiStats.exe` and the [redistribution notices](#license), including the [toolchain notices for MinGW builds](THIRD_PARTY_NOTICES.md#mingw-w64-and-winpthreads). Follow the [release checklist](docs/release-checklist.md) to smoke-test the assembled bundle on Windows.
+For a standalone portable release, use `build-mingw/bin/JiStats.exe` from the [MinGW build with bundled SQLite](#building-on-linux). Include the [redistribution notices](#license) and [MinGW toolchain notices](THIRD_PARTY_NOTICES.md#mingw-w64-and-winpthreads). Follow the [release checklist](docs/release-checklist.md) to smoke-test the assembled bundle on Windows.
 
 ### Optional UPX compression
 
