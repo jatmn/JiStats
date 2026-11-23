@@ -2049,7 +2049,8 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             }
 
             const auto accountForInterval = [&](const std::string& rollout, const UsageSample& baseline,
-                                                const UsageSample& counter) {
+                                                const UsageSample& counter, const EventTime& overlapStart,
+                                                const EventTime& overlapEnd) {
                 const bool estimatedOrder = baseline.time.seconds == counter.time.seconds &&
                                             (!baseline.time.subsecondNs || !counter.time.subsecondNs);
                 legacyEstimated =
@@ -2071,8 +2072,8 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                         const bool linked = request->sourceId.rfind("line:", 0) == 0 &&
                                             linkedCounters.count({rollout, request->sourceId}) != 0;
                         const bool coversRequest = linked ? request->sourceId == counter.sourceId
-                                                          : !definitelyBefore(request->time, baseline.time) &&
-                                                                !definitelyBefore(counter.time, request->time);
+                                                          : !definitelyBefore(request->time, overlapStart) &&
+                                                                !definitelyBefore(overlapEnd, request->time);
                         if (coversRequest) {
                             // A boundary shared by two intervals may overlap both. Consume its evidence once.
                             const long long overlap = std::min(unrecordedTokens, request->tokens);
@@ -2245,13 +2246,8 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     begin = end;
                 }
 
-                const UsageSample* baseline = nullptr;
-                const auto useCounter = [&](const UsageSample& counter) {
-                    if (baseline) {
-                        accountForInterval(rollout, *baseline, counter);
-                    }
-                    baseline = &counter;
-                };
+                std::vector<const UsageSample*> orderedCounters;
+                orderedCounters.reserve(counters.size());
                 const auto useEstimatedSecond = [&](const CounterSecond& second, const CounterOrder& order,
                                                     const UsageSample* next) {
                     std::vector<const UsageSample*> anchors;
@@ -2269,9 +2265,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     }
 
                     if (anchors.size() == static_cast<std::size_t>(second.end - second.begin)) {
-                        for (const auto* anchor : anchors) {
-                            useCounter(*anchor);
-                        }
+                        orderedCounters.insert(orderedCounters.end(), anchors.begin(), anchors.end());
                         return;
                     }
 
@@ -2326,6 +2320,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                             withinKnownDrops.insert(remaining.extract(it++));
                         }
                     }
+                    const auto* baseline = orderedCounters.empty() ? nullptr : orderedCounters.back();
                     if (!remaining.empty() && (!baseline || baseline->tokens <= order.first->tokens)) {
                         fillGap(0, baseline ? baseline->tokens : 0, order.first->tokens);
                     }
@@ -2336,11 +2331,9 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     remaining.merge(withinKnownDrops);
                     fillInternalGaps(false);
                     for (std::size_t gap = 0; gap < gaps.size(); ++gap) {
-                        for (const auto* sample : gaps[gap]) {
-                            useCounter(*sample);
-                        }
+                        orderedCounters.insert(orderedCounters.end(), gaps[gap].begin(), gaps[gap].end());
                         if (gap < anchors.size()) {
-                            useCounter(*anchors[gap]);
+                            orderedCounters.push_back(anchors[gap]);
                         }
                     }
                 };
@@ -2349,6 +2342,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     legacyEstimated = true;
                     std::vector<std::vector<CounterOrder>> choices;
                     choices.reserve(end - begin);
+                    const auto* baseline = orderedCounters.empty() ? nullptr : orderedCounters.back();
                     for (auto second = begin; second != end; ++second) {
                         auto orders = counterOrders(*second);
                         for (auto& order : orders) {
@@ -2392,7 +2386,9 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 };
                 for (auto second = seconds.cbegin(); second != seconds.cend();) {
                     if (second->begin == second->ordered) {
-                        std::for_each(second->begin, second->end, useCounter);
+                        for (auto sample = second->begin; sample != second->end; ++sample) {
+                            orderedCounters.push_back(&*sample);
+                        }
                         ++second;
                     } else {
                         const auto end = std::find_if(second + 1, seconds.cend(), [](const CounterSecond& next) {
@@ -2401,6 +2397,25 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                         useEstimatedRun(second, end);
                         second = end;
                     }
+                }
+
+                // An untimed counter splits the token delta, but every split still lies between the
+                // nearest known timestamps. Keep those bounds when reconciling unlinked requests.
+                for (std::size_t start = 0; start + 1 < orderedCounters.size();) {
+                    std::size_t end = start + 1;
+                    while (end + 1 < orderedCounters.size() && !orderedCounters[end]->time.subsecondNs) {
+                        ++end;
+                    }
+                    const auto& firstTime = orderedCounters[start]->time;
+                    const auto& lastTime = orderedCounters[end]->time;
+                    for (std::size_t i = start; i < end; ++i) {
+                        const auto& before = *orderedCounters[i];
+                        const auto& after = *orderedCounters[i + 1];
+                        const auto& overlapStart = before.time.seconds == firstTime.seconds ? firstTime : before.time;
+                        const auto& overlapEnd = after.time.seconds == lastTime.seconds ? lastTime : after.time;
+                        accountForInterval(rollout, before, after, overlapStart, overlapEnd);
+                    }
+                    start = end;
                 }
             }
 

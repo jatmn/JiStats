@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- Codex Analysis preserves enclosing timestamps when matching recorded requests to estimated counter intervals. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 467 Windows cases passed under Wine.
+
 - Codex Analysis retains distinct legacy counter readings when tallying prompts and per-minute growth across estimated resets. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 466 Windows cases passed under Wine.
 
 - Codex Analysis estimates adjacent unordered seconds together. It uses observed counter bounds to avoid an extra reset from a guessed first reading. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 465 Windows cases passed under Wine.

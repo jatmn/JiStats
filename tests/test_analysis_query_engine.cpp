@@ -818,6 +818,39 @@ TEST_CASE("Codex tallies distinct interior readings from a legacy second", "[ana
     CHECK(analysis.codexHourlyHistory.points[2].tokensPerMinute == Catch::Approx(25));
 }
 
+TEST_CASE("Codex request overlap stays within the enclosing timed counters", "[analysis][codex]") {
+    requireSqlite();
+    const int requestNs = GENERATE(100000000, 450000000, 900000000);
+    const bool timedInterior = GENERATE(false, true);
+    const bool twoInteriorReadings = GENERATE(false, true);
+    CAPTURE(requestNs, timedInterior, twoInteriorReadings);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/mixed-precision";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const auto second = now - 60;
+    seedCodexUsageEvent(storage, second, 100, rollout, {}, 300000000);
+    seedCodexUsageEvent(storage, second, 150, rollout, {},
+                        timedInterior ? std::optional<int>(400000000) : std::nullopt);
+    if (twoInteriorReadings) {
+        seedCodexUsageEvent(storage, second, 200, rollout, {},
+                            timedInterior ? std::optional<int>(500000000) : std::nullopt);
+    }
+    seedCodexUsageEvent(storage, second, twoInteriorReadings ? 250 : 200, rollout, {}, 600000000);
+    seedCodexUsageEvent(storage, second, 50, rollout, "response:recorded", requestNs);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    const bool separateRequest = requestNs < 300000000 || requestNs > 600000000;
+    const auto expectedPrompts = 2 + twoInteriorReadings + separateRequest;
+    CHECK(analysis.codexThroughput.promptsLast1h == expectedPrompts);
+    CHECK(analysis.codexThroughput.tokensLast1h == expectedPrompts * 50);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 1);
+    CHECK(analysis.codexHourlyHistory.points.front().tokensPerMinute == Catch::Approx(expectedPrompts * 50));
+}
+
 TEST_CASE("An unsequenced Codex counter does not replace a matching timed boundary", "[analysis][codex]") {
     requireSqlite();
     TempTestDatabase tempDb;
