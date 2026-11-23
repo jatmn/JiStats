@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- The CI timing audit now evaluates paginated GitHub job data directly with jq. Replaying two hosted attempts and synthetic cases produced the same summaries and exit status, including strict budget boundaries, report-only runs, and empty or unfinished job data. [Timing audit verification](validation/testing.md#ci-timing-audit)
+
 - Codex attribution opens the shared profile mutex with the rights needed to wait and release it. The restricted-access regression reproduced a failed Off save on the starting head and passed after repair. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and all 473 Windows cases passed under Wine. Live mixed-elevation Windows testing remains open. [PR #31](https://github.com/jatmn/JiStats/pull/31)
 
 - Codex attribution now serializes profile revocation with source scans, recovers after a SQLite transaction rolls itself back, and keeps pending checkbox choices during Settings redraw. The starting revision reproduced all three defects. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and all 472 Windows cases passed under Wine after repair. Native Windows desktop smoke remains open. [PR #31](https://github.com/jatmn/JiStats/pull/31)
