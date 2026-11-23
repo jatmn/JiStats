@@ -2,10 +2,12 @@
 #include "db/StorageService.hpp"
 #include "BaselineSchema.hpp"
 #include <charconv>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <thread>
 
 namespace JiStats {
 
@@ -82,10 +84,7 @@ bool SchemaManager::migrate() {
                 "Cannot compact the database after redacting legacy Claude references: " + compacted.error();
             return false;
         }
-        // For databases using WAL, flush the rebuilt pages into the main file.
-        const auto checkpoint = storage.execute("PRAGMA main.wal_checkpoint(TRUNCATE);");
-        if (!checkpoint.success() || checkpoint.rowCount() != 1 || checkpoint.getInt(0, 0) != 0) {
-            pImpl->lastError = "Cannot checkpoint the compacted database after redacting legacy Claude references";
+        if (!checkpointClaudeRedaction()) {
             return false;
         }
         // Leave version 12 recorded until the file is compacted so a failed or
@@ -204,6 +203,30 @@ SchemaManager::BaselineResult SchemaManager::migrateClaudeReferences(bool writab
         return BaselineResult::Failed;
     }
     return BaselineResult::NeedsCompaction;
+}
+
+bool SchemaManager::checkpointClaudeRedaction() {
+    // Flush the rebuilt WAL pages into the main file. SQLite bypasses the
+    // connection's busy handler if another opener owns the checkpoint lock.
+    using Clock = std::chrono::steady_clock;
+    const auto deadline = Clock::now() + std::chrono::seconds(5);
+    do {
+        const auto checkpoint = storage.execute("PRAGMA main.wal_checkpoint(TRUNCATE);");
+        if (!checkpoint.success() || checkpoint.rowCount() != 1) {
+            break;
+        }
+        const int busy = checkpoint.getInt(0, 0);
+        if (busy == 0) {
+            return true;
+        }
+        if (busy != 1 || Clock::now() >= deadline) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    } while (Clock::now() < deadline);
+
+    pImpl->lastError = "Cannot checkpoint the compacted database after redacting legacy Claude references";
+    return false;
 }
 
 SchemaManager::BaselineResult SchemaManager::recordClaudeRedaction(int& current) {

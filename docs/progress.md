@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- The version 13 Claude upgrade now retries a busy WAL checkpoint when two instances open an older database together. A bundled-SQLite regression holds the checkpoint lock until the second opener reaches it. Both instances now open with persistence, and the upgrade still records version 13 only after a checkpoint succeeds. [PR #62 review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672761310)
+
 - The version 13 Claude upgrade now rebuilds the SQLite file after redacting the rows. Enabling SQLite secure deletion for the updates cleared the rewritten rows but left 44 copies of the path in unused space on two B-tree pages. The regression checks the closed database as well as the row values and exercises a retry after a failed rebuild. [PR #62 review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672618383)
 
 - The PR #62 follow-up stops a Codex scan after an account or checkpoint storage error. A forced SQLite account rollback on the reviewed head left 250 tokens committed and made the retry report 1,000 instead of 750. The follow-up also moves Claude path redaction to the bundled version 13 database upgrade. The old replay-only route left legacy paths behind when the cache revision changed. The migration test passes from a directory without migration files or a Claude cache and checks that event IDs and totals are preserved. [Codex review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672469390) · [Claude review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672469396) · [Storage guide](reference/storage.md#migration-behavior)
@@ -77,6 +79,7 @@ The observation window runs from 2026-11-23 00:00 UTC through 2026-12-06 23:59 U
 | Local Wine theme regression setup could not find the Analysis provider label | `tests/test_dashboard_presenter.cpp` | Fixture defect. Attach the Analysis presenter before opening the window so the test exercises the production controls. The attached regression verifies cross-window background consistency. |
 | Selected-tab paint lost its amber stripe with the native edge clipped | `tests/test_dashboard_presenter.cpp` | Caught a visual regression on the starting head of PR #59. The shared painter now insets the stripe from the native edge. The test checks that at least one amber pixel appears in the drawable tab face. |
 | [Local bundled-SQLite and Wine upgrade runs left a Claude path in the database file](https://github.com/jatmn/JiStats/pull/62#discussion_r4672618383) | `tests/test_schema_manager.cpp` | Caught a privacy regression at `81a72bc`. A follow-up run with secure deletion still found older copies in unused page space. The upgrade now rebuilds the file before recording version 13. The test checks the raw database and verifies that a failed rebuild can be retried. |
+| [Local bundled-SQLite run lost persistence on the second WAL open](https://github.com/jatmn/JiStats/pull/62#discussion_r4672761310) | `tests/test_schema_manager.cpp` | Caught a concurrency regression at `6ba148f`. SQLite bypassed the connection's busy handler when another connection held the checkpoint lock. The regression holds that lock and verifies that both opens succeed after it is released. |
 
 ### Roadmap audit
 

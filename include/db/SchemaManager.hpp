@@ -39,6 +39,7 @@ public:
     BaselineResult prepareBaseline(int& current, bool writable);
     BaselineResult reconcileBaseline(bool writable);
     BaselineResult migrateClaudeReferences(bool writable);
+    bool checkpointClaudeRedaction();
     BaselineResult recordClaudeRedaction(int& current);
     bool migrateToVersion(int version);
     std::string loadMigration(int version) const;

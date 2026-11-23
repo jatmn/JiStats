@@ -4,12 +4,14 @@
 #include "db/StorageService.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -142,6 +144,77 @@ int installBaselineInspectionGate(sqlite3* db, char**, const sqlite3_api_routine
             return 0;
         },
         nullptr);
+}
+
+struct WalCheckpointOverlap {
+    enum Stage { Starting, FirstReady, SecondReady, ReaderReady, CheckpointLocked, SecondReturned, ReaderClosed };
+
+    void advance(Stage next) {
+        {
+            std::lock_guard lock(mutex);
+            if (next > stage) {
+                stage = next;
+            }
+        }
+        changed.notify_all();
+    }
+
+    bool waitFor(Stage target) {
+        std::unique_lock lock(mutex);
+        const bool reached = changed.wait_for(lock, std::chrono::seconds(10), [&] { return stage >= target; });
+        timedOut |= !reached;
+        return reached;
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    Stage stage = Starting;
+    bool timedOut = false;
+};
+
+thread_local WalCheckpointOverlap* walOverlap = nullptr;
+thread_local bool firstWalOpener = false;
+
+int installWalCheckpointGate(sqlite3* db, char**, const sqlite3_api_routines*) {
+    if (!walOverlap) {
+        return SQLITE_OK;
+    }
+    return sqlite3_trace_v2(
+        db, SQLITE_TRACE_STMT | SQLITE_TRACE_PROFILE,
+        [](unsigned event, void* connection, void* statement, void*) {
+            const auto* sql = sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
+            if (!walOverlap || !sql || std::string_view(sql) != "PRAGMA main.wal_checkpoint(TRUNCATE);") {
+                return 0;
+            }
+            using Overlap = WalCheckpointOverlap;
+            if (firstWalOpener && event == SQLITE_TRACE_STMT) {
+                walOverlap->advance(Overlap::FirstReady);
+                walOverlap->waitFor(Overlap::ReaderReady);
+                sqlite3_busy_handler(
+                    static_cast<sqlite3*>(connection),
+                    [](void* data, int attempt) {
+                        auto& overlap = *static_cast<Overlap*>(data);
+                        // TRUNCATE owns the checkpoint lock while waiting for the WAL reader.
+                        overlap.advance(Overlap::CheckpointLocked);
+                        return attempt == 0 && overlap.waitFor(Overlap::ReaderClosed) ? 1 : 0;
+                    },
+                    walOverlap);
+            }
+            if (!firstWalOpener && event == SQLITE_TRACE_STMT) {
+                walOverlap->advance(Overlap::SecondReady);
+                walOverlap->waitFor(Overlap::CheckpointLocked);
+            }
+            if (event == SQLITE_TRACE_PROFILE) {
+                if (firstWalOpener) {
+                    sqlite3_busy_timeout(static_cast<sqlite3*>(connection), 5000);
+                } else {
+                    walOverlap->advance(Overlap::SecondReturned);
+                }
+                walOverlap = nullptr;
+            }
+            return 0;
+        },
+        db);
 }
 
 bool denySchemaVersionRead = false;
@@ -572,6 +645,63 @@ TEST_CASE("StorageService supports overlapping opens during historical baseline 
 
     REQUIRE(gate.inspections.load() == 2);
     REQUIRE_FALSE(gate.timedOut.load());
+    INFO("First open: " << firstError << ", second open: " << secondError);
+    CHECK(firstError.empty());
+    CHECK(secondError.empty());
+#else
+    requireSqlite();
+#endif
+}
+
+TEST_CASE("StorageService supports overlapping WAL opens during the Claude upgrade", "[schema][migration]") {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    const auto journalMode = storage.execute("PRAGMA main.journal_mode = WAL;");
+    REQUIRE(journalMode.success());
+    REQUIRE(journalMode.getString(0, 0) == "wal");
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
+    storage.close();
+
+    WalCheckpointOverlap gate;
+    const auto extension = reinterpret_cast<void (*)()>(installWalCheckpointGate);
+    REQUIRE(sqlite3_auto_extension(extension) == SQLITE_OK);
+    const auto open = [&](bool first) {
+        walOverlap = &gate;
+        firstWalOpener = first;
+        StorageService connection;
+        if (!connection.init(tempDb.path())) {
+            return connection.getLastError();
+        }
+        return SchemaManager(connection).getCurrentVersion() == 13 ? std::string{} : "Version 13 was not recorded";
+    };
+
+    auto first = std::async(std::launch::async, open, true);
+    const bool firstReady = gate.waitFor(WalCheckpointOverlap::FirstReady);
+    auto second = std::async(std::launch::async, open, false);
+    const bool secondReady = gate.waitFor(WalCheckpointOverlap::SecondReady);
+
+    sqlite3* connection = nullptr;
+    const int opened = sqlite3_open_v2(tempDb.path().c_str(), &connection, SQLITE_OPEN_READONLY, nullptr);
+    int read = opened;
+    if (opened == SQLITE_OK) {
+        read = sqlite3_exec(connection, "BEGIN; SELECT MAX(version) FROM schema_version;", nullptr, nullptr, nullptr);
+    }
+    gate.advance(WalCheckpointOverlap::ReaderReady);
+    const bool secondReturned = gate.waitFor(WalCheckpointOverlap::SecondReturned);
+    sqlite3_close(connection);
+    gate.advance(WalCheckpointOverlap::ReaderClosed);
+
+    const auto firstError = first.get();
+    const auto secondError = second.get();
+    sqlite3_cancel_auto_extension(extension);
+    REQUIRE(firstReady);
+    REQUIRE(secondReady);
+    REQUIRE(opened == SQLITE_OK);
+    REQUIRE(read == SQLITE_OK);
+    REQUIRE(secondReturned);
+    REQUIRE_FALSE(gate.timedOut);
     INFO("First open: " << firstError << ", second open: " << secondError);
     CHECK(firstError.empty());
     CHECK(secondError.empty());
