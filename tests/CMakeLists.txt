@@ -126,5 +126,5 @@ set_target_properties(JiStatsTests PROPERTIES
 )
 
 # Register with CTest (run from repo root so relative fixture paths work)
-add_test(NAME JiStatsTests COMMAND $<TARGET_FILE:JiStatsTests>)
+add_test(NAME JiStatsTests COMMAND $<TARGET_FILE:JiStatsTests> --order rand)
 set_tests_properties(JiStatsTests PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

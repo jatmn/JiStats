@@ -15,6 +15,8 @@ Choose checks for the behavior affected and record the commands, results, and an
 
 Follow the [Linux build instructions](../../README.md#building-on-linux) for the native test build and the MinGW cross-build. For a focused native run, execute `build-linux/bin/JiStatsTests "[schema][migration]"` from the repository root. The native target covers the portable components listed in [tests/CMakeLists.txt](../../tests/CMakeLists.txt). The Windows target includes the remaining provider, controller, reporting and desktop integration tests.
 
+Both suites randomize case order. Full Windows runs compare the Catch2 execution report with its registration list and every tracked test translation unit. The `windows-test-file-times` artifact records the revision, seed and elapsed seconds per source file for 14 days.
+
 ## Windows commands
 
 Use the [UCRT64 build instructions](../../README.md#building-on-windows) to run the full suite locally. [CTest](../../tests/CMakeLists.txt) sets the working directory for relative fixture paths. For a focused run, launch `build-ucrt/bin/JiStatsTests.exe "[openai]"` from the repository root.
