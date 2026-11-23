@@ -32,6 +32,7 @@ jobs:
       - name: Check out the tested revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          filter: blob:none
           ref: ${{ github.sha }}
           fetch-depth: 2
           persist-credentials: false
@@ -100,6 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          filter: blob:none
           persist-credentials: false
       - name: Run Pullfrog authorization tests
         run: node --test scripts/pullfrog-review-check.test.mjs
@@ -165,6 +167,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          filter: blob:none
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

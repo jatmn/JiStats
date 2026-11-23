@@ -25,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          filter: blob:none
           ref: ${{ github.sha }}
           fetch-depth: 2
           persist-credentials: false
@@ -75,6 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          filter: blob:none
           persist-credentials: false
       # Buildless extraction resolves includes from the workspace. Configure
       # CMake to download the pinned dependency headers there, but scan only
