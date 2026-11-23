@@ -280,12 +280,7 @@ bool ObservationPersistenceBridge::ensureProviderId(const std::string& providerK
     QueryResult insertResult = storage_.execute(
         "INSERT INTO providers (provider_key, display_name) VALUES (?, ?);",
         {providerKey, makeProviderDisplayName(providerKey)});
-    if (insertResult.success()) {
-        providerId = static_cast<int>(insertResult.lastInsertRowId());
-        lastError_.clear();
-        return providerId > 0;
-    }
-
+    // A different writer can change the connection-wide last insert ID.
     if (tryGetSingleId(
             "SELECT id FROM providers WHERE provider_key = ? LIMIT 1;",
             {providerKey},
@@ -293,7 +288,9 @@ bool ObservationPersistenceBridge::ensureProviderId(const std::string& providerK
         return true;
     }
 
-    lastError_ = insertResult.error().empty() ? storage_.getLastError() : insertResult.error();
+    if (!insertResult.success()) {
+        lastError_ = insertResult.error().empty() ? storage_.getLastError() : insertResult.error();
+    }
     if (lastError_.empty()) {
         lastError_ = "Failed to resolve provider row for " + providerKey;
     }
@@ -317,19 +314,8 @@ bool ObservationPersistenceBridge::ensureObservationAccount(
     QueryResult insertResult = storage_.execute(
         "INSERT INTO accounts (provider_id, account_key, display_name, scope_type, scope_identifier) "
         "VALUES (?, ?, ?, ?, ?);",
-        {
-            std::to_string(providerId),
-            accountKey,
-            makeObservationDisplayName(providerKey, providerSurface),
-            "local_observation",
-            providerSurface
-        });
-    if (insertResult.success()) {
-        accountId = static_cast<int>(insertResult.lastInsertRowId());
-        lastError_.clear();
-        return accountId > 0;
-    }
-
+        {std::to_string(providerId), accountKey, makeObservationDisplayName(providerKey, providerSurface),
+         "local_observation", providerSurface});
     if (tryGetSingleId(
             "SELECT id FROM accounts WHERE provider_id = ? AND account_key = ? LIMIT 1;",
             {std::to_string(providerId), accountKey},
@@ -337,7 +323,9 @@ bool ObservationPersistenceBridge::ensureObservationAccount(
         return true;
     }
 
-    lastError_ = insertResult.error().empty() ? storage_.getLastError() : insertResult.error();
+    if (!insertResult.success()) {
+        lastError_ = insertResult.error().empty() ? storage_.getLastError() : insertResult.error();
+    }
     if (lastError_.empty()) {
         lastError_ = "Failed to resolve observation account for " + providerSurface;
     }
