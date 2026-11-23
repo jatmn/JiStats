@@ -2,11 +2,13 @@
 
 ## Dashboard and tray
 
-The dashboard is the main surface for current data and recent activity. **File** contains Settings, **Import OpenAI Export…**, **Export HTML Report…**, and Exit. **Help** contains View Help and About JiStats. Help and About should explain user-facing scope and provider availability. About summarizes the application and license. The tray stays available while the dashboard is closed and carries runtime status and offline actions.
+**Overview** starts with subscription quota for all enabled accounts. Each row shows the percentage remaining for each available window, its local reset time, and when the quota reading was last updated. Paired windows have separate tracks. Stale and offline accounts keep their last known values alongside their current status. If a provider gives no usable reading, its row says **Quota unavailable**. For Kimi, this includes enabling tracking without quota credentials. Hover over a row for provenance, confidence, and supporting counts.
 
-**Overview** puts connection, recovery, scheduled export, and freshness above quota and activity. Scroll the Overview with the wheel, scrollbar, or Page Up and Page Down. The OpenAI and HICAP model charts sit side by side when the window is wide enough and stack in a narrower window. The **Provider Snapshot** tab retains the detailed quota table. **Analysis** opens the dedicated Analysis window. Left and Right switch pages when the tabs have focus. Switching tabs reuses the dashboard controls and their current data. Analysis section jumps and scrolling move the existing controls within the workspace. History updates relayout the workspace when the controls or measured text change. Custom date input stays in the editor until its debounce commits.
+The **History** button opens or brings forward the dedicated Analysis window. **Settings** opens provider and application preferences. Both stay available while scrolling. **Provider Details** shows used percentages, supporting quota counts, and source information. Selecting a row remembers the account in that table. Use Left and Right to switch views when the tabs have focus. The tray stays available while the dashboard is closed and carries runtime status and offline actions.
 
-The quota label above each track describes the value the track represents. Paired windows have separate labels and tracks. Hover over a quota row for reset and source details, or over a chart point for its exact value and time. Model markers match the legend and identify traces in Windows contrast themes.
+Recorded activity, recovery and scheduled export status, and the Codex charts are below the quota rows. Recorded activity uses observed counts and durations. The **Today (UTC)** row starts at midnight UTC. Scroll with the wheel, scrollbar, or Page Up and Page Down. The OpenAI and HICAP model charts sit side by side when the window is wide enough and stack at narrower sizes. Hover over a chart point for its exact value and time. Model markers match the legend in regular and Windows contrast themes.
+
+**File** contains Settings, **Import OpenAI Export…**, **Export HTML Report…**, and Exit. **Help** contains View Help and About JiStats.
 
 ## Quota, freshness, and confidence
 

@@ -6,7 +6,7 @@ Open **File → Settings → Grok / Cursor** and enable either integration. The 
 
 Sign in with `grok login` in the Grok CLI. JiStats reads the standard local sign-in from `GROK_HOME` or `%USERPROFILE%\.grok`. API-key and custom CLI authentication configurations do not supply quota through this integration. [Grok CLI reference](https://docs.x.ai/build/cli/reference)
 
-If Provider Snapshot asks you to run `grok login` again, renew the sign-in in the Grok CLI. JiStats reads the updated credential on its next scheduled quota check. For a fixed `GROK_AUTH` override, update the variable and restart JiStats. The CLI owns credential renewal.
+If Provider Details asks you to run `grok login` again, renew the sign-in in the Grok CLI. JiStats reads the updated credential on its next scheduled quota check. For a fixed `GROK_AUTH` override, update the variable and restart JiStats. The CLI owns credential renewal.
 
 ## Cursor
 

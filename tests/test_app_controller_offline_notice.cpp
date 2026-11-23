@@ -538,6 +538,9 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     REQUIRE(app.clickDashboardOfflineDismissForTesting());
     REQUIRE(waitForCondition([&app]() { return !app.isDashboardOfflineNoticeVisibleForTesting(); },
                              std::chrono::seconds(5)));
+    // The offline startup also queues one background refresh. Let it finish before measuring the next check.
+    REQUIRE(waitForCondition([&]() { return kimi->getCompletedQuotaFetchCount() >= 2; }, std::chrono::seconds(5)));
+    app.refreshRuntimeForTesting();
     const auto dismissed = app.getConnectivityStateForTesting("kimi");
     REQUIRE(dismissed.has_value());
     REQUIRE(dismissed->noticeDismissedAt > 0);
@@ -548,6 +551,9 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     const auto withoutCredentials = app.getConnectivityStateForTesting("kimi");
     REQUIRE(withoutCredentials.has_value());
     CHECK(withoutCredentials->noticeDismissedAt == dismissed->noticeDismissedAt);
+    CHECK(withoutCredentials->status == dismissed->status);
+    CHECK(withoutCredentials->nextRetryAt == dismissed->nextRetryAt);
+    CHECK(withoutCredentials->lastCheckedAt == dismissed->lastCheckedAt);
 
     auto preferences = app.getDashboardViewModelForTesting().preferences;
     preferences.claudeCodeEnabled = true;
@@ -555,7 +561,10 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     app.applyDashboardPreferencesForTesting(preferences);
     const DashboardViewModel localOnly = app.getDashboardViewModelForTesting();
     CHECK(localOnly.runtimeState != RuntimeState::Offline);
-    CHECK(findProviderStatus(localOnly, "kimi") == nullptr);
+    const auto* localKimi = findProviderStatus(localOnly, "kimi");
+    REQUIRE(localKimi != nullptr);
+    CHECK(localKimi->state == ProviderState::Sample);
+    CHECK(localKimi->quotas.empty());
     const auto* localClaude = findProviderStatus(localOnly, "claude_code");
     REQUIRE(localClaude != nullptr);
     CHECK(localClaude->state == ProviderState::Live);

@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace JiStats {
@@ -102,7 +103,7 @@ public:
     // Subscribe to shell exit requests from the dashboard menu
     void setExitRequestedCallback(std::function<void()> callback);
 
-    // Host an AnalysisPresenter for the Analysis tab. DashboardPresenter does not own it.
+    // Host an AnalysisPresenter for the dedicated Analysis window. DashboardPresenter does not own it.
     void setAnalysisPresenter(class AnalysisPresenter* presenter);
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
@@ -286,6 +287,11 @@ struct DashboardViewModel {
     std::string offlineNoticeMessage;
 };
 
+struct LastKnownQuotaReading {
+    std::string lastSyncTime;
+    std::vector<QuotaInfo> quotas;
+};
+
 // Provider status
 struct ProviderStatus {
     std::string providerKey;
@@ -295,6 +301,10 @@ struct ProviderStatus {
     ProviderState state = ProviderState::Sample; // Explicit state instead of just isConnected
     std::string lastSyncTime;  // ISO8601 timestamp of last successful sync
     std::vector<QuotaInfo> quotas;
+    // Dashboard-only subscription readings retained during an outage.
+    std::optional<LastKnownQuotaReading> lastKnownQuota;
+    bool contributesToRuntimeState = true;
+    std::string quotaSource;       // Includes the attempted subscription plan when a refresh fails.
     bool locallyDetected = false;  // Whether local artifacts were found at startup
     std::string detectionMessage;  // Human-readable discovery status
 };

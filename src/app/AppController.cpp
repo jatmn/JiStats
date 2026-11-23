@@ -2691,22 +2691,24 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
             providerIt = std::prev(viewModel.providers.end());
         }
 
+        const auto planKey = result.getString(row, 3);
         const long long used = result.getInt64(row, 6);
         const long long limit = result.getInt64(row, 7);
         const long long remaining = result.getInt64(row, 8);
-        QuotaInfo quota = makeQuota(
-            quotaPlanLabelForProvider(
-                providerKey,
-                "",
-                result.getString(row, 3),
-                result.getString(row, 4)),
-            result.getString(row, 5),
-            used,
-            limit,
-            result.getString(row, 9),
-            remaining);
+        QuotaInfo quota = makeQuota(quotaPlanLabelForProvider(providerKey, "", planKey, result.getString(row, 4)),
+                                    result.getString(row, 5), used, limit, result.getString(row, 9), remaining);
         if (providerKey == "grok" || providerKey == "cursor") {
             quota.providerSurface = providerKey + "_subscription_api";
+            const auto resetTime = parseRuntimeTimestamp(result.getString(row, 10));
+            quota.windowResetAt = resetTime > snapshotTime ? resetTime : 0;
+        } else if (providerKey == "minimax") {
+            // Runtime plan keys store the source ahead of the optional window suffix.
+            const auto planSource = planKey.substr(0, planKey.find(':'));
+            if (planSource == "minimax_subscription_coding_plan" || planSource == "coding_plan") {
+                quota.providerSurface = "minimax_subscription_coding_plan";
+            } else if (planSource == "minimax_subscription_token_plan" || planSource == "token_plan") {
+                quota.providerSurface = "minimax_subscription_token_plan";
+            }
             const auto resetTime = parseRuntimeTimestamp(result.getString(row, 10));
             quota.windowResetAt = resetTime > snapshotTime ? resetTime : 0;
         }
@@ -2798,7 +2800,7 @@ void applyRuntimeStateToViewModel(DashboardViewModel& viewModel) {
     std::vector<ProviderState> states;
     states.reserve(viewModel.providers.size());
     for (const auto& provider : viewModel.providers) {
-        if (provider.isEnabled) {
+        if (provider.isEnabled && provider.contributesToRuntimeState) {
             states.push_back(provider.state);
         }
     }
@@ -2842,7 +2844,7 @@ bool isLimitlessLocalActivityQuota(const ProviderStatus& provider, const QuotaIn
         quota.providerSurface == "claude_code_local_stats";
 }
 
-bool isTaskbarSubscriptionQuota(const ProviderStatus& provider, const QuotaInfo& quota) {
+bool isSubscriptionQuotaReading(const ProviderStatus& provider, const QuotaInfo& quota) {
     if (quota.limit <= 0) {
         return false;
     }
@@ -2861,6 +2863,43 @@ bool isTaskbarSubscriptionQuota(const ProviderStatus& provider, const QuotaInfo&
     }
 
     return false;
+}
+
+void retainLastKnownDashboardQuota(DashboardViewModel& next, const DashboardViewModel& previous) {
+    for (auto& provider : next.providers) {
+        if (!provider.isEnabled || provider.state != ProviderState::Offline || !provider.quotas.empty()) {
+            continue;
+        }
+
+        const auto prior = std::find_if(
+            previous.providers.begin(), previous.providers.end(), [&provider](const ProviderStatus& candidate) {
+                return candidate.isEnabled && candidate.providerKey == provider.providerKey &&
+                       candidate.accountId == provider.accountId;
+            });
+        if (prior == previous.providers.end()) {
+            continue;
+        }
+        if (prior->state == ProviderState::Sample) {
+            continue;
+        }
+
+        const auto& previousQuota = prior->lastKnownQuota ? prior->lastKnownQuota->quotas : prior->quotas;
+        LastKnownQuotaReading reading;
+        reading.lastSyncTime = prior->lastKnownQuota ? prior->lastKnownQuota->lastSyncTime : prior->lastSyncTime;
+        if (reading.lastSyncTime.empty()) {
+            continue;
+        }
+        for (const auto& quota : previousQuota) {
+            const bool matchingPlan = provider.providerKey != "minimax" ||
+                                      (!provider.quotaSource.empty() && quota.providerSurface == provider.quotaSource);
+            if (matchingPlan && isSubscriptionQuotaReading(*prior, quota)) {
+                reading.quotas.push_back(quota);
+            }
+        }
+        if (!reading.quotas.empty()) {
+            provider.lastKnownQuota = std::move(reading);
+        }
+    }
 }
 
 const QuotaInfo* findWeeklyQuotaRow(
@@ -3011,7 +3050,7 @@ std::vector<TaskbarMetrics> buildSubscriptionQuotaTaskbarMetricsFromViewModel(
 
         const auto* primaryQuota = static_cast<const QuotaInfo*>(nullptr);
         for (const auto& quotaCandidate : provider.quotas) {
-            if (!isTaskbarSubscriptionQuota(provider, quotaCandidate)) {
+            if (!isSubscriptionQuotaReading(provider, quotaCandidate)) {
                 continue;
             }
             if (primaryQuota == nullptr || quotaCandidate.windowType == "interval") {
@@ -3029,7 +3068,7 @@ std::vector<TaskbarMetrics> buildSubscriptionQuotaTaskbarMetricsFromViewModel(
         const auto* secondaryQuota = static_cast<const QuotaInfo*>(nullptr);
         if (provider.providerKey == "openai") {
             secondaryQuota = findWeeklyQuotaRow(provider, primaryQuota);
-            if (secondaryQuota != nullptr && !isTaskbarSubscriptionQuota(provider, *secondaryQuota)) {
+            if (secondaryQuota != nullptr && !isSubscriptionQuotaReading(provider, *secondaryQuota)) {
                 secondaryQuota = nullptr;
             }
         }
@@ -3714,15 +3753,16 @@ DashboardViewModel buildDashboardViewModelFromResolvedProviderData(
         // Add quota info if we have a matching response
         if (quotaIndex < quotaResponses.size()) {
             const auto& quota = quotaResponses[quotaIndex];
-            if (isKnownLocalAvailabilityError(status.providerKey, quota.error)) {
-                status.state = ProviderState::Sample;
+            status.quotaSource = quota.providerSurface;
+            const bool missingLocalPrerequisite = isKnownLocalAvailabilityError(status.providerKey, quota.error);
+            if (missingLocalPrerequisite || shouldTreatAsSuppressedLocalKimiQuota(status.providerKey, quota)) {
+                if (status.providerKey == "kimi") {
+                    status.state = ProviderState::Sample;
+                    // The Dashboard row is useful even when no quota result can inform overall runtime status.
+                    status.contributesToRuntimeState = !missingLocalPrerequisite;
+                    viewModel.providers.push_back(std::move(status));
+                }
                 ++quotaIndex;
-                continue;
-            }
-            if (shouldTreatAsSuppressedLocalKimiQuota(status.providerKey, quota)) {
-                status.state = ProviderState::Sample;
-                ++quotaIndex;
-                viewModel.providers.push_back(status);
                 continue;
             }
 
@@ -6255,6 +6295,9 @@ public:
         bool anyOnlineProvider = false;
         bool anyOfflineProvider = false;
         for (const auto& provider : viewModel.providers) {
+            if (!provider.contributesToRuntimeState) {
+                continue;
+            }
             const auto providerId = findProviderIdByKey(storageService, provider.providerKey);
             const auto runtimeAccountId =
                 ensureRuntimeTrackingAccountId(storageService, provider.providerKey, provider.displayName);
@@ -7019,6 +7062,7 @@ public:
         viewModel.preferences = preferences;
         ProviderConnectivityUpdates connectivityUpdates;
         applyRecoveryPersistenceCycle(viewModel, preferences, now, refresh, connectivityUpdates);
+        retainLastKnownDashboardQuota(viewModel, currentViewModel);
         applyPersistedActivitySummaries(viewModel, now);
         applyDashboardOperationalStatus(viewModel);
         if (shouldRefreshAnalysisSurface()) {

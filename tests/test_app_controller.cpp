@@ -1254,10 +1254,9 @@ TEST_CASE("AppController applies a custom Analysis edit alongside a Settings cha
 
     const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
     REQUIRE(dashboard != nullptr);
-    const HWND tabs = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
-    REQUIRE(tabs != nullptr);
-    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
-    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
+    const HWND history = FindWindowExW(dashboard, nullptr, L"BUTTON", L"&History...");
+    REQUIRE(history != nullptr);
+    REQUIRE(PostMessageW(history, BM_CLICK, 0, 0));
     HWND startDate = nullptr;
     REQUIRE(waitForCondition(
         [&]() {
@@ -2757,6 +2756,109 @@ TEST_CASE("AppController labels Codex-local quota rows without generic API wordi
     app.shutdown();
 }
 
+TEST_CASE("AppController retains successful Dashboard quota readings through an offline refresh",
+          "[app][runtime][quota_retention]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true);
+    const std::time_t now = std::time(nullptr);
+    auto reading = makeQuotaResponse(now - 60, 25, 100, "interval", "openai_subscription_codex_local");
+    reading.windowEnd = now + 3600;
+    reading.secondaryWindowType = "weekly";
+    reading.secondaryWindowEnd = now + 7 * 86400;
+    reading.secondaryUsed = 38;
+    reading.secondaryLimit = 100;
+    reading.secondaryRemaining = 62;
+
+    auto openai = std::make_shared<ControlledQuotaProviderAdapter>("openai", "OpenAI", reading);
+    auto minimax = std::make_shared<ControlledQuotaProviderAdapter>(
+        "minimax", "MiniMax", makeQuotaResponse(now, 20, 100, "interval", "minimax_subscription_coding_plan"));
+    auto manager = std::make_shared<ProviderManager>();
+    manager->addProvider(openai);
+    manager->addProvider(minimax);
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setTaskbarTestModeForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(manager);
+    REQUIRE(app.init());
+    const auto original = app.getDashboardViewModelForTesting();
+    const auto* originalProvider = findProviderStatus(original, "openai");
+    REQUIRE(originalProvider != nullptr);
+    REQUIRE(originalProvider->state == ProviderState::Live);
+    REQUIRE(parseRuntimeTimestamp(originalProvider->lastSyncTime) == reading.snapshotTime);
+    CHECK_FALSE(originalProvider->lastKnownQuota.has_value());
+    const auto originalMetrics = app.getTaskbarMetricsForTesting();
+    REQUIRE(findTaskbarMetric(originalMetrics, "openai") != nullptr);
+
+    openai->setQuotaResponse(makeFailedQuotaResponse("network unreachable"));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        app.refreshRuntimeForTesting();
+        const auto offline = app.getDashboardViewModelForTesting();
+        const auto* offlineProvider = findProviderStatus(offline, "openai");
+        REQUIRE(offlineProvider != nullptr);
+        CHECK(offline.runtimeState == RuntimeState::Offline);
+        CHECK(offlineProvider->state == ProviderState::Offline);
+        CHECK(offlineProvider->accountId == originalProvider->accountId);
+        CHECK(offlineProvider->quotas.empty());
+        REQUIRE(offlineProvider->lastKnownQuota.has_value());
+        const auto& retained = *offlineProvider->lastKnownQuota;
+        CHECK(retained.lastSyncTime == originalProvider->lastSyncTime);
+        REQUIRE(retained.quotas.size() == 1);
+        const auto& quota = retained.quotas.front();
+        CHECK(quota.remainingPercentage == Catch::Approx(75.0));
+        CHECK(quota.windowResetAt == reading.windowEnd);
+        CHECK(quota.secondaryRemainingPercentage == Catch::Approx(62.0));
+        CHECK(quota.secondaryWindowResetAt == reading.secondaryWindowEnd);
+        CHECK(quota.providerSurface == reading.providerSurface);
+
+        const auto summaries = app.getDashboardUsageProgressSummariesForTesting();
+        const auto summary = findUsageSummary(summaries, "OpenAI Subscription");
+        REQUIRE(summary.has_value());
+        CHECK(summary->percentage == 75);
+        CHECK(summary->secondaryPercentage == 62);
+        CHECK(findTaskbarMetric(app.getTaskbarMetricsForTesting(), "openai") == nullptr);
+    }
+
+    auto failedMiniMax = makeFailedQuotaResponse("network unreachable");
+    failedMiniMax.providerSurface = "minimax_subscription_coding_plan";
+    minimax->setQuotaResponse(failedMiniMax);
+    app.refreshRuntimeForTesting();
+    const auto samePlan = app.getDashboardViewModelForTesting();
+    const auto* sameMiniMax = findProviderStatus(samePlan, "minimax");
+    REQUIRE(sameMiniMax != nullptr);
+    REQUIRE(sameMiniMax->lastKnownQuota.has_value());
+    CHECK(sameMiniMax->lastKnownQuota->quotas.front().providerSurface == failedMiniMax.providerSurface);
+
+    failedMiniMax.providerSurface = "minimax_subscription_token_plan";
+    minimax->setQuotaResponse(failedMiniMax);
+    app.refreshRuntimeForTesting();
+    const auto switchedPlan = app.getDashboardViewModelForTesting();
+    const auto* switchedMiniMax = findProviderStatus(switchedPlan, "minimax");
+    REQUIRE(switchedMiniMax != nullptr);
+    CHECK(switchedMiniMax->state == ProviderState::Offline);
+    CHECK(switchedMiniMax->quotas.empty());
+    CHECK_FALSE(switchedMiniMax->lastKnownQuota.has_value());
+
+    auto preferences = original.preferences;
+    preferences.openaiSubscriptionTrackingEnabled = false;
+    app.applyDashboardPreferencesForTesting(preferences);
+    const auto disabled = app.getDashboardViewModelForTesting();
+    CHECK(findProviderStatus(disabled, "openai") == nullptr);
+
+    preferences.openaiSubscriptionTrackingEnabled = true;
+    app.applyDashboardPreferencesForTesting(preferences);
+    const auto reenabled = app.getDashboardViewModelForTesting();
+    const auto* unavailable = findProviderStatus(reenabled, "openai");
+    REQUIRE(unavailable != nullptr);
+    CHECK(unavailable->state == ProviderState::Offline);
+    CHECK(unavailable->quotas.empty());
+    CHECK_FALSE(unavailable->lastKnownQuota.has_value());
+    app.shutdown();
+}
+
 TEST_CASE("AppController keeps OpenAI API-platform imported quota rows distinct from subscription wording", "[app][runtime]") {
     const std::time_t now = std::time(nullptr);
     auto apiImportProvider = makeCurrentQuotaProvider(
@@ -3114,7 +3216,7 @@ TEST_CASE("AppController imports Kimi local runtime snapshots into persisted run
     app.shutdown();
 }
 
-TEST_CASE("AppController detects installed Kimi without surfacing a false offline state when no runtime snapshots exist", "[app][runtime][kimi]") {
+TEST_CASE("AppController shows an enabled Kimi account without OAuth quota credentials", "[app][runtime][kimi]") {
     requireSqlite();
 
     TempTestDatabase dbPath;
@@ -3130,14 +3232,26 @@ TEST_CASE("AppController detects installed Kimi without surfacing a false offlin
     AppController app;
     app.setHeadlessForTesting(true);
     app.setDatabasePathForTesting(dbPath.path());
+    app.setTaskbarTestModeForTesting(true);
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(std::make_shared<KimiAdapter>(homeRoot.path().string()));
+    app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
     const DashboardViewModel viewModel = app.getDashboardViewModelForTesting();
     CHECK(viewModel.kimiCodeLocallyDetected);
     CHECK(viewModel.kimiCodeDetectionMessage.find("Detected at ~/.kimi") != std::string::npos);
-    CHECK(findProviderStatus(viewModel, "kimi") == nullptr);
+    const auto* kimi = findProviderStatus(viewModel, "kimi");
+    REQUIRE(kimi != nullptr);
+    CHECK(kimi->isEnabled);
+    CHECK(kimi->accountId == "kimi.runtime_status");
+    CHECK(kimi->state == ProviderState::Sample);
+    CHECK(kimi->quotas.empty());
+    CHECK_FALSE(kimi->lastKnownQuota.has_value());
+    CHECK(findTaskbarMetric(app.getTaskbarMetricsForTesting(), "kimi") == nullptr);
     CHECK(viewModel.runtimeState != RuntimeState::Offline);
-    CHECK(viewModel.isOnline);
+    CHECK(viewModel.runtimeState == RuntimeState::Unknown);
+    CHECK_FALSE(viewModel.isOnline);
     CHECK_FALSE(viewModel.offlineNoticeVisible);
 
     app.shutdown();
@@ -3177,7 +3291,10 @@ TEST_CASE("AppController enabling Kimi after startup imports nested local runtim
     const DashboardViewModel viewModel = app.getDashboardViewModelForTesting();
     CHECK(viewModel.preferences.kimiCodeEnabled);
     CHECK(viewModel.kimiCodeLocallyDetected);
-    CHECK(findProviderStatus(viewModel, "kimi") == nullptr);
+    const auto* kimi = findProviderStatus(viewModel, "kimi");
+    REQUIRE(kimi != nullptr);
+    CHECK(kimi->state == ProviderState::Sample);
+    CHECK(kimi->quotas.empty());
 
     const auto persisted = app.getPersistedActivitiesForTesting(
         "kimi",
@@ -3217,7 +3334,10 @@ TEST_CASE("AppController local-provider watcher refreshes Kimi activity after lo
 
     const DashboardViewModel initialViewModel = app.getDashboardViewModelForTesting();
     CHECK(initialViewModel.kimiCodeLocallyDetected);
-    CHECK(findProviderStatus(initialViewModel, "kimi") == nullptr);
+    const auto* initialKimi = findProviderStatus(initialViewModel, "kimi");
+    REQUIRE(initialKimi != nullptr);
+    CHECK(initialKimi->state == ProviderState::Sample);
+    CHECK(initialKimi->quotas.empty());
 
     const std::time_t now = std::time(nullptr);
     writeNestedRecentKimiFixture(homeRoot.path(), now);
@@ -3232,7 +3352,10 @@ TEST_CASE("AppController local-provider watcher refreshes Kimi activity after lo
     }, std::chrono::milliseconds(2500)));
 
     const DashboardViewModel refreshedViewModel = app.getDashboardViewModelForTesting();
-    CHECK(findProviderStatus(refreshedViewModel, "kimi") == nullptr);
+    const auto* refreshedKimi = findProviderStatus(refreshedViewModel, "kimi");
+    REQUIRE(refreshedKimi != nullptr);
+    CHECK(refreshedKimi->state == ProviderState::Sample);
+    CHECK(refreshedKimi->quotas.empty());
 
     const std::vector<TaskbarMetrics> metrics = app.getTaskbarMetricsForTesting();
     CHECK(findTaskbarMetric(metrics, "kimi") == nullptr);
@@ -3437,6 +3560,50 @@ TEST_CASE("AppController uses persisted MiniMax quota at startup until an explic
                minimaxStatus->quotas.front().remaining == 850;
     }, std::chrono::milliseconds(1500)));
 
+    app.shutdown();
+}
+
+TEST_CASE("AppController retains only matching MiniMax quota after a failed startup refresh",
+          "[app][runtime][quota_retention]") {
+    requireSqlite();
+    const std::string plan =
+        GENERATE("minimax_subscription_coding_plan:interval", "minimax_subscription_token_plan:interval", "minimax");
+    CAPTURE(plan);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, true, false, false);
+    const auto snapshotTime = std::time(nullptr) - 180;
+    seedPersistedQuotaSnapshot(dbPath.path(), "minimax", "acct-minimax-startup", "MiniMax Startup Account", plan,
+                               "MiniMax", "interval", snapshotTime, 420, 1000, 580);
+
+    auto failure = makeFailedQuotaResponse("network unreachable");
+    failure.providerSurface = "minimax_subscription_coding_plan";
+    auto provider = std::make_shared<ControlledQuotaProviderAdapter>("minimax", "MiniMax", failure);
+    auto manager = std::make_shared<ProviderManager>();
+    manager->addProvider(provider);
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(manager);
+    REQUIRE(app.init());
+    CHECK(provider->getQuotaFetchCount() == 0);
+
+    app.refreshRuntimeForTesting();
+    const auto refreshed = app.getDashboardViewModelForTesting();
+    const auto* status = findProviderStatus(refreshed, "minimax");
+    REQUIRE(status != nullptr);
+    CHECK(status->state == ProviderState::Offline);
+    CHECK(status->quotas.empty());
+    if (plan == "minimax_subscription_coding_plan:interval") {
+        REQUIRE(status->lastKnownQuota.has_value());
+        CHECK(parseRuntimeTimestamp(status->lastKnownQuota->lastSyncTime) == snapshotTime);
+        REQUIRE(status->lastKnownQuota->quotas.size() == 1);
+        CHECK(status->lastKnownQuota->quotas.front().remaining == 580);
+        CHECK(status->lastKnownQuota->quotas.front().providerSurface == failure.providerSurface);
+    } else {
+        CHECK_FALSE(status->lastKnownQuota.has_value());
+    }
     app.shutdown();
 }
 
@@ -4381,7 +4548,7 @@ TEST_CASE("AppController persists and rehydrates the last selected provider scop
     const auto selectedSummary =
         findUsageSummary(app.getDashboardUsageProgressSummariesForTesting(), "MiniMax - Coding Plan");
     REQUIRE(selectedSummary.has_value());
-    CHECK(findUsageSummary(app.getDashboardUsageProgressSummariesForTesting(), "OpenAI Subscription") == std::nullopt);
+    CHECK(findUsageSummary(app.getDashboardUsageProgressSummariesForTesting(), "OpenAI Subscription").has_value());
 
     const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK(storedPreferences.lastSelectedProviderId == "minimax");
@@ -4398,9 +4565,8 @@ TEST_CASE("AppController persists and rehydrates the last selected provider scop
     const DashboardViewModel rehydratedViewModel = rehydratedApp.getDashboardViewModelForTesting();
     CHECK(rehydratedViewModel.preferences.lastSelectedProviderId == "minimax");
     CHECK(rehydratedViewModel.preferences.lastSelectedAccountId == "minimax.runtime_status");
-    CHECK(findUsageSummary(
-              rehydratedApp.getDashboardUsageProgressSummariesForTesting(),
-              "OpenAI Subscription") == std::nullopt);
+    CHECK(findUsageSummary(rehydratedApp.getDashboardUsageProgressSummariesForTesting(), "OpenAI Subscription")
+              .has_value());
 
     rehydratedApp.shutdown();
 }
