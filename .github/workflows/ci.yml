@@ -96,9 +96,20 @@ jobs:
           filter: blob:none
           persist-credentials: false
       - name: Install ccache
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ccache
+          set -euo pipefail
+          ccache_dir="$RUNNER_TEMP/jistats-ccache"
+          mkdir -p "$ccache_dir"
+          # ccache 4.12.3 Linux x86-64 release.
+          gh api -H 'Accept: application/octet-stream' \
+            repos/ccache/ccache/releases/assets/352204150 > "$ccache_dir/ccache.tar.xz"
+          echo "a99aa455873c978f6905f07e3176cfdf48bb610990c23ce0e1b718da0f38faa7  $ccache_dir/ccache.tar.xz" |
+            sha256sum --check
+          tar -xJf "$ccache_dir/ccache.tar.xz" -C "$ccache_dir" --strip-components=1 \
+            ccache-4.12.3-linux-x86_64/ccache
+          echo "$ccache_dir" >> "$GITHUB_PATH"
           # GCC invokes separate assembler and compiler backends. Include their
           # installed package versions even when the driver binary is unchanged.
           dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' > "$RUNNER_TEMP/compiler-packages"
@@ -110,6 +121,8 @@ jobs:
           path: .ccache
           key: bench-dr-native-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           restore-keys: bench-dr-native-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Run Pullfrog authorization tests
+        run: node --test scripts/pullfrog-review-check.test.mjs
       - name: Run portable tests with bundled SQLite
         run: |
           ccache --zero-stats
@@ -144,16 +157,23 @@ jobs:
         with:
           filter: blob:none
           persist-credentials: false
-      - name: Run Pullfrog authorization tests
-        run: node --test scripts/pullfrog-review-check.test.mjs
       - name: Install MinGW-w64 and ImageMagick
         if: vars.JISTATS_LINUX_BUILD_RUNNER == ''
         run: |
+          set -euo pipefail
+          # Populate the build's usual _deps directory while apt installs the compiler.
+          deps_dir="$PWD/build-mingw/_deps"
+          cmake -S cmake/prefetch -B "$RUNNER_TEMP/jistats-prefetch" \
+            -DFETCHCONTENT_BASE_DIR="$deps_dir" &
+          prefetch_pid=$!
           packages=(g++-mingw-w64-x86-64-posix imagemagick ninja-build ccache)
+          install_status=0
           if ! sudo apt-get install -y --no-install-recommends "${packages[@]}"; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends "${packages[@]}"
+            (sudo apt-get update && sudo apt-get install -y --no-install-recommends "${packages[@]}") || install_status=$?
           fi
+          wait "$prefetch_pid"
+          if (( install_status != 0 )); then exit "$install_status"; fi
+          echo "JISTATS_PREFETCHED_DEPS_DIR=$deps_dir" >> "$GITHUB_ENV"
       - name: Identify compiler packages for the cache
         run: |
           # GCC invokes separate assembler and compiler backends. Include their
@@ -171,9 +191,17 @@ jobs:
         shell: bash
         run: |
           ccache --zero-stats
+          sources=()
+          if [[ -n ${JISTATS_PREFETCHED_DEPS_DIR:-} ]]; then
+            sources=(
+              "-DFETCHCONTENT_SOURCE_DIR_SQLITE=$JISTATS_PREFETCHED_DEPS_DIR/sqlite-src"
+              "-DFETCHCONTENT_SOURCE_DIR_SPDLOG=$JISTATS_PREFETCHED_DEPS_DIR/spdlog-src"
+              "-DFETCHCONTENT_SOURCE_DIR_CATCH2=$JISTATS_PREFETCHED_DEPS_DIR/catch2-src"
+            )
+          fi
           cmake -S . -B build-mingw -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake \
-            -DCMAKE_BUILD_TYPE=Debug
+            -DCMAKE_BUILD_TYPE=Debug "${sources[@]}"
           targets=$(ninja -C build-mingw -t targets all)
           if grep -q '^JiStatsMiniMaxCli:' <<< "$targets"; then
             echo "::error::The default Windows build has a MiniMax CLI target"
