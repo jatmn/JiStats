@@ -318,5 +318,9 @@ jobs:
           CURRENT_JOB: ${{ job.check_run_id }}
         run: |
           set -euo pipefail
+          if [[ $GITHUB_RUN_ATTEMPT != 1 ]]; then
+            echo "::error::A rerun cannot replace the original CI result. Validate a corrected revision."
+            exit 1
+          fi
           gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" |
             jq -s . | python scripts/check_ci_budgets.py --running-job "$CURRENT_JOB" | tee -a "$GITHUB_STEP_SUMMARY"
