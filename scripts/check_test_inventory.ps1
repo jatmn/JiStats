@@ -1,12 +1,11 @@
 param(
     [Parameter(Mandatory)][string] $Inventory,
-    [Parameter(Mandatory)][string] $Results,
+    [Parameter(Mandatory)][string[]] $Results,
     [Parameter(Mandatory)][string] $Output,
     [Parameter(Mandatory)][string[]] $ExpectedFiles
 )
 $ErrorActionPreference = 'Stop'
 [xml]$registered = Get-Content -Raw -LiteralPath $Inventory
-[xml]$executed = Get-Content -Raw -LiteralPath $Results
 
 function Get-SourcePath([string] $path) {
     if ($path.Replace('\', '/') -match '(?:^|/)((?:tests|src)/.+)$') {
@@ -25,14 +24,37 @@ foreach ($case in $registered.MatchingTests.TestCase) {
 if ($pending.Count -eq 0) { throw 'The executable registered no tests.' }
 
 $timings = @{}
-foreach ($case in $executed.Catch2TestRun.TestCase) {
-    $file = Get-SourcePath $case.filename
-    if (!$pending.Remove("$file`n$($case.name)")) { throw "Unexpected or repeated test: $($case.name)" }
-    $result = $case.OverallResult
-    if ($result.success -cne 'true' -or $result.skips -cne '0' -or !$result.durationInSeconds) {
-        throw "Failed, skipped or untimed test: $($case.name)"
+$caseCount = 0
+$seed = $null
+foreach ($path in $Results) {
+    [xml]$executed = Get-Content -Raw -LiteralPath $path
+    $run = $executed.Catch2TestRun
+    [uint32]$reportSeed = 0
+    if (![uint32]::TryParse($run.'rng-seed', [Globalization.NumberStyles]::None,
+                           [cultureinfo]::InvariantCulture, [ref]$reportSeed)) {
+        throw "Missing or invalid RNG seed in $path"
     }
-    $timings[$file] += [double]::Parse($result.durationInSeconds, [cultureinfo]::InvariantCulture)
+    if ($null -eq $seed) {
+        $seed = $reportSeed
+    } elseif ($seed -ne $reportSeed) {
+        throw "RNG seed mismatch in $path (expected $seed, got $reportSeed)"
+    }
+    if (!$run.TestCase) { throw "No executed tests in $path" }
+
+    foreach ($case in $run.TestCase) {
+        $file = Get-SourcePath $case.filename
+        if (!$pending.Remove("$file`n$($case.name)")) { throw "Unexpected or repeated test: $($case.name)" }
+        $result = $case.OverallResult
+        [double]$duration = 0
+        if ($result.success -cne 'true' -or $result.skips -cne '0' -or
+            ![double]::TryParse($result.durationInSeconds, [Globalization.NumberStyles]::Float,
+                               [cultureinfo]::InvariantCulture, [ref]$duration) -or
+            [double]::IsNaN($duration) -or [double]::IsInfinity($duration) -or $duration -lt 0) {
+            throw "Failed, skipped or untimed test: $($case.name)"
+        }
+        $timings[$file] += $duration
+        $caseCount++
+    }
 }
 if ($pending.Count) { throw "Missing registered tests: $($pending -join ', ')" }
 foreach ($file in $ExpectedFiles) {
@@ -44,8 +66,8 @@ $rows = foreach ($entry in $timings.GetEnumerator() | Sort-Object Name) {
 }
 $report = [ordered]@{
     revision = $env:GITHUB_SHA
-    seed = $executed.Catch2TestRun.'rng-seed'
-    cases = @($executed.Catch2TestRun.TestCase).Count
+    seed = $seed.ToString([cultureinfo]::InvariantCulture)
+    cases = $caseCount
     files = @($rows)
 }
 $report | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Output -Encoding utf8

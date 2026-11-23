@@ -14,7 +14,7 @@ JiStats is a local-first Windows 11 desktop app for monitoring AI provider quota
 
 The build requires CMake 3.20 or newer.
 
-CMake downloads pinned dependencies during configuration and verifies their SHA-256 hashes. For an offline configure, reuse a populated build directory or point `FETCHCONTENT_SOURCE_DIR_SQLITE`, `FETCHCONTENT_SOURCE_DIR_SPDLOG`, and, for test builds, `FETCHCONTENT_SOURCE_DIR_CATCH2` at local copies of the pinned sources. The pins are in [CMakeLists.txt](CMakeLists.txt).
+CMake downloads pinned dependencies during configuration and verifies their SHA-256 hashes. For an offline configure, reuse a populated build directory or point `FETCHCONTENT_SOURCE_DIR_SQLITE`, `FETCHCONTENT_SOURCE_DIR_SPDLOG`, and, for test builds, `FETCHCONTENT_SOURCE_DIR_CATCH2` at local copies of the pinned sources. The pins are in [ThirdPartySources.cmake](cmake/ThirdPartySources.cmake).
 
 ### Building on Windows
 

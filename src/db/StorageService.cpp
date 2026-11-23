@@ -443,9 +443,6 @@ bool isValidCredentialProfile(const PersistedCredentialProfile& profile, std::st
 
 } // namespace
 
-// Forward declare Impl for friend access in QueryResult
-struct QueryResult::Impl;
-
 class StorageService::Impl {
 public:
     sqlite3* db = nullptr;
