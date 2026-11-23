@@ -8,7 +8,7 @@ Dependabot checks GitHub Actions for version updates. It does not track the C++ 
 
 ### Local hooks
 
-With hk 2.13.0, clang-format-18, actionlint 1.7.12 and Bash on your path, run `hk install` in the clone. Pre-commit formats staged C++ files and lints staged workflow changes. Pre-push runs the same changed-line format and workflow lint command as CI. For a release PR, set `JISTATS_PR_BASE` to its remote-tracking target branch. Keep that ref current before pushing. To run it directly, use `bash scripts/check_pr_lint.sh "$(git merge-base origin/main HEAD)" HEAD`. The native build and platform test commands are in the verification guide.
+With hk 2.13.0, clang-format-18, actionlint 1.7.12 and Bash on your path, run `hk install` in the clone. Pre-commit formats staged C++ files and lints staged workflow changes. Pre-push runs the same changed-line format and workflow lint command as CI. For a release PR, set `JISTATS_PR_BASE` to its remote-tracking target branch. Keep that ref current before pushing. To run it directly, use `bash scripts/check_pr_lint.sh "$(git merge-base "${JISTATS_PR_BASE:-origin/main}" HEAD)" HEAD`. The native build and platform test commands are in the verification guide.
 
 ### Pullfrog
 

@@ -19,6 +19,7 @@ hooks {
   ["pre-push"] {
     steps {
       ["pr-lint"] {
+        stdin = "{{hook_stdin}}"
         check = "bash scripts/check_pr_lint.sh --pre-push {{to_ref}}"
       }
     }
