@@ -3017,8 +3017,8 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         return false;
     }
 
-    auto findUsageEvent = [this](const PersistedUsageEvent& event) {
-        std::string sql = "SELECT id, event_subsecond_ns FROM usage_events "
+    auto findUsageEvent = [this](const PersistedUsageEvent& event, bool linksCodexBaseline) {
+        std::string sql = "SELECT id, event_subsecond_ns, source_run_id FROM usage_events "
                           "WHERE provider_id = ? AND account_id = ? AND ";
         std::vector<std::string> params = {
             std::to_string(event.providerId),
@@ -3032,8 +3032,10 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
             sql += "plan_id IS NULL AND ";
         }
 
-        sql += "event_time_utc = ? AND source_type = ? AND source_run_id = ? "
-               "AND model_key = ? AND request_type = ? "
+        sql += "event_time_utc = ? AND source_type = ? ";
+        sql += linksCodexBaseline ? "AND (source_run_id = ? OR source_run_id = 'codex_token_usage') "
+                                  : "AND source_run_id = ? ";
+        sql += "AND model_key = ? AND request_type = ? "
                "AND input_tokens = ? AND output_tokens = ? AND total_tokens = ? "
                "AND cost_minor_units = ? AND is_backfilled = ? AND raw_reference = ? ";
 
@@ -3050,9 +3052,15 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         params.push_back(event.rawReference);
 
         if (event.eventSubsecondNs.has_value()) {
-            sql += "AND (event_subsecond_ns = ? OR event_subsecond_ns IS NULL) "
-                   "ORDER BY event_subsecond_ns DESC ";
+            sql += "AND (event_subsecond_ns = ? OR event_subsecond_ns IS NULL) ";
             params.push_back(std::to_string(*event.eventSubsecondNs));
+        } else if (linksCodexBaseline) {
+            sql += "AND event_subsecond_ns IS NULL ";
+        }
+        if (linksCodexBaseline) {
+            sql += "ORDER BY (source_run_id = 'codex_token_usage'), event_subsecond_ns DESC ";
+        } else if (event.eventSubsecondNs.has_value()) {
+            sql += "ORDER BY event_subsecond_ns DESC ";
         }
         sql += "LIMIT 1";
         return execute(sql, params);
@@ -3075,22 +3083,34 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
 
     bool success = true;
     for (const auto& event : events) {
-        const auto existing = findUsageEvent(event);
+        const bool linksCodexBaseline = event.sourceType == "codex_local_rollout" &&
+                                        event.requestType == "codex_turn" && event.sourceRunId.rfind("line:", 0) == 0;
+        const auto existing = findUsageEvent(event, linksCodexBaseline);
         if (!existing.success()) {
             pImpl->lastError = "Failed to check for duplicate usage event";
             success = false;
             break;
         }
         if (existing.rowCount() > 0) {
-            if (event.eventSubsecondNs.has_value() && existing.getString(0, 1).empty()) {
-                const auto updated = execute("UPDATE usage_events SET event_subsecond_ns = ? WHERE id = ?;",
-                                             {std::to_string(*event.eventSubsecondNs), existing.getString(0, 0)});
+            const bool needsSourceId = linksCodexBaseline && existing.getString(0, 2) != event.sourceRunId;
+            const bool needsPrecision = event.eventSubsecondNs.has_value() && existing.getString(0, 1).empty();
+            if (needsSourceId || needsPrecision) {
+                const std::string subsecond =
+                    event.eventSubsecondNs.has_value() ? std::to_string(*event.eventSubsecondNs) : std::string{};
+                const auto updated =
+                    execute("UPDATE usage_events SET source_run_id = ?, "
+                            "event_subsecond_ns = COALESCE(NULLIF(?, ''), event_subsecond_ns) WHERE id = ?;",
+                            {event.sourceRunId, subsecond, existing.getString(0, 0)});
                 if (!updated.success()) {
-                    pImpl->lastError = "Failed to update usage event precision";
+                    pImpl->lastError = "Failed to update usage event source";
                     success = false;
                     break;
                 }
             }
+            continue;
+        }
+        // A paired counter upgrades existing history only. The request is the fresh observation.
+        if (linksCodexBaseline) {
             continue;
         }
 

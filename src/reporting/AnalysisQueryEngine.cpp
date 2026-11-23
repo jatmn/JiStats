@@ -1987,6 +1987,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             struct UsageSample {
                 EventTime time;
                 long long tokens;
+                std::string sourceId;
             };
             const auto definitelyBefore = [](const EventTime& lhs, const EventTime& rhs) {
                 return lhs.seconds < rhs.seconds || (lhs.seconds == rhs.seconds && lhs.subsecondNs && rhs.subsecondNs &&
@@ -1997,17 +1998,21 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                         result.getString(row, 5).empty() ? std::nullopt : std::optional<int>(result.getInt(row, 5))};
             };
 
+            std::set<std::pair<std::string, std::string>> linkedCounters;
             std::map<std::string, std::vector<UsageSample>> requestsByRollout;
             std::set<std::pair<std::string, std::string>> indexedResponses;
             for (std::size_t row = 0; row < result.rowCount(); ++row) {
-                if (result.getString(row, 3) != "codex_request") {
-                    continue;
-                }
-                if (const auto seconds = parseUtcIso(result.getString(row, 0))) {
-                    const auto rollout = result.getString(row, 2);
-                    const auto id = result.getString(row, 4);
-                    if (id.rfind("response:", 0) != 0 || indexedResponses.emplace(rollout, id).second) {
-                        requestsByRollout[rollout].push_back({getEventTime(row, *seconds), result.getInt64(row, 1)});
+                const auto type = result.getString(row, 3);
+                const auto id = result.getString(row, 4);
+                if (type == "codex_turn" && id.rfind("line:", 0) == 0) {
+                    linkedCounters.emplace(result.getString(row, 2), id);
+                } else if (type == "codex_request") {
+                    if (const auto seconds = parseUtcIso(result.getString(row, 0))) {
+                        const auto rollout = result.getString(row, 2);
+                        if (id.rfind("response:", 0) != 0 || indexedResponses.emplace(rollout, id).second) {
+                            requestsByRollout[rollout].push_back(
+                                {getEventTime(row, *seconds), result.getInt64(row, 1), id});
+                        }
                     }
                 }
             }
@@ -2041,7 +2046,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
 
                 ++legacySampleCount;
                 auto& usage = usageAt[*time];
-                const UsageSample counter{getEventTime(row, *time), tokens};
+                const UsageSample counter{getEventTime(row, *time), tokens, result.getString(row, 4)};
                 auto [previous, inserted] = previousCounters.try_emplace(rollout, counter);
                 if (inserted) {
                     continue;
@@ -2063,8 +2068,12 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                                                request->time.seconds <= counter.time.seconds && unrecordedTokens > 0;
                          ++request) {
                         // When a boundary's order is ambiguous, assume overlap and prefer the request record.
-                        if (!definitelyBefore(request->time, baseline.time) &&
-                            !definitelyBefore(counter.time, request->time)) {
+                        const bool linked = request->sourceId.rfind("line:", 0) == 0 &&
+                                            linkedCounters.count({rollout, request->sourceId}) != 0;
+                        const bool coversRequest = linked ? request->sourceId == counter.sourceId
+                                                          : !definitelyBefore(request->time, baseline.time) &&
+                                                                !definitelyBefore(counter.time, request->time);
+                        if (coversRequest) {
                             // A boundary shared by two intervals may overlap both. Consume its evidence once.
                             const long long overlap = std::min(unrecordedTokens, request->tokens);
                             unrecordedTokens -= overlap;

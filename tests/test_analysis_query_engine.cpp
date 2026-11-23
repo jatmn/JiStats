@@ -4,12 +4,14 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "db/StorageService.hpp"
 #include "gui/DashboardPresenter.hpp"
+#include "providers/openai/OpenAIAdapter.hpp"
 #include "reporting/AnalysisQueryEngine.hpp"
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
@@ -520,6 +522,58 @@ TEST_CASE("Codex accounting preserves request ordering within a second", "[analy
     REQUIRE(analysis.codexHourlyHistory.points.size() == 2);
     CHECK(analysis.codexHourlyHistory.points.front().tokensPerMinute == Catch::Approx(50));
     CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(expectedTokens - 50));
+}
+
+TEST_CASE("Codex rollout replay links requests to their previously saved cumulative baseline", "[analysis][codex]") {
+    requireSqlite();
+    const bool hasLegacyBaseline = GENERATE(true, false);
+    CAPTURE(hasLegacyBaseline);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    JiStats::TestSupport::TempTestDirectory fixture("jistats_codex_upgrade");
+    const auto rollout = fixture.path() / "rollout-upgrade.jsonl";
+    {
+        std::ofstream out(rollout);
+        out << R"json({"timestamp":"2026-04-20T17:58:00.500Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":25,"output_tokens":25,"total_tokens":50},"total_token_usage":{"input_tokens":50,"output_tokens":50,"total_tokens":100}}}}
+{"timestamp":"2026-04-20T17:59:00.123Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":100,"total_tokens":200}}}}
+)json";
+        REQUIRE(out.good());
+    }
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    const auto first = makeUtcTime(2026, 4, 20, 17, 58);
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    if (hasLegacyBaseline) {
+        seedCodexUsageEvent(storage, first, 100, rollout.string());
+    }
+
+    const auto snapshots = OpenAIAdapter::parseCodexTokenUsageFromRolloutFile(rollout.string());
+    REQUIRE(snapshots.size() == 2);
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, snapshots));
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, snapshots));
+
+    const auto rows = storage.getUsageEvents(providerId, accountId, first, now);
+    REQUIRE(rows.size() == (hasLegacyBaseline ? 3 : 2));
+    const auto baseline =
+        std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.totalTokens == 100; });
+    if (hasLegacyBaseline) {
+        REQUIRE(baseline != rows.end());
+        CHECK(baseline->sourceRunId == "line:1");
+        CHECK(baseline->requestType == "codex_turn");
+        CHECK(baseline->eventSubsecondNs == 500000000);
+    } else {
+        CHECK(baseline == rows.end());
+    }
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == (hasLegacyBaseline ? 150 : 50));
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 2);
+    CHECK(analysis.codexHourlyHistory.points.front().tokensPerMinute == Catch::Approx(50));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(hasLegacyBaseline ? 100 : 0));
 }
 
 TEST_CASE("AnalysisQueryEngine limits Codex throughput chart history to the active thirty-minute window", "[analysis][query_engine][analysis_query_engine][codex]") {

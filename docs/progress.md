@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- Codex replay links saved cumulative counters to requests recovered from the same source line. Analysis credits that request to the interval ending at its counter. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 458 Windows cases passed under Wine.
+
 - Codex throughput uses subsecond source timestamps when reconciling recorded requests with counters. Subscription histories retain known billing dates across partial observations and start fresh when a reset is established. The dashboard rollup test uses a fixed UTC time of day. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 457 Windows cases passed under Wine.
 
 - Mixed Codex rollouts retain cumulative intervals after recorded requests. Bounded Claude recovery uses dated model tokens. Quota history keeps missing billing dates unknown, and recovery skips adapters that supply no dated usage. Provider Snapshot prompts for renewed Grok sign-in when a credential is rejected. Bundled-SQLite Linux CTest and the three MinGW Debug targets passed. The cross-built Windows suite passed 456 cases under Wine. Live Grok sign-in renewal remains unverified.

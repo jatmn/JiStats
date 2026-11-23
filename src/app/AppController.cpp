@@ -4472,29 +4472,10 @@ public:
                         const auto providerId = findProviderIdByKey(storageService, "openai");
                         const auto accountId =
                             ensureRuntimeTrackingAccountId(storageService, "openai", "OpenAI");
-                        if (providerId && accountId) {
-                            std::vector<PersistedUsageEvent> events;
-                            events.reserve(snapshots.size());
-                            for (const auto& snap : snapshots) {
-                                PersistedUsageEvent evt;
-                                evt.providerId = *providerId;
-                                evt.accountId = *accountId;
-                                evt.eventTime = snap.eventTime;
-                                evt.eventSubsecondNs = snap.eventSubsecondNs;
-                                evt.sourceType = "codex_local_rollout";
-                                evt.sourceRunId = snap.requestId.empty() ? "codex_token_usage" : snap.requestId;
-                                evt.modelKey = "codex";
-                                evt.requestType = snap.requestId.empty() ? "codex_turn" : "codex_request";
-                                evt.inputTokens = snap.inputTokens;
-                                evt.outputTokens = snap.outputTokens;
-                                evt.totalTokens = snap.totalTokens;
-                                evt.costMinorUnits = 0;
-                                evt.rawReference = snap.sourcePath;
-                                events.push_back(std::move(evt));
-                            }
-                            if (storageService.insertUsageEvents(events)) {
-                                importedActivity = true;
-                            }
+                        if (providerId && accountId &&
+                            OpenAIAdapter::persistCodexTokenUsageSnapshots(storageService, *providerId, *accountId,
+                                                                           snapshots)) {
+                            importedActivity = true;
                         }
                     }
                 }

@@ -8,6 +8,8 @@
 
 namespace JiStats {
 
+class StorageService;
+
 struct CodexRateLimitBucket {
     std::string bucketKey;
     double usedPercent = 0.0;
@@ -32,6 +34,12 @@ struct CodexRateLimitSnapshot {
 };
 
 struct CodexTokenUsageSnapshot {
+    struct CumulativeTotals {
+        long long inputTokens;
+        long long outputTokens;
+        long long totalTokens;
+    };
+
     std::time_t eventTime = 0;
     std::optional<int> eventSubsecondNs;
     long long inputTokens = 0;
@@ -41,6 +49,7 @@ struct CodexTokenUsageSnapshot {
     long long totalTokens = 0;
     std::string sourcePath;
     std::string requestId; // Empty for cumulative-only rollouts.
+    std::optional<CumulativeTotals> cumulativeAtRequest;
 };
 
 class OpenAIAdapter : public IProviderAdapter {
@@ -69,6 +78,8 @@ public:
         const std::string& filePath);
     static std::vector<CodexTokenUsageSnapshot> collectCodexTokenUsageSnapshots(
         const std::string& directoryPath);
+    static bool persistCodexTokenUsageSnapshots(StorageService& storage, int providerId, int accountId,
+                                                const std::vector<CodexTokenUsageSnapshot>& snapshots);
     static std::string resolveCodexRolloutDirectory();
 
 private:

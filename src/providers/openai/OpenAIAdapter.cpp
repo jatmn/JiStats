@@ -1,5 +1,6 @@
 #include "providers/openai/OpenAIAdapter.hpp"
 #include "core/JsonParser.hpp"
+#include "db/StorageService.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -924,6 +925,10 @@ std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::parseCodexTokenUsageFromRoll
         }
         lastStandalone = snapshot;
         snapshot.requestId = "line:" + std::to_string(lineNumber);
+        if (hasCumulative) {
+            snapshot.cumulativeAtRequest = CodexTokenUsageSnapshot::CumulativeTotals{
+                nextCumulative.inputTokens, nextCumulative.outputTokens, nextCumulative.totalTokens};
+        }
         snapshots.push_back(std::move(snapshot));
     }
 
@@ -981,6 +986,38 @@ std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::collectCodexTokenUsageSnapsh
     }
 
     return allSnapshots;
+}
+
+bool OpenAIAdapter::persistCodexTokenUsageSnapshots(StorageService& storage, int providerId, int accountId,
+                                                    const std::vector<CodexTokenUsageSnapshot>& snapshots) {
+    std::vector<PersistedUsageEvent> events;
+    events.reserve(snapshots.size());
+    for (const auto& snapshot : snapshots) {
+        PersistedUsageEvent event;
+        event.providerId = providerId;
+        event.accountId = accountId;
+        event.eventTime = snapshot.eventTime;
+        event.eventSubsecondNs = snapshot.eventSubsecondNs;
+        event.sourceType = "codex_local_rollout";
+        event.sourceRunId = snapshot.requestId.empty() ? "codex_token_usage" : snapshot.requestId;
+        event.requestType = snapshot.requestId.empty() ? "codex_turn" : "codex_request";
+        event.modelKey = "codex";
+        event.inputTokens = snapshot.inputTokens;
+        event.outputTokens = snapshot.outputTokens;
+        event.totalTokens = snapshot.totalTokens;
+        event.rawReference = snapshot.sourcePath;
+        events.push_back(event);
+
+        if (const auto& totals = snapshot.cumulativeAtRequest) {
+            // Link a legacy baseline to the request from the same token_count record.
+            event.requestType = "codex_turn";
+            event.inputTokens = totals->inputTokens;
+            event.outputTokens = totals->outputTokens;
+            event.totalTokens = totals->totalTokens;
+            events.push_back(std::move(event));
+        }
+    }
+    return storage.insertUsageEvents(events);
 }
 
 std::string OpenAIAdapter::resolveCodexRolloutDirectory() {
