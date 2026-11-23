@@ -310,6 +310,10 @@ jobs:
             [[ $BUILD == true ]]
           fi
           [[ $PORTABLE == success && $LINUX == success && $WINDOWS == success ]]
+      - name: Verify CI budget retry cases
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python -B scripts/test_check_ci_budgets.py
       - name: Measure native CI budgets after all tests finish
         id: budget-timing
         shell: bash
@@ -336,7 +340,3 @@ jobs:
         run: |
           echo "::error::Native CI exceeded its time budget on this or an earlier attempt."
           exit 1
-      - name: Verify CI budget retry cases
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: python -B scripts/test_check_ci_budgets.py
