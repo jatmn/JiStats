@@ -29,6 +29,10 @@ Merge groups and protected-branch pushes always build and run both native suites
 
 The Linux build restores compiler results seeded by pushes to the default branch. Both native and MinGW compilers use ccache in preprocessor mode. Each run reports compiler hits and misses and still links the binaries and executes the suites.
 
+### Prebuilt Linux toolchain
+
+Dispatch **Prepare Linux CI toolchain** to verify the MinGW and native toolchain on a standard runner. An organization with an image-generation runner can set `JISTATS_IMAGE_GENERATOR` to its label and dispatch the same workflow to snapshot the verified tools. Configure a Linux larger runner from the generated `jistats-linux-build` image, then set `JISTATS_LINUX_BUILD_RUNNER` to the consumer's label. CI uses that image for the cross-build and fingerprints the installed compiler packages on every run. With both variables unset, the current standard runners work without a subscription.
+
 ## Pull request lint
 
 The [Lint workflow](../../.github/workflows/lint.yml) checks changed first-party C and C++ lines under `src/`, `include/`, and `tests/` with LLVM 18 and `.clang-format`. It runs `actionlint` when workflows change.

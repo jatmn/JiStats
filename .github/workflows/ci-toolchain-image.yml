@@ -1,0 +1,34 @@
+name: Prepare Linux CI toolchain
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  image:
+    name: Install and verify the native and MinGW tools
+    runs-on: ${{ vars.JISTATS_IMAGE_GENERATOR || 'ubuntu-latest' }}
+    snapshot:
+      if: ${{ vars.JISTATS_IMAGE_GENERATOR != '' }}
+      image-name: jistats-linux-build
+    steps:
+      # Keep the snapshot free of repository credentials, sources and build outputs.
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix imagemagick ninja-build ccache
+      - name: Verify the image can build both targets
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          trap 'rm -rf "$dir"' EXIT
+          printf 'int main() { return 0; }\n' > "$dir/main.cpp"
+          c++ "$dir/main.cpp" -o "$dir/linux"
+          "$dir/linux"
+          x86_64-w64-mingw32-g++-posix "$dir/main.cpp" -o "$dir/windows.exe"
+          x86_64-w64-mingw32-objdump -f "$dir/windows.exe" | grep 'file format pei-x86-64'
+          cmake --version
+          ninja --version
+          convert -version
+          ccache --version
