@@ -1830,6 +1830,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 point.limitValue = limitValue;
                 point.resetPoint = rollup.resetCount > 0;
                 point.reconciled = rollup.reconciledSampleCount > 0;
+                point.dailyRollup = true;
                 series.points.push_back(std::move(point));
 
                 if (rollup.lowWaterRemainingValue.has_value() &&

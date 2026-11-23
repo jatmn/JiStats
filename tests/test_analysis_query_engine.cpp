@@ -1292,6 +1292,7 @@ TEST_CASE("AnalysisQueryEngine builds hourly trend buckets from persisted rollup
         makeUtcTime(2026, 4, 20, 10, 59, 59)));
 
     seedUsageEvent(storage, "openai", "OpenAI", rawEdgeHour, 300, 21, "gpt-4.1");
+    seedLocalActivity(storage, "openai", "OpenAI", "codex_cli", makeUtcTime(2026, 4, 20, 11, 5, 0), 60);
 
     AnalysisQueryEngine engine(storage);
     DashboardViewModel dashboard;
@@ -1308,12 +1309,15 @@ TEST_CASE("AnalysisQueryEngine builds hourly trend buckets from persisted rollup
 
     const auto rolledPointOne = findTrendPoint(analysis.trendPoints, "04-20 09:00");
     const auto rolledPointTwo = findTrendPoint(analysis.trendPoints, "04-20 10:00");
+    const auto localPoint = findTrendPoint(analysis.trendPoints, "04-20 11:00");
     const auto rawPoint = findTrendPoint(analysis.trendPoints, "04-20 12:00");
     REQUIRE(rolledPointOne.has_value());
     REQUIRE(rolledPointTwo.has_value());
+    REQUIRE(localPoint.has_value());
     REQUIRE(rawPoint.has_value());
     CHECK(rolledPointOne->activityCount == 1);
     CHECK(rolledPointTwo->activityCount == 1);
+    CHECK(localPoint->activityCount == 1);
     CHECK(rawPoint->activityCount == 1);
     CHECK(rolledPointOne->bucketStartUtc == makeUtcTime(2026, 4, 20, 9, 0, 0));
     CHECK(rolledPointOne->bucketEndUtc == makeUtcTime(2026, 4, 20, 9, 59, 59));
@@ -1575,31 +1579,18 @@ TEST_CASE("AnalysisQueryEngine prefers daily quota rollups for long-range quota 
     REQUIRE(planInsert.success());
     const long long planId = planInsert.lastInsertRowId();
 
-    auto insertSnapshot = [&](const char* snapshotTime,
-                              const char* windowStart,
-                              const char* windowEnd,
-                              const char* usedValue,
-                              const char* remainingValue) {
-        REQUIRE(storage.execute(
-            "INSERT INTO quota_snapshots ("
-            "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
-            "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-            {
-                std::to_string(providerId),
-                std::to_string(accountId),
-                std::to_string(planId),
-                snapshotTime,
-                windowStart,
-                windowEnd,
-                usedValue,
-                "1000",
-                "high",
-                "Long-range rollup quota test snapshot",
-                "requests",
-                remainingValue,
-                "1"
-            }).success());
+    auto insertSnapshot = [&](const char* snapshotTime, const char* windowStart, const char* windowEnd,
+                              const char* usedValue, const char* remainingValue, const char* reconciled = "1") {
+        REQUIRE(storage
+                    .execute("INSERT INTO quota_snapshots ("
+                             "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
+                             "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, "
+                             "remaining_value, is_reconciled"
+                             ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                             {std::to_string(providerId), std::to_string(accountId), std::to_string(planId),
+                              snapshotTime, windowStart, windowEnd, usedValue, "1000", "high",
+                              "Long-range rollup quota test snapshot", "requests", remainingValue, reconciled})
+                    .success());
     };
 
     insertSnapshot("2026-04-01T08:00:00Z", "2026-04-01T05:00:00Z", "2026-04-01T10:00:00Z", "100", "900");
@@ -1607,6 +1598,8 @@ TEST_CASE("AnalysisQueryEngine prefers daily quota rollups for long-range quota 
     insertSnapshot("2026-04-01T11:00:00Z", "2026-04-01T10:00:00Z", "2026-04-01T15:00:00Z", "250", "750");
     insertSnapshot("2026-04-10T09:00:00Z", "2026-04-10T05:00:00Z", "2026-04-10T10:00:00Z", "350", "650");
     insertSnapshot("2026-04-10T14:00:00Z", "2026-04-10T10:00:00Z", "2026-04-10T15:00:00Z", "600", "400");
+
+    insertSnapshot("2026-04-10T14:45:00Z", "2026-04-10T10:00:00Z", "2026-04-10T15:00:00Z", "600", "400", "0");
 
     REQUIRE(storage.rebuildQuotaSnapshotRollups(
         providerId,
@@ -1637,6 +1630,9 @@ TEST_CASE("AnalysisQueryEngine prefers daily quota rollups for long-range quota 
     CHECK(quotaSeries.resetCount == 2);
     CHECK(quotaSeries.points[0].resetPoint == true);
     CHECK(quotaSeries.points[1].resetPoint == true);
+    CHECK(quotaSeries.points[1].dailyRollup);
+    CHECK(quotaSeries.points[1].reconciled);
+    CHECK(quotaSeries.points[1].snapshotTime == makeUtcTime(2026, 4, 10, 14, 45, 0));
     CHECK(analysis.dataQualityNote.find("Persisted quota history points in scope: 2 across 1 series") != std::string::npos);
     CHECK(analysis.dataQualityNote.find("daily rollup-backed") != std::string::npos);
 }

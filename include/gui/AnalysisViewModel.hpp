@@ -81,6 +81,7 @@ struct AnalysisQuotaTrendPoint {
     long long limitValue = 0;
     bool resetPoint = false;
     bool reconciled = false;
+    bool dailyRollup = false;
 };
 
 struct AnalysisQuotaTrendSeries {

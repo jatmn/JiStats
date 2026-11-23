@@ -273,6 +273,23 @@ TEST_CASE("AnalysisPresenter distinguishes missing activity buckets from recorde
     CHECK(presenter.getTrendDetailTextForTesting().find("2026-04-10 00:00") != std::string::npos);
 }
 
+TEST_CASE("AnalysisPresenter totals the hourly buckets shown in the activity chart",
+          "[analysis][presenter][analysis_presenter]") {
+    ScopedParentWindow parent;
+    REQUIRE(parent.get() != nullptr);
+    AnalysisPresenter presenter;
+    REQUIRE(presenter.init(parent.get()));
+
+    auto model = makeViewModel();
+    model.trendBucketGranularity = AnalysisTrendBucketGranularity::Hourly;
+    model.dailySummaries = {{"2026-04-10", 1, "Imported", {}}};
+    model.trendPoints = {{"04-10 09:00", 1, makeUtcTime(2026, 4, 10, 9), makeUtcTime(2026, 4, 10, 9, 59), "Imported"},
+                         {"04-10 10:00", 1, makeUtcTime(2026, 4, 10, 10), makeUtcTime(2026, 4, 10, 10, 59), "Local"}};
+    presenter.updateViewModel(model);
+
+    CHECK(presenter.getTrendSummaryForTesting() == "2 records in the selected range");
+}
+
 TEST_CASE("AnalysisPresenter separates recent Codex rates from selected activity counts",
           "[analysis][presenter][analysis_presenter][codex]") {
     ScopedParentWindow parent;
@@ -311,6 +328,15 @@ TEST_CASE("AnalysisPresenter reports the quota low without inventing its timesta
     CHECK(presenter.getTrendSummaryForTesting() ==
           "Latest in range: 95% (950 of 1,000 requests) remaining. Lowest recorded: 28%. 1 recorded reset.");
     CHECK(presenter.getTrendDetailTextForTesting().find("Recorded reset.") != std::string::npos);
+
+    auto& latest = model.quotaTrendSeries.front().points.back();
+    latest.dailyRollup = true;
+    presenter.updateViewModel(model);
+    const auto detail = presenter.getTrendDetailTextForTesting();
+    CHECK(detail.find("remaining at the last capture") != std::string::npos);
+    CHECK(detail.find("Reset recorded that day") != std::string::npos);
+    CHECK(detail.find("Reconciled capture recorded that day") != std::string::npos);
+    CHECK(detail.find("Reconciled sample") == std::string::npos);
 }
 
 TEST_CASE("AnalysisPresenter keeps quota series units distinct", "[analysis][presenter][analysis_presenter]") {

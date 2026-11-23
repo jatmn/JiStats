@@ -267,14 +267,8 @@ std::string quotaAmount(const AnalysisQuotaTrendSeries& series, const AnalysisQu
 
 std::string activitySummary(const AnalysisViewModel& model) {
     long long records = 0;
-    if (!model.dailySummaries.empty()) {
-        for (const auto& day : model.dailySummaries) {
-            records += day.activityCount;
-        }
-    } else {
-        for (const auto& point : model.trendPoints) {
-            records += point.activityCount;
-        }
+    for (const auto& point : model.trendPoints) {
+        records += point.activityCount;
     }
     if (records == 0) {
         return "No activity records in this range.";
@@ -386,8 +380,9 @@ class AnalysisPresenter::Impl {
         trendSummary = makeLabel(body, L"");
         chart = makeControl(body, kChartClass, L"History chart", WS_TABSTOP, 0, WS_EX_CLIENTEDGE, this);
         trendDetail = makeLabel(body, L"");
-        activityExplanation = makeLabel(body, L"Counts combine usage entries and local activity records when usage "
-                                              L"entries are unavailable. Blank periods have no recorded count.");
+        activityExplanation = makeLabel(body, L"Local activity supplies counts when an account has no usage entry in "
+                                              L"that bucket. Daily rows apply this per UTC day. Blank buckets have "
+                                              L"no recorded count.");
         dailyGroup = makeControl(body, L"BUTTON", L"Daily activity", BS_GROUPBOX);
         dailyList = makeList(kDailyColumns);
         providerGroup = makeControl(body, L"BUTTON", L"Activity by provider", BS_GROUPBOX);
@@ -1361,8 +1356,13 @@ class AnalysisPresenter::Impl {
                 return {};
             }
             const auto& point = series->points[selectedQuotaPoint];
-            return formatUtcTime(point.snapshotTime) + " UTC: " + quotaAmount(*series, point) + " remaining. " +
-                   (point.resetPoint ? "Recorded reset. " : "") +
+            const std::string value = formatUtcTime(point.snapshotTime) + " UTC: " + quotaAmount(*series, point);
+            if (point.dailyRollup) {
+                return value + " remaining at the last capture. " +
+                       (point.resetPoint ? "Reset recorded that day. " : "") +
+                       (point.reconciled ? "Reconciled capture recorded that day." : "");
+            }
+            return value + " remaining. " + (point.resetPoint ? "Recorded reset. " : "") +
                    (point.reconciled ? "Reconciled sample." : "Unreconciled sample.");
         }
         if (selectedActivityPoint < 0 || selectedActivityPoint >= static_cast<int>(viewModel.trendPoints.size())) {
@@ -1573,7 +1573,7 @@ class AnalysisPresenter::Impl {
 
         const auto oldPen = SelectObject(dc, GetStockObject(DC_PEN));
         for (size_t index = 0; index < points.size(); ++index) {
-            if (points[index].resetPoint) {
+            if (points[index].resetPoint && !points[index].dailyRollup) {
                 const int x = quotaX(series, index, plot);
                 SetDCPenColor(dc, GetSysColor(COLOR_BTNSHADOW));
                 MoveToEx(dc, x, plot.top, nullptr);
