@@ -61,6 +61,14 @@ std::chrono::milliseconds adaptiveWatcherIntervalOrDormantForTesting(
 
 namespace {
 
+std::wstring readControlText(HWND control) {
+    const int length = GetWindowTextLengthW(control);
+    std::wstring result(static_cast<size_t>(length) + 1, L'\0');
+    const int copied = GetWindowTextW(control, result.data(), length + 1);
+    result.resize(static_cast<size_t>(copied));
+    return result;
+}
+
 const std::filesystem::path kOpenAIExportFixturePath =
     std::filesystem::path("docs/fixtures/openai/chatgpt-export-redacted/conversations.json");
 
@@ -1312,6 +1320,294 @@ TEST_CASE("AppController applies a custom Analysis edit alongside a Settings cha
     CHECK(settings.getString("ui.analysis_custom_range_start_utc") == "2026-04-01T00:00:00Z");
 }
 
+TEST_CASE("AppController keeps Settings edits through a stale provider refresh", "[app][shell][preferences]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDirectory("jistats-settings-draft");
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false, true, 1440,
+                           exportDirectory.path().string());
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        SettingsService settings(storage);
+        REQUIRE(settings.setBool("ui.taskbar_overlay_enabled", true));
+    }
+    const auto reportPath = exportDirectory.path() / "usage.html";
+    const auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI",
+        makeQuotaResponse(std::time(nullptr), 20, 100, "interval", "openai_subscription_codex_local"));
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(provider);
+
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    std::promise<void> settingsDequeued;
+    auto dequeued = settingsDequeued.get_future();
+    std::promise<void> releaseSettings;
+    auto released = releaseSettings.get_future().share();
+    std::atomic<bool> firstEdit{true};
+    AppController app;
+    app.setAfterSettingsDequeueForTesting([&]() {
+        if (firstEdit.exchange(false)) {
+            settingsDequeued.set_value();
+            released.wait_for(std::chrono::seconds(6));
+        }
+    });
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+
+    HWND settingsWindow = nullptr;
+    HWND overlay = nullptr;
+    HWND exportPath = nullptr;
+    REQUIRE(waitForCondition([&]() {
+        settingsWindow = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+        overlay = GetDlgItem(settingsWindow, 1101);
+        exportPath = GetDlgItem(settingsWindow, 1115);
+        return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences) && overlay != nullptr &&
+               SendMessageW(overlay, BM_GETCHECK, 0, 0) == BST_CHECKED && exportPath != nullptr &&
+               IsWindowEnabled(exportPath);
+    }));
+
+    SendMessageW(overlay, BM_CLICK, 0, 0);
+    const bool queued = dequeued.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    SendMessageW(exportPath, EM_SETSEL, 0, -1);
+    SendMessageW(exportPath, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(reportPath.c_str()));
+
+    // This refresh publishes the old persisted prefs while the Settings worker is paused.
+    app.refreshRuntimeForTesting();
+    const int callsAfterExplicitRefresh = provider->getQuotaFetchCount();
+    const bool pendingChoicePreserved = !app.getDashboardViewModelForTesting().preferences.taskbarOverlayEnabled;
+    // This posted selection follows the presenter's posted stale sync on the same UI thread.
+    const bool selectionPosted = PostMessageW(exportPath, EM_SETSEL, 1, 2) != FALSE;
+    const bool staleSyncProcessed = selectionPosted && waitForCondition([&]() {
+                                        return SendMessageW(exportPath, EM_GETSEL, 0, 0) == MAKELONG(1, 2);
+                                    });
+    const std::wstring draftAfterRefresh = readControlText(exportPath);
+    SendMessageW(settingsWindow, WM_COMMAND, MAKEWPARAM(1115, EN_KILLFOCUS), reinterpret_cast<LPARAM>(exportPath));
+    releaseSettings.set_value();
+    app.shutdown();
+
+    CHECK(queued);
+    CHECK(pendingChoicePreserved);
+    CHECK(staleSyncProcessed);
+    CHECK(draftAfterRefresh == reportPath.wstring());
+    CHECK(provider->getQuotaFetchCount() == callsAfterExplicitRefresh);
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    SettingsService settings(storage);
+    CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
+    CHECK(settings.getString("reporting.scheduled_export_path") == reportPath.string());
+}
+
+TEST_CASE("AppController reports and retries a rejected Settings save while keeping tracking paused",
+          "[app][shell][preferences]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    const auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI",
+        makeQuotaResponse(std::time(nullptr), 20, 100, "interval", "openai_subscription_codex_local"));
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(provider);
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    SettingsService settings(storage);
+    REQUIRE(settings.remove("ui.taskbar_overlay_enabled"));
+    REQUIRE(storage
+                .execute("CREATE TRIGGER reject_provider_opt_out BEFORE INSERT ON settings "
+                         "WHEN new.key='runtime.openai_subscription_tracking_enabled' AND new.value='false' "
+                         "BEGIN SELECT RAISE(FAIL, 'settings write rejected'); END;")
+                .success());
+
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition(
+        [&app]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+    REQUIRE(app.selectDashboardPreferencesTabForTesting(1));
+    const HWND window = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    const HWND tracking = GetDlgItem(window, 1102);
+    const HWND saveStatus = GetDlgItem(window, 1122);
+    const HWND retry = GetDlgItem(window, 1123);
+    REQUIRE(tracking != nullptr);
+    REQUIRE(saveStatus != nullptr);
+    REQUIRE(retry != nullptr);
+    REQUIRE(SendMessageW(tracking, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    SendMessageW(tracking, BM_CLICK, 0, 0);
+    REQUIRE(waitForCondition([&]() { return readControlText(saveStatus) == L"Could not save changes."; }));
+    CHECK(IsWindowVisible(retry) != FALSE);
+    CHECK(settings.getBool("runtime.openai_subscription_tracking_enabled") == true);
+    CHECK_FALSE(settings.exists("ui.taskbar_overlay_enabled"));
+
+    const int callsAfterFailure = provider->getQuotaFetchCount();
+    app.refreshRuntimeForTesting();
+    CHECK(provider->getQuotaFetchCount() == callsAfterFailure);
+    CHECK_FALSE(provider->isEnabled());
+    CHECK(SendMessageW(tracking, BM_GETCHECK, 0, 0) == BST_UNCHECKED);
+
+    REQUIRE(storage.execute("DROP TRIGGER reject_provider_opt_out;").success());
+    SendMessageW(retry, BM_CLICK, 0, 0);
+    REQUIRE(waitForCondition([&]() {
+        return settings.getBool("runtime.openai_subscription_tracking_enabled") == false &&
+               readControlText(saveStatus).empty() && IsWindowVisible(retry) == FALSE;
+    }));
+    CHECK_FALSE(provider->isEnabled());
+    app.shutdown();
+}
+
+TEST_CASE("AppController schedules exports only after an accepted Settings save", "[app][shell][preferences]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDirectory("jistats-rejected-schedule");
+    seedStartupPreferences(dbPath.path(), false, false, false, false, false, false, false, 1440,
+                           exportDirectory.path().string());
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    std::promise<void> firstEditDequeued;
+    auto dequeued = firstEditDequeued.get_future();
+    std::promise<void> releaseFirstEdit;
+    auto released = releaseFirstEdit.get_future().share();
+    std::atomic<bool> firstEdit{true};
+    AppController app;
+    app.setAfterSettingsDequeueForTesting([&]() {
+        if (firstEdit.exchange(false)) {
+            firstEditDequeued.set_value();
+            released.wait_for(std::chrono::seconds(6));
+        }
+    });
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    REQUIRE(app.init());
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    SettingsService settings(storage);
+    REQUIRE(storage
+                .execute("CREATE TRIGGER reject_schedule BEFORE INSERT ON settings "
+                         "WHEN new.key='reporting.scheduled_export_enabled' AND new.value='true' "
+                         "BEGIN SELECT RAISE(FAIL, 'schedule write rejected'); END;")
+                .success());
+    const auto attempts = [&]() {
+        const auto result = storage.execute("SELECT COUNT(*) FROM export_runs WHERE run_kind = 'scheduled_html'");
+        REQUIRE(result.success());
+        return result.getInt(0, 0);
+    };
+
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition(
+        [&]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+    const HWND window = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    const HWND overlay = GetDlgItem(window, 1101);
+    const HWND schedule = GetDlgItem(window, 1108);
+    const HWND saveStatus = GetDlgItem(window, 1122);
+    const HWND retry = GetDlgItem(window, 1123);
+    REQUIRE(overlay != nullptr);
+    REQUIRE(schedule != nullptr);
+    REQUIRE(saveStatus != nullptr);
+    REQUIRE(retry != nullptr);
+
+    SendMessageW(overlay, BM_CLICK, 0, 0);
+    const bool paused = dequeued.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    SendMessageW(schedule, BM_CLICK, 0, 0);
+    releaseFirstEdit.set_value();
+
+    CHECK(paused);
+    REQUIRE(waitForCondition([&]() { return readControlText(saveStatus) == L"Could not save changes."; },
+                             std::chrono::seconds(5)));
+    CHECK(settings.getBool("reporting.scheduled_export_enabled") == false);
+    CHECK(attempts() == 0);
+    CHECK(std::filesystem::is_empty(exportDirectory.path()));
+
+    REQUIRE(storage.execute("DROP TRIGGER reject_schedule;").success());
+    SendMessageW(retry, BM_CLICK, 0, 0);
+    REQUIRE(waitForCondition([&]() { return attempts() > 0; }, std::chrono::seconds(5)));
+    CHECK(settings.getBool("reporting.scheduled_export_enabled") == true);
+    CHECK_FALSE(std::filesystem::is_empty(exportDirectory.path()));
+    app.shutdown();
+}
+
+TEST_CASE("AppController restores quota after queued provider tracking is turned off and back on",
+          "[app][shell][preferences]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        SettingsService settings(storage);
+        REQUIRE(settings.setBool("ui.taskbar_overlay_enabled", true));
+    }
+    auto providers = makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 20, 100, std::time(nullptr))});
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    std::promise<void> settingsDequeued;
+    auto dequeued = settingsDequeued.get_future();
+    std::promise<void> releaseSettings;
+    auto released = releaseSettings.get_future().share();
+    std::atomic<bool> firstEdit{true};
+    AppController app;
+    app.setAfterSettingsDequeueForTesting([&]() {
+        if (firstEdit.exchange(false)) {
+            settingsDequeued.set_value();
+            released.wait_for(std::chrono::seconds(6));
+        }
+    });
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+    const auto showsOpenAI = [&]() {
+        const auto view = app.getDashboardViewModelForTesting();
+        return std::any_of(view.providers.begin(), view.providers.end(), [](const auto& provider) {
+            return provider.providerKey == "openai" && !provider.quotas.empty();
+        });
+    };
+    REQUIRE(showsOpenAI());
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+
+    HWND settings = nullptr;
+    HWND overlay = nullptr;
+    HWND tracking = nullptr;
+    REQUIRE(waitForCondition([&]() {
+        settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+        overlay = GetDlgItem(settings, 1101);
+        tracking = GetDlgItem(settings, 1102);
+        return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences) && overlay != nullptr &&
+               SendMessageW(overlay, BM_GETCHECK, 0, 0) == BST_CHECKED && tracking != nullptr &&
+               SendMessageW(tracking, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }));
+
+    SendMessageW(overlay, BM_CLICK, 0, 0);
+    const bool queued = dequeued.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    const bool switchedToProviderTab = app.selectDashboardPreferencesTabForTesting(1);
+    const bool trackingVisible = waitForCondition([&]() { return IsWindowVisible(tracking) != FALSE; });
+    SendMessageW(tracking, BM_CLICK, 0, 0);
+    app.refreshRuntimeForTesting();
+    const bool removedDuringOptOut = !showsOpenAI();
+    SendMessageW(tracking, BM_CLICK, 0, 0);
+    const bool requestedReenable = app.getDashboardViewModelForTesting().preferences.openaiSubscriptionTrackingEnabled;
+    releaseSettings.set_value();
+
+    CHECK(queued);
+    CHECK(switchedToProviderTab);
+    CHECK(trackingVisible);
+    CHECK(removedDuringOptOut);
+    CHECK(requestedReenable);
+    CHECK(waitForCondition(showsOpenAI, std::chrono::seconds(5)));
+    app.shutdown();
+}
+
 TEST_CASE("AppController skips new quota requests after Settings dequeues an opt-out", "[app][runtime][polling]") {
     requireSqlite();
     TempTestDatabase dbPath;
@@ -1710,6 +2006,44 @@ TEST_CASE("AppController updates an existing MiniMax credential profile from the
         storage.close();
     }
 
+    app.shutdown();
+}
+
+TEST_CASE("AppController shows the accepted MiniMax account name after saving a blank draft", "[app][shell][minimax]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedMiniMaxCredentialMetadata(dbPath.path(), "coding_plan", "Retained Coding Plan");
+    auto store = std::make_shared<WindowsCredentialStore>(makeFakeCredentialBackend());
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    app.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(app.init());
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition(
+        [&app]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+    REQUIRE(app.selectDashboardPreferencesTabForTesting(2));
+    const HWND window = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    const HWND name = GetDlgItem(window, 1111);
+    const HWND secret = GetDlgItem(window, 1112);
+    const HWND save = GetDlgItem(window, 1113);
+    REQUIRE(name != nullptr);
+    REQUIRE(secret != nullptr);
+    REQUIRE(save != nullptr);
+    REQUIRE(readControlText(name) == L"Retained Coding Plan");
+    SendMessageW(name, EM_SETSEL, 0, -1);
+    SendMessageW(name, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+    REQUIRE(readControlText(name).empty());
+    REQUIRE(SendMessageW(name, EM_GETMODIFY, 0, 0) != FALSE);
+    REQUIRE(SetWindowTextW(secret, L"sk-cp-test"));
+    SendMessageW(save, BM_CLICK, 0, 0);
+
+    REQUIRE(waitForCondition([&]() { return readControlText(name) == L"Retained Coding Plan"; }));
+    CHECK(SendMessageW(name, EM_GETMODIFY, 0, 0) == FALSE);
     app.shutdown();
 }
 

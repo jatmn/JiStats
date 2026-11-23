@@ -197,6 +197,9 @@ struct DashboardPreferences {
     AnalysisDateRangePreset analysisDateRangePreset = AnalysisDateRangePreset::Last7Days;
     std::time_t analysisCustomRangeStartUtc = 0;
     std::time_t analysisCustomRangeEndUtc = 0;
+    // Transient dashboard edit identifiers.
+    std::uint64_t changeRequest = 0;
+    std::uint64_t providerChangeRequest = 0;
 };
 
 enum class DashboardMiniMaxCredentialAction : int {
@@ -228,6 +231,7 @@ struct DashboardMiniMaxCredentialResult {
     bool success = false;
     std::string planKey;
     std::string message;
+    std::optional<std::string> accountDisplayName = std::nullopt;
 };
 
 struct DashboardOpenAIImportResult {
@@ -266,6 +270,9 @@ struct DashboardViewModel {
     bool isOnline = true;
     RuntimeState runtimeState = RuntimeState::Unknown;
     DashboardPreferences preferences;
+    std::uint64_t completedPreferencesRequest = 0;
+    std::uint64_t failedPreferencesRequest = 0;
+    bool preferencesSessionOnly = false;
     std::uint64_t completedCodexAttributionRequest = 0;
     CodexAttributionSaveError codexAttributionSaveError = CodexAttributionSaveError::None;
     bool claudeCodeLocallyDetected = false;
