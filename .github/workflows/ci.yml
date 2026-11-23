@@ -196,13 +196,15 @@ jobs:
 
   ci-passed:
     name: CI passed
+    permissions:
+      actions: read
+      contents: read
     needs: [changes, portable, linux-cross]
     if: ${{ !cancelled() }}
     runs-on: ${{ needs.linux-cross.result == 'success' && 'windows-latest' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.repeat_offline_notice_tests && 15 || 5 }}
     steps:
-      - if: needs.linux-cross.result == 'success'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           filter: blob:none
           persist-credentials: false
@@ -308,3 +310,13 @@ jobs:
             [[ $BUILD == true ]]
           fi
           [[ $PORTABLE == success && $LINUX == success && $WINDOWS == success ]]
+      - name: Enforce native CI budgets after all tests finish
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_JOB: ${{ job.check_run_id }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" |
+            jq -s . | python scripts/check_ci_budgets.py --running-job "$CURRENT_JOB" | tee -a "$GITHUB_STEP_SUMMARY"
