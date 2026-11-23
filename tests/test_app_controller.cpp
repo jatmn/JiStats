@@ -5206,17 +5206,17 @@ TEST_CASE("AppController preserves queued Codex revocation and retries a failed 
     REQUIRE(SettingsService(profile.storage).setInt(kCodexAttributionSetting, 1));
     ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
                                   std::string&) -> std::optional<bool> { return true; });
-    std::atomic<bool> startupWriteStarted{false};
-    std::promise<void> releaseStartupWrite;
-    const auto startupWriteReleased = releaseStartupWrite.get_future().share();
-    auto startupHooks = makeStartupHooks(std::make_shared<FakeStartupHooksState>());
-    startupHooks.writeRegistryValue = [&](const std::wstring&, std::string&) {
-        startupWriteStarted.store(true);
-        return startupWriteReleased.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
-    };
+    std::promise<void> settingsDequeued;
+    auto dequeued = settingsDequeued.get_future();
+    std::promise<void> releaseSettings;
+    const auto settingsReleased = releaseSettings.get_future();
 
     AppController app;
-    app.setStartupManagerTestHooks(startupHooks);
+    app.setStartupManagerTestHooks(makeStartupHooks(std::make_shared<FakeStartupHooksState>()));
+    app.setAfterSettingsDequeueForTesting([&]() {
+        settingsDequeued.set_value();
+        settingsReleased.wait_for(std::chrono::seconds(15));
+    });
     profile.startController(app, false);
     REQUIRE(profile.sourceCount() == 1);
     REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
@@ -5237,7 +5237,7 @@ TEST_CASE("AppController preserves queued Codex revocation and retries a failed 
 
     SECTION("Off and On are queued while the interaction worker is busy") {
         SendMessageW(startup, BM_CLICK, 0, 0);
-        REQUIRE(waitForCondition([&]() { return startupWriteStarted.load(); }));
+        REQUIRE(dequeued.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
 
         const HWND checkbox = selectAttributionTab();
         REQUIRE(SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -5251,7 +5251,7 @@ TEST_CASE("AppController preserves queued Codex revocation and retries a failed 
         app.refreshRuntimeForTesting();
         CHECK(profile.generation() == 1);
         CHECK(profile.tokens() == 0);
-        releaseStartupWrite.set_value();
+        releaseSettings.set_value();
 
         const bool newBaseline = waitForCondition(
             [&]() { return profile.generation() == 2 && profile.sourceCount() == 2; }, std::chrono::seconds(5));
