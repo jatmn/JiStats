@@ -277,6 +277,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Check the test-file time budget
+        if: steps.windows-tests.outcome == 'success'
+        shell: pwsh
+        run: |
+          $timings = Get-Content -Raw -LiteralPath test-file-times.json | ConvertFrom-Json
+          $slow = @($timings.files | Where-Object { $_.seconds -gt 20 })
+          foreach ($row in $slow) { Write-Host "$($row.file) took $($row.seconds) seconds" }
+          if ($slow.Count) { throw "$($slow.Count) test files exceeded 20 seconds." }
 
       - name: Check job results
         if: always()
