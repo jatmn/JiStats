@@ -262,16 +262,32 @@ bool tryParseCodexRateLimitBucket(
     return true;
 }
 
-bool tryParseUtcZuluTimestamp(const std::string& value, std::time_t& out) {
-    if (value.empty()) {
+bool tryParseUtcZuluTimestamp(const std::string& value, std::time_t& out, std::optional<int>* subsecond = nullptr) {
+    if (value.empty() || value.back() != 'Z') {
         return false;
     }
 
     std::string normalized = value;
-    const std::size_t decimalPoint = normalized.find('.');
-    const std::size_t zSuffix = normalized.rfind('Z');
-    if (decimalPoint != std::string::npos && zSuffix != std::string::npos && decimalPoint < zSuffix) {
-        normalized.erase(decimalPoint, zSuffix - decimalPoint);
+    const auto decimalPoint = value.find('.');
+    if (decimalPoint != std::string::npos) {
+        const auto end = value.size() - 1;
+        if (decimalPoint + 1 == end) {
+            return false;
+        }
+        int nanoseconds = 0;
+        int place = 100000000;
+        for (auto position = decimalPoint + 1; position < end; ++position) {
+            const char digit = value[position];
+            if (digit < '0' || digit > '9') {
+                return false;
+            }
+            nanoseconds += (digit - '0') * place;
+            place /= 10;
+        }
+        if (subsecond) {
+            *subsecond = nanoseconds;
+        }
+        normalized.erase(decimalPoint, end - decimalPoint);
     }
 
     std::tm utcTime{};
@@ -289,7 +305,7 @@ bool tryParseUtcZuluTimestamp(const std::string& value, std::time_t& out) {
     return out != static_cast<std::time_t>(-1);
 }
 
-std::time_t tryExtractCodexEventTimestamp(const JsonValue& root) {
+std::time_t tryExtractCodexEventTimestamp(const JsonValue& root, std::optional<int>* subsecond = nullptr) {
     if (!root.isObject()) {
         return 0;
     }
@@ -300,7 +316,7 @@ std::time_t tryExtractCodexEventTimestamp(const JsonValue& root) {
     }
 
     std::time_t parsed = 0;
-    return tryParseUtcZuluTimestamp(timestampValue->getString(), parsed) ? parsed : 0;
+    return tryParseUtcZuluTimestamp(timestampValue->getString(), parsed, subsecond) ? parsed : 0;
 }
 
 bool tryExtractCodexRateLimitObject(
@@ -846,7 +862,7 @@ std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::parseCodexTokenUsageFromRoll
         }
 
         CodexTokenUsageSnapshot snapshot;
-        snapshot.eventTime = tryExtractCodexEventTimestamp(root);
+        snapshot.eventTime = tryExtractCodexEventTimestamp(root, &snapshot.eventSubsecondNs);
         if (snapshot.eventTime <= 0) {
             continue;
         }

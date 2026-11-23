@@ -188,6 +188,16 @@ SchemaManager::BaselineResult SchemaManager::reconcileBaseline(bool writable) {
         }
     }
 
+    const auto subsecond =
+        storage.execute("SELECT 1 FROM pragma_table_info('usage_events', 'main') WHERE name = 'event_subsecond_ns';");
+    if (!subsecond.success()) {
+        pImpl->lastError = "Cannot inspect usage event precision: " + subsecond.error();
+        return BaselineResult::Failed;
+    }
+    if (subsecond.rowCount() == 0) {
+        repair += "ALTER TABLE main.usage_events ADD COLUMN event_subsecond_ns INTEGER;\n";
+    }
+
     const auto objects =
         storage.execute("SELECT COUNT(*) FROM main.sqlite_master WHERE "
                         "(type = 'table' AND name IN ('recovery_checkpoints', 'export_runs')) OR "

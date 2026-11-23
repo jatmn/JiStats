@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <optional>
+#include <utility>
 #include <ctime>
 #include "analytics/GapClassifier.hpp"
 #include "db/QueryResult.hpp"
@@ -122,6 +123,7 @@ struct PersistedUsageEvent {
     bool isBackfilled = false;
     std::string rawReference;
     std::string createdAtUtc;
+    std::optional<int> eventSubsecondNs;
 };
 
 struct PersistedUsageRollup {
@@ -197,16 +199,28 @@ struct PersistedQuotaSnapshot {
     std::string basisSummary;
     std::string createdAtUtc;
 
-    bool canIdentifyWindow() const {
-        return quotaDimension != "percent" || windowStart > 0 || windowEnd > 0;
-    }
-
-    bool hasWindowChangedSince(std::time_t previousStart, std::time_t previousEnd) const {
+    bool observeBillingWindow(std::optional<std::pair<std::time_t, std::time_t>>& previous) const {
         if (quotaDimension != "percent") {
-            return previousStart != windowStart || previousEnd != windowEnd;
+            const bool changed = previous && *previous != std::make_pair(windowStart, windowEnd);
+            previous = std::make_pair(windowStart, windowEnd);
+            return changed;
         }
-        return (previousStart > 0 && windowStart > 0 && previousStart != windowStart) ||
-               (previousEnd > 0 && windowEnd > 0 && previousEnd != windowEnd);
+        if (windowStart <= 0 && windowEnd <= 0) {
+            return false;
+        }
+        const bool changed = previous && ((previous->first > 0 && windowStart > 0 && previous->first != windowStart) ||
+                                          (previous->second > 0 && windowEnd > 0 && previous->second != windowEnd));
+        if (!previous || changed) {
+            previous = std::make_pair(windowStart, windowEnd);
+        } else {
+            if (windowStart > 0) {
+                previous->first = windowStart;
+            }
+            if (windowEnd > 0) {
+                previous->second = windowEnd;
+            }
+        }
+        return changed;
     }
 };
 

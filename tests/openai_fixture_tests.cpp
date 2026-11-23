@@ -616,8 +616,11 @@ TEST_CASE("Codex records requests once when ledger and context counters overlap"
     CHECK(records[0].totalTokens == 150);
     CHECK(records[0].cachedInputTokens == 40);
     CHECK(records[0].requestId == "response:first");
+    CHECK(records[0].eventSubsecondNs == 100000000);
     CHECK(records[1].totalTokens == 50);
     CHECK(records[1].eventTime == records[0].eventTime);
+    CHECK(records[1].eventSubsecondNs == 400000000);
+    CHECK_FALSE(records[2].eventSubsecondNs.has_value());
     CHECK(records[2].totalTokens == 25);
     CHECK_FALSE(records[2].requestId.empty());
 }

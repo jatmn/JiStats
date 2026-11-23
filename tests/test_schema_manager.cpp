@@ -297,17 +297,20 @@ TEST_CASE("StorageService preserves version 12 database settings on reopen", "[s
     CHECK((readDatabaseFile(tempDb) == before));
 }
 
-TEST_CASE("StorageService adds missing subscription providers on an existing version 12 database",
-          "[schema][migration]") {
+TEST_CASE(
+    "StorageService adds missing subscription providers and Codex event precision on an existing version 12 database",
+    "[schema][migration]") {
     requireSqlite();
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
     REQUIRE(storage.execute("DELETE FROM providers WHERE provider_key = 'grok';").success());
     REQUIRE(storage.execute("UPDATE providers SET enabled = 0 WHERE provider_key = 'cursor';").success());
+    REQUIRE(storage.execute("ALTER TABLE usage_events DROP COLUMN event_subsecond_ns;").success());
     storage.close();
 
     REQUIRE(storage.init(tempDb.path()));
+    CHECK(columnExists(storage, "usage_events", "event_subsecond_ns"));
     const auto providers =
         storage.execute("SELECT provider_key, enabled FROM providers WHERE provider_key IN ('grok', 'cursor') "
                         "ORDER BY provider_key;");

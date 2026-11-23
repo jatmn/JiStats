@@ -1741,7 +1741,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
         }
 
         std::map<std::string, AnalysisQuotaTrendSeries> quotaSeriesByKey;
-        std::map<std::string, std::pair<std::time_t, std::time_t>> previousWindowsByKey;
+        std::map<std::string, std::optional<std::pair<std::time_t, std::time_t>>> previousWindowsByKey;
         std::map<std::string, std::optional<double>> rollupLowWaterBySeriesKey;
         std::map<std::string, int> rollupResetCountBySeriesKey;
         const auto configureQuotaSeries =
@@ -1870,16 +1870,6 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     snapshot.windowEnd,
                     seriesKey);
 
-                bool resetPoint = false;
-                const auto previousWindowIt = previousWindowsByKey.find(seriesKey);
-                if (previousWindowIt != previousWindowsByKey.end()) {
-                    resetPoint =
-                        snapshot.hasWindowChangedSince(previousWindowIt->second.first, previousWindowIt->second.second);
-                }
-                if (snapshot.canIdentifyWindow()) {
-                    previousWindowsByKey[seriesKey] = {snapshot.windowStart, snapshot.windowEnd};
-                }
-
                 AnalysisQuotaTrendPoint point;
                 point.label = formatQuotaSnapshotLabel(
                     snapshot.snapshotTime, snapshot.windowStart > 0
@@ -1889,7 +1879,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 point.remainingPercentage = remainingPercentage;
                 point.remainingValue = remainingValue;
                 point.limitValue = limitValue;
-                point.resetPoint = resetPoint;
+                point.resetPoint = snapshot.observeBillingWindow(previousWindowsByKey[seriesKey]);
                 point.reconciled = snapshot.isReconciled;
                 series.points.push_back(std::move(point));
             }
@@ -1974,7 +1964,8 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             historyWindowStart > 86400 ? historyWindowStart - 86400 : 0;
 
         std::string sql =
-            "SELECT ue.event_time_utc, ue.total_tokens, ue.raw_reference, ue.request_type, ue.source_run_id "
+            "SELECT ue.event_time_utc, ue.total_tokens, ue.raw_reference, ue.request_type, ue.source_run_id, "
+            "ue.event_subsecond_ns "
             "FROM usage_events ue "
             "JOIN providers p ON p.id = ue.provider_id "
             "JOIN accounts a ON a.id = ue.account_id "
@@ -1985,22 +1976,47 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             formatTimeUtcIso(throughputNow)};
         appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
         appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");
-        // Sort recorded requests ahead of same-second counters since stored timestamps have second precision.
-        sql += " ORDER BY ue.event_time_utc ASC, CASE WHEN ue.request_type = 'codex_request' THEN 0 ELSE 1 END, "
-               "ue.id ASC;";
+        sql += " ORDER BY ue.event_time_utc ASC, ue.event_subsecond_ns ASC, ue.id ASC;";
 
         QueryResult result = storage_->execute(sql, params);
         if (result.success() && result.rowCount() > 0) {
+            struct EventTime {
+                std::time_t seconds;
+                std::optional<int> subsecondNs;
+            };
+            struct UsageSample {
+                EventTime time;
+                long long tokens;
+            };
+            const auto definitelyBefore = [](const EventTime& lhs, const EventTime& rhs) {
+                return lhs.seconds < rhs.seconds || (lhs.seconds == rhs.seconds && lhs.subsecondNs && rhs.subsecondNs &&
+                                                     *lhs.subsecondNs < *rhs.subsecondNs);
+            };
+            const auto getEventTime = [&](std::size_t row, std::time_t seconds) -> EventTime {
+                return {seconds,
+                        result.getString(row, 5).empty() ? std::nullopt : std::optional<int>(result.getInt(row, 5))};
+            };
+
+            std::map<std::string, std::vector<UsageSample>> requestsByRollout;
+            std::set<std::pair<std::string, std::string>> indexedResponses;
+            for (std::size_t row = 0; row < result.rowCount(); ++row) {
+                if (result.getString(row, 3) != "codex_request") {
+                    continue;
+                }
+                if (const auto seconds = parseUtcIso(result.getString(row, 0))) {
+                    const auto rollout = result.getString(row, 2);
+                    const auto id = result.getString(row, 4);
+                    if (id.rfind("response:", 0) != 0 || indexedResponses.emplace(rollout, id).second) {
+                        requestsByRollout[rollout].push_back({getEventTime(row, *seconds), result.getInt64(row, 1)});
+                    }
+                }
+            }
+
             struct TokenWindowTotals {
                 long long totalTokenDelta = 0;
                 long long promptDeltaCount = 0;
             };
-            struct LegacyCounter {
-                std::time_t time;
-                long long tokens;
-            };
-            std::map<std::string, LegacyCounter> previousCounters;
-            std::map<std::string, std::time_t> latestRequestByRollout;
+            std::map<std::string, UsageSample> previousCounters;
             std::set<std::string> countedResponseIds;
             std::map<std::time_t, TokenWindowTotals> usageAt;
             std::size_t legacySampleCount = 0;
@@ -2013,7 +2029,6 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 const auto tokens = result.getInt64(row, 1);
                 const auto rollout = result.getString(row, 2);
                 if (result.getString(row, 3) == "codex_request") {
-                    latestRequestByRollout[rollout] = *time;
                     const auto id = result.getString(row, 4);
                     if (id.rfind("response:", 0) == 0 && !countedResponseIds.insert(id).second) {
                         continue;
@@ -2026,18 +2041,41 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
 
                 ++legacySampleCount;
                 auto& usage = usageAt[*time];
-                auto [previous, inserted] = previousCounters.try_emplace(rollout, LegacyCounter{*time, tokens});
-                if (!inserted) {
-                    legacyEstimated = legacyEstimated || *time - previous->second.time > 300;
-                    const auto latestRequest = latestRequestByRollout.find(rollout);
-                    // Only intervals past a reliable baseline without a recorded request can be attributed to counters.
-                    const bool overlapsRequest =
-                        latestRequest != latestRequestByRollout.end() && latestRequest->second > previous->second.time;
-                    if (!overlapsRequest && *time > previous->second.time && tokens > previous->second.tokens) {
-                        usage.totalTokenDelta += tokens - previous->second.tokens;
-                        ++usage.promptDeltaCount;
+                const UsageSample counter{getEventTime(row, *time), tokens};
+                auto [previous, inserted] = previousCounters.try_emplace(rollout, counter);
+                if (inserted) {
+                    continue;
+                }
+
+                const UsageSample baseline = previous->second;
+                previous->second = counter;
+                legacyEstimated = legacyEstimated || counter.time.seconds - baseline.time.seconds > 300;
+                if (!definitelyBefore(baseline.time, counter.time) || counter.tokens <= baseline.tokens) {
+                    continue;
+                }
+
+                long long unrecordedTokens = counter.tokens - baseline.tokens;
+                if (const auto requests = requestsByRollout.find(rollout); requests != requestsByRollout.end()) {
+                    const auto first = std::lower_bound(
+                        requests->second.begin(), requests->second.end(), baseline.time.seconds,
+                        [](const UsageSample& request, std::time_t seconds) { return request.time.seconds < seconds; });
+                    for (auto request = first; request != requests->second.end() &&
+                                               request->time.seconds <= counter.time.seconds && unrecordedTokens > 0;
+                         ++request) {
+                        // When a boundary's order is ambiguous, assume overlap and prefer the request record.
+                        if (!definitelyBefore(request->time, baseline.time) &&
+                            !definitelyBefore(counter.time, request->time)) {
+                            // A boundary shared by two intervals may overlap both. Consume its evidence once.
+                            const long long overlap = std::min(unrecordedTokens, request->tokens);
+                            unrecordedTokens -= overlap;
+                            request->tokens -= overlap;
+                            legacyEstimated = legacyEstimated || overlap > 0;
+                        }
                     }
-                    previous->second = {*time, tokens};
+                }
+                if (unrecordedTokens > 0) {
+                    usage.totalTokenDelta += unrecordedTokens;
+                    ++usage.promptDeltaCount;
                 }
             }
 

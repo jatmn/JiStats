@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <optional>
 
 namespace JiStats {
 
@@ -32,6 +33,7 @@ struct CodexRateLimitSnapshot {
 
 struct CodexTokenUsageSnapshot {
     std::time_t eventTime = 0;
+    std::optional<int> eventSubsecondNs;
     long long inputTokens = 0;
     long long cachedInputTokens = 0;
     long long outputTokens = 0;

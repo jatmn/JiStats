@@ -4480,6 +4480,7 @@ public:
                                 evt.providerId = *providerId;
                                 evt.accountId = *accountId;
                                 evt.eventTime = snap.eventTime;
+                                evt.eventSubsecondNs = snap.eventSubsecondNs;
                                 evt.sourceType = "codex_local_rollout";
                                 evt.sourceRunId = snap.requestId.empty() ? "codex_token_usage" : snap.requestId;
                                 evt.modelKey = "codex";

@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
     cost_minor_units INTEGER,
     is_backfilled INTEGER NOT NULL DEFAULT 0,
     raw_reference TEXT,
-    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    event_subsecond_ns INTEGER
 );
 
 -- Quota snapshots table

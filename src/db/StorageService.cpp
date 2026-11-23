@@ -315,9 +315,7 @@ struct QuotaRollupAggregate {
     int resetCount = 0;
     int reconciledSampleCount = 0;
     std::string latestConfidenceTier = "Unknown";
-    std::time_t previousWindowStart = 0;
-    std::time_t previousWindowEnd = 0;
-    bool hasPreviousWindow = false;
+    std::optional<std::pair<std::time_t, std::time_t>> previousWindow;
 };
 
 std::optional<long long> normalizedQuotaRemainingValue(const PersistedQuotaSnapshot& snapshot) {
@@ -2354,14 +2352,8 @@ bool StorageService::rebuildQuotaSnapshotRollups(
             ++aggregate.reconciledSampleCount;
         }
 
-        if (aggregate.hasPreviousWindow &&
-            snapshot.hasWindowChangedSince(aggregate.previousWindowStart, aggregate.previousWindowEnd)) {
+        if (snapshot.observeBillingWindow(aggregate.previousWindow)) {
             ++aggregate.resetCount;
-        }
-        if (snapshot.canIdentifyWindow()) {
-            aggregate.previousWindowStart = snapshot.windowStart;
-            aggregate.previousWindowEnd = snapshot.windowEnd;
-            aggregate.hasPreviousWindow = true;
         }
 
         const auto remainingValue = normalizedQuotaRemainingValue(snapshot);
@@ -3025,10 +3017,9 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         return false;
     }
 
-    auto usageEventExists = [this](const PersistedUsageEvent& event) -> std::optional<bool> {
-        std::string sql =
-            "SELECT 1 FROM usage_events "
-            "WHERE provider_id = ? AND account_id = ? AND ";
+    auto findUsageEvent = [this](const PersistedUsageEvent& event) {
+        std::string sql = "SELECT id, event_subsecond_ns FROM usage_events "
+                          "WHERE provider_id = ? AND account_id = ? AND ";
         std::vector<std::string> params = {
             std::to_string(event.providerId),
             std::to_string(event.accountId)
@@ -3041,12 +3032,10 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
             sql += "plan_id IS NULL AND ";
         }
 
-        sql +=
-            "event_time_utc = ? AND source_type = ? AND source_run_id = ? "
-            "AND model_key = ? AND request_type = ? "
-            "AND input_tokens = ? AND output_tokens = ? AND total_tokens = ? "
-            "AND cost_minor_units = ? AND is_backfilled = ? AND raw_reference = ? "
-            "LIMIT 1";
+        sql += "event_time_utc = ? AND source_type = ? AND source_run_id = ? "
+               "AND model_key = ? AND request_type = ? "
+               "AND input_tokens = ? AND output_tokens = ? AND total_tokens = ? "
+               "AND cost_minor_units = ? AND is_backfilled = ? AND raw_reference = ? ";
 
         params.push_back(toUtcIsoString(event.eventTime));
         params.push_back(event.sourceType);
@@ -3060,21 +3049,21 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         params.push_back(event.isBackfilled ? "1" : "0");
         params.push_back(event.rawReference);
 
-        QueryResult result = execute(sql, params);
-        if (!result.success()) {
-            pImpl->lastError = "Failed to check for duplicate usage event";
-            return std::nullopt;
+        if (event.eventSubsecondNs.has_value()) {
+            sql += "AND (event_subsecond_ns = ? OR event_subsecond_ns IS NULL) "
+                   "ORDER BY event_subsecond_ns DESC ";
+            params.push_back(std::to_string(*event.eventSubsecondNs));
         }
-
-        return result.rowCount() > 0;
+        sql += "LIMIT 1";
+        return execute(sql, params);
     };
 
     const char* sql = R"(
         INSERT INTO usage_events (
             provider_id, account_id, plan_id, event_time_utc, source_type,
             source_run_id, model_key, request_type, input_tokens, output_tokens,
-            total_tokens, cost_minor_units, is_backfilled, raw_reference, created_at_utc
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            total_tokens, cost_minor_units, is_backfilled, raw_reference, created_at_utc, event_subsecond_ns
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     )";
 
     sqlite3_stmt* stmt = nullptr;
@@ -3086,12 +3075,22 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
 
     bool success = true;
     for (const auto& event : events) {
-        const auto alreadyExists = usageEventExists(event);
-        if (!alreadyExists.has_value()) {
+        const auto existing = findUsageEvent(event);
+        if (!existing.success()) {
+            pImpl->lastError = "Failed to check for duplicate usage event";
             success = false;
             break;
         }
-        if (*alreadyExists) {
+        if (existing.rowCount() > 0) {
+            if (event.eventSubsecondNs.has_value() && existing.getString(0, 1).empty()) {
+                const auto updated = execute("UPDATE usage_events SET event_subsecond_ns = ? WHERE id = ?;",
+                                             {std::to_string(*event.eventSubsecondNs), existing.getString(0, 0)});
+                if (!updated.success()) {
+                    pImpl->lastError = "Failed to update usage event precision";
+                    success = false;
+                    break;
+                }
+            }
             continue;
         }
 
@@ -3117,6 +3116,11 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         sqlite3_bind_int(stmt, 13, event.isBackfilled ? 1 : 0);
         sqlite3_bind_text(stmt, 14, event.rawReference.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 15, event.createdAtUtc.c_str(), -1, SQLITE_TRANSIENT);
+        if (event.eventSubsecondNs.has_value()) {
+            sqlite3_bind_int(stmt, 16, *event.eventSubsecondNs);
+        } else {
+            sqlite3_bind_null(stmt, 16);
+        }
 
         if (sqlite3_step(stmt) != SQLITE_DONE) {
             pImpl->lastError = "Failed to insert usage event: " + std::string(sqlite3_errmsg(pImpl->db));
@@ -3154,15 +3158,12 @@ std::vector<PersistedUsageEvent> StorageService::getUsageEvents(
     auto result = execute(
         R"(SELECT id, provider_id, account_id, plan_id, event_time_utc, source_type,
                   source_run_id, model_key, request_type, input_tokens, output_tokens,
-                  total_tokens, cost_minor_units, is_backfilled, raw_reference, created_at_utc
+                  total_tokens, cost_minor_units, is_backfilled, raw_reference, created_at_utc, event_subsecond_ns
             FROM usage_events
             WHERE provider_id = ? AND account_id = ?
               AND event_time_utc >= ? AND event_time_utc < ?
             ORDER BY event_time_utc ASC)",
-        {std::to_string(providerId),
-         std::to_string(accountId),
-         toUtcIsoString(from),
-         toUtcIsoString(to)});
+        {std::to_string(providerId), std::to_string(accountId), toUtcIsoString(from), toUtcIsoString(to)});
 
     if (!result.success()) {
         pImpl->lastError = "Failed to query usage events";
@@ -3193,6 +3194,9 @@ std::vector<PersistedUsageEvent> StorageService::getUsageEvents(
         event.isBackfilled = row.at("is_backfilled") == "1";
         event.rawReference = row.at("raw_reference");
         event.createdAtUtc = row.at("created_at_utc");
+        if (!row.at("event_subsecond_ns").empty()) {
+            event.eventSubsecondNs = std::stoi(row.at("event_subsecond_ns"));
+        }
         events.push_back(event);
     }
 

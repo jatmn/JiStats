@@ -134,12 +134,13 @@ void seedUsageEvent(
 }
 
 void seedCodexUsageEvent(StorageService& storage, std::time_t eventTime, long long totalTokens,
-                         const std::string& rawReference = "codex://rollout/current",
-                         const std::string& requestId = {}) {
+                         const std::string& rawReference = "codex://rollout/current", const std::string& requestId = {},
+                         std::optional<int> subsecondNs = std::nullopt) {
     PersistedUsageEvent event;
     event.providerId = requireProviderId(storage, "openai");
     event.accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
     event.eventTime = eventTime;
+    event.eventSubsecondNs = subsecondNs;
     event.sourceType = "codex_local_rollout";
     event.sourceRunId = requestId.empty() ? "codex_token_usage" : requestId;
     event.modelKey = "codex";
@@ -471,6 +472,56 @@ TEST_CASE("Analysis uses the same Codex request events for totals and chart buck
     CHECK(minute.promptsPerMinute == Catch::Approx(2));
 }
 
+TEST_CASE("Codex accounting preserves request ordering within a second", "[analysis][codex]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/current";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const auto sameSecond = now - 120;
+    seedCodexUsageEvent(storage, sameSecond, 100);
+    seedCodexUsageEvent(storage, sameSecond, 50, rollout, "response:request");
+
+    long long expectedTokens = 150;
+    int baselineNs = 100000000;
+    SECTION("The counter precedes the request") {
+        seedCodexUsageEvent(storage, sameSecond, 100, rollout, {}, baselineNs);
+        seedCodexUsageEvent(storage, sameSecond, 50, rollout, "response:request", 500000000);
+    }
+    SECTION("The request precedes the counter") {
+        baselineNs = 800000000;
+        seedCodexUsageEvent(storage, sameSecond, 100, rollout, {}, baselineNs);
+        seedCodexUsageEvent(storage, sameSecond, 50, rollout, "response:request", 500000000);
+        expectedTokens = 200;
+    }
+    SECTION("Seconds-only legacy rows use conservative overlap") {
+        baselineNs = -1;
+    }
+    seedCodexUsageEvent(storage, now - 60, 250);
+
+    const auto stored = storage.getUsageEvents(requireProviderId(storage, "openai"),
+                                               ensureRuntimeAccountId(storage, "openai", "OpenAI"), sameSecond, now);
+    REQUIRE(stored.size() == 3);
+    const auto baseline =
+        std::find_if(stored.begin(), stored.end(), [](const auto& row) { return row.totalTokens == 100; });
+    REQUIRE(baseline != stored.end());
+    if (baselineNs >= 0) {
+        CHECK(baseline->eventSubsecondNs == baselineNs);
+    } else {
+        CHECK_FALSE(baseline->eventSubsecondNs.has_value());
+    }
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == expectedTokens);
+    CHECK(analysis.codexThroughput.promptsLast1h == 2);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 2);
+    CHECK(analysis.codexHourlyHistory.points.front().tokensPerMinute == Catch::Approx(50));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(expectedTokens - 50));
+}
+
 TEST_CASE("AnalysisQueryEngine limits Codex throughput chart history to the active thirty-minute window", "[analysis][query_engine][analysis_query_engine][codex]") {
     requireSqlite();
 
@@ -580,8 +631,9 @@ TEST_CASE("Percentage quota history marks resets only when reported bounds chang
     insert("2026-04-20T15:00:00Z", "", "");
     insert("2026-04-20T16:00:00Z", "", "2026-04-20T17:00:00Z");
     insert("2026-04-20T16:30:00Z", "2026-04-13T17:00:00Z", "2026-04-20T17:00:00Z");
-    insert("2026-04-20T17:15:00Z", "", "");
+    insert("2026-04-20T17:15:00Z", "2026-04-13T17:00:00Z", "");
     insert("2026-04-20T17:30:00Z", "", "2026-04-27T17:00:00Z");
+    insert("2026-04-20T17:45:00Z", "2026-04-20T17:00:00Z", "2026-04-27T17:00:00Z");
 
     const auto from = makeUtcTime(2026, 4, 20);
     const auto now = makeUtcTime(2026, 4, 20, 18);
@@ -593,17 +645,17 @@ TEST_CASE("Percentage quota history marks resets only when reported bounds chang
     auto analysis = AnalysisQueryEngine(storage).buildViewModel(dashboard, preferences, now);
     REQUIRE(analysis.quotaTrendSeries.size() == 1);
     const auto& series = analysis.quotaTrendSeries.front();
-    REQUIRE(series.points.size() == 7);
+    REQUIRE(series.points.size() == 8);
     CHECK(series.resetCount == 1);
-    CHECK(std::none_of(series.points.begin(), series.points.end() - 1,
-                       [](const auto& point) { return point.resetPoint; }));
-    CHECK(series.points.back().resetPoint);
+    for (std::size_t index = 0; index < series.points.size(); ++index) {
+        CHECK(series.points[index].resetPoint == (index == 6));
+    }
     CHECK(series.points.back().remainingPercentage == Catch::Approx(60));
 
     REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, from, now));
     const auto rollups = storage.getQuotaSnapshotRollups(providerId, accountId, from, from);
     REQUIRE(rollups.size() == 1);
-    CHECK(rollups.front().sampleCount == 7);
+    CHECK(rollups.front().sampleCount == 8);
     CHECK(rollups.front().resetCount == 1);
 }
 

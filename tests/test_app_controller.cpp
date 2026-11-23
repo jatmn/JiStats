@@ -4327,7 +4327,7 @@ TEST_CASE("AppController uses quantified usage rollups for dashboard fallback an
 
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
-    const std::time_t now = std::time(nullptr);
+    const std::time_t now = utcDayStartForTest(std::time(nullptr) - 12 * 3600) + 12 * 3600;
     const std::time_t rollupFrom = now - (6 * 60 * 60);
 
     StorageService storage;
@@ -4400,6 +4400,7 @@ TEST_CASE("AppController uses quantified usage rollups for dashboard fallback an
 
     AppController app;
     app.setTaskbarTestModeForTesting(true);
+    app.setCurrentTimeForTesting(now);
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
 
@@ -4426,7 +4427,7 @@ TEST_CASE("AppController uses quantified usage rollups for dashboard fallback an
 
     const auto today = findUsageSummary(summaries, "Today");
     REQUIRE(today.has_value());
-    CHECK(today->detail.find("requests") != std::string::npos);
+    CHECK(today->detail == "4 requests, 1060 tokens across 2 providers");
 
     const auto trayState = app.getTrayStateForTesting();
     CHECK(trayState.tooltip.find("3 req / 860 tok in 30m") != std::string::npos);
