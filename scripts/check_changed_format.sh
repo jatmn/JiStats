@@ -19,7 +19,8 @@ trap 'rm -f "$changed_files"' EXIT
 git diff --raw -z --no-abbrev --no-renames --diff-filter=AMT "$base" "$head" -- src/ include/ tests/ >"$changed_files"
 
 hunk_pattern='^@@ -[0-9]+(,[0-9]+)? \+([0-9]+)(,([0-9]+))? @@'
-failed=0
+files=()
+blobs=()
 while IFS= read -r -d '' change && IFS= read -r -d '' file; do
     read -r _ mode _ blob _ <<<"$change"
     [[ $mode == 100644 || $mode == 100755 ]] || continue
@@ -28,6 +29,18 @@ while IFS= read -r -d '' change && IFS= read -r -d '' file; do
         *) continue ;;
     esac
 
+    files+=("$file")
+    blobs+=("$blob")
+done <"$changed_files"
+
+if (( ${#files[@]} )) && [[ $(git config --bool --get remote.origin.promisor) == true ]]; then
+    git --literal-pathspecs diff --no-ext-diff --no-textconv --no-renames "$base" "$head" -- "${files[@]}" >/dev/null
+fi
+
+failed=0
+for index in "${!files[@]}"; do
+    file=${files[index]}
+    blob=${blobs[index]}
     patch=$(git --literal-pathspecs diff --no-color --no-ext-diff --no-textconv --no-renames -U0 "$base" "$head" -- "$file")
     ranges=()
     while IFS= read -r line; do
@@ -45,6 +58,6 @@ while IFS= read -r -d '' change && IFS= read -r -d '' file; do
         ! git cat-file blob "$blob" | "$formatter" --assume-filename="$tree/$file" --dry-run --Werror "${ranges[@]}"; then
         failed=1
     fi
-done <"$changed_files"
+done
 
 exit "$failed"
