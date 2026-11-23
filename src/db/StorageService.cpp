@@ -3018,7 +3018,7 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         return false;
     }
 
-    auto findUsageEvent = [this](const PersistedUsageEvent& event, bool linksCodexBaseline) {
+    auto findUsageEvent = [this](const PersistedUsageEvent& event, bool matchesLegacyCounter) {
         std::string sql = "SELECT id, event_subsecond_ns, source_run_id FROM usage_events "
                           "WHERE provider_id = ? AND account_id = ? AND ";
         std::vector<std::string> params = {
@@ -3034,8 +3034,8 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         }
 
         sql += "event_time_utc = ? AND source_type = ? ";
-        sql += linksCodexBaseline ? "AND (source_run_id = ? OR source_run_id = 'codex_token_usage') "
-                                  : "AND source_run_id = ? ";
+        sql += matchesLegacyCounter ? "AND (source_run_id = ? OR source_run_id = 'codex_token_usage') "
+                                    : "AND source_run_id = ? ";
         sql += "AND model_key = ? AND request_type = ? "
                "AND input_tokens = ? AND output_tokens = ? AND total_tokens = ? "
                "AND cost_minor_units = ? AND is_backfilled = ? AND raw_reference = ? ";
@@ -3055,10 +3055,10 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         if (event.eventSubsecondNs.has_value()) {
             sql += "AND (event_subsecond_ns = ? OR event_subsecond_ns IS NULL) ";
             params.push_back(std::to_string(*event.eventSubsecondNs));
-        } else if (linksCodexBaseline) {
+        } else if (matchesLegacyCounter) {
             sql += "AND event_subsecond_ns IS NULL ";
         }
-        if (linksCodexBaseline) {
+        if (matchesLegacyCounter) {
             sql += "ORDER BY (source_run_id = 'codex_token_usage'), event_subsecond_ns DESC ";
         } else if (event.eventSubsecondNs.has_value()) {
             sql += "ORDER BY event_subsecond_ns DESC ";
@@ -3086,15 +3086,16 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
     for (std::size_t i = 0; i < events.size() + savedCodexCounters.size(); ++i) {
         const bool updateOnly = i >= events.size();
         const auto& event = updateOnly ? savedCodexCounters[i - events.size()] : events[i];
-        const bool linksCodexBaseline = updateOnly && event.sourceRunId.rfind("line:", 0) == 0;
-        const auto existing = findUsageEvent(event, linksCodexBaseline);
+        const bool matchesLegacyCounter = event.sourceType == "codex_local_rollout" &&
+                                          event.requestType == "codex_turn" && event.sourceRunId.rfind("line:", 0) == 0;
+        const auto existing = findUsageEvent(event, matchesLegacyCounter);
         if (!existing.success()) {
             pImpl->lastError = "Failed to check for duplicate usage event";
             success = false;
             break;
         }
         if (existing.rowCount() > 0) {
-            const bool needsSourceId = linksCodexBaseline && existing.getString(0, 2) != event.sourceRunId;
+            const bool needsSourceId = matchesLegacyCounter && existing.getString(0, 2) != event.sourceRunId;
             const bool needsPrecision = event.eventSubsecondNs.has_value() && existing.getString(0, 1).empty();
             if (needsSourceId || needsPrecision) {
                 const std::string subsecond =

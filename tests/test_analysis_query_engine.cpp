@@ -633,6 +633,110 @@ TEST_CASE("Codex rollout replay preserves the sequence of saved same-second coun
     CHECK(laterCounter->eventSubsecondNs == (laterHasPrecision ? std::optional<int>(800000000) : std::nullopt));
 }
 
+TEST_CASE("Codex collection and replay preserve resets at whole-second rollout records", "[analysis][codex]") {
+    requireSqlite();
+    const bool legacy = GENERATE(false, true);
+    const int nextCounter = GENERATE(50, 175);
+    CAPTURE(legacy, nextCounter);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    JiStats::TestSupport::TempTestDirectory fixture("jistats_codex_reset");
+    const auto rollout = fixture.path() / "rollout-reset.jsonl";
+    {
+        std::ofstream out(rollout);
+        out << R"json({"timestamp":"2026-04-20T17:57:00.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":50,"total_tokens":100}}}}
+{"timestamp":"2026-04-20T17:58:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":75,"output_tokens":75,"total_tokens":150}}}}
+{"timestamp":"2026-04-20T17:58:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12,"output_tokens":13,"total_tokens":25}}}}
+{"timestamp":"2026-04-20T17:59:00.300Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":)json";
+        out << nextCounter / 2 << R"json(,"output_tokens":)json" << nextCounter - nextCounter / 2
+            << R"json(,"total_tokens":)json" << nextCounter << "}}}}\n";
+        REQUIRE(out.good());
+    }
+
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    if (legacy) {
+        seedCodexUsageEvent(storage, now - 180, 100, rollout.string());
+        seedCodexUsageEvent(storage, now - 120, 25, rollout.string());
+        seedCodexUsageEvent(storage, now - 120, 150, rollout.string());
+        seedCodexUsageEvent(storage, now - 60, nextCounter, rollout.string());
+    }
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    const auto batch = OpenAIAdapter::collectCodexTokenUsageSnapshots(fixture.path().string());
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 50 + nextCounter - 25);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(50));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(nextCounter - 25));
+
+    const auto rows = storage.getUsageEvents(providerId, accountId, now - 180, now);
+    REQUIRE(rows.size() == 4);
+    const auto reset = std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.totalTokens == 25; });
+    REQUIRE(reset != rows.end());
+    CHECK(reset->sourceRunId == "line:3");
+    CHECK_FALSE(reset->eventSubsecondNs.has_value());
+}
+
+TEST_CASE("Codex estimates unsequenced counters using neighboring seconds", "[analysis][codex]") {
+    requireSqlite();
+    const long long nextCounter = GENERATE(50, 175);
+    CAPTURE(nextCounter);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/current";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    seedCodexUsageEvent(storage, now - 180, 100, rollout);
+    seedCodexUsageEvent(storage, now - 120, 25, rollout);
+    seedCodexUsageEvent(storage, now - 120, 150, rollout, {}, 100000000);
+    seedCodexUsageEvent(storage, now - 60, nextCounter, rollout);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 75);
+    CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(50));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(25));
+}
+
+TEST_CASE("An unsequenced Codex counter does not replace a matching timed boundary", "[analysis][codex]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/current";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    seedCodexUsageEvent(storage, now - 180, 100, rollout);
+    seedCodexUsageEvent(storage, now - 120, 150, rollout);
+    REQUIRE(
+        storage
+            .execute(
+                "INSERT INTO usage_events (provider_id, account_id, event_time_utc, event_subsecond_ns, source_type, "
+                "source_run_id, model_key, request_type, input_tokens, output_tokens, total_tokens, raw_reference) "
+                "SELECT provider_id, account_id, event_time_utc, 100000000, source_type, 'line:2', model_key, "
+                "request_type, input_tokens, output_tokens, total_tokens, raw_reference FROM usage_events "
+                "WHERE source_type = 'codex_local_rollout' AND total_tokens = 150;")
+            .success());
+    seedCodexUsageEvent(storage, now - 120, 30, rollout, "response:after-counter", 700000000);
+    seedCodexUsageEvent(storage, now - 60, 200, rollout);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 100);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(80));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(20));
+}
+
 TEST_CASE("Codex accounting preserves timed counter resets in a mixed-precision second", "[analysis][codex]") {
     requireSqlite();
     TempTestDatabase tempDb;

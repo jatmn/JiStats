@@ -49,6 +49,7 @@ struct CodexTokenUsageSnapshot {
     long long totalTokens = 0;
     std::string sourcePath;
     std::string requestId; // Empty for cumulative-only rollouts.
+    std::size_t sourceLine = 0;
     std::optional<CumulativeTotals> cumulativeAtRequest;
 };
 

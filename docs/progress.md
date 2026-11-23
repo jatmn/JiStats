@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- Codex replay retains rollout line order for counters with whole-second timestamps. Analysis bounds fallback estimates with neighboring counters and preserves resets established by the rollout. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 463 Windows cases passed under Wine.
+
 - Codex Analysis preserves recovered counter order even when some samples lack fractional timing. Saved row IDs no longer determine cumulative intervals. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 460 Windows cases passed under Wine.
 
 - Codex replay recovers the time of saved counters that were superseded by recorded requests. Analysis preserves stored counter order when any counter in that second still lacks fractional timing. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 459 Windows cases passed under Wine.

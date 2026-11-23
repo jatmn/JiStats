@@ -897,6 +897,7 @@ OpenAIAdapter::parseCodexTokenUsageFromRolloutFile(const std::string& filePath,
 
         const JsonValue* latest = info->getMember("last_token_usage");
         const JsonValue* total = info->getMember("total_token_usage");
+        snapshot.sourceLine = lineNumber;
         CodexTokenUsageSnapshot nextCumulative = snapshot;
         const bool hasCumulative = total && !total->isNull();
         if (hasCumulative && !tryReadCodexUsage(total, nextCumulative)) {
@@ -908,7 +909,7 @@ OpenAIAdapter::parseCodexTokenUsageFromRolloutFile(const std::string& filePath,
         }
         const auto rememberSavedCounter = [&] {
             // A counter suppressed for new collection may still be present in older SQLite history.
-            if (savedCounters && hasCumulative && nextCumulative.eventSubsecondNs.has_value()) {
+            if (savedCounters && hasCumulative) {
                 savedCounters->push_back(nextCumulative);
             }
         };
@@ -1006,7 +1007,8 @@ bool OpenAIAdapter::persistCodexTokenUsageSnapshots(StorageService& storage, int
         event.eventTime = snapshot.eventTime;
         event.eventSubsecondNs = snapshot.eventSubsecondNs;
         event.sourceType = "codex_local_rollout";
-        event.sourceRunId = snapshot.requestId.empty() ? "codex_token_usage" : snapshot.requestId;
+        event.sourceRunId =
+            snapshot.requestId.empty() ? "line:" + std::to_string(snapshot.sourceLine) : snapshot.requestId;
         event.requestType = snapshot.requestId.empty() ? "codex_turn" : "codex_request";
         event.modelKey = "codex";
         event.inputTokens = snapshot.inputTokens;

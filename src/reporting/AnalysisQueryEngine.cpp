@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -1988,6 +1990,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 EventTime time;
                 long long tokens;
                 std::string sourceId;
+                std::size_t sourceLine = 0;
             };
             const auto definitelyBefore = [](const EventTime& lhs, const EventTime& rhs) {
                 return lhs.seconds < rhs.seconds || (lhs.seconds == rhs.seconds && lhs.subsecondNs && rhs.subsecondNs &&
@@ -2032,7 +2035,13 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 }
 
                 if (type == "codex_turn" && sample.sourceId.rfind("line:", 0) == 0) {
-                    linkedCounters.emplace(rollout, sample.sourceId);
+                    const char* end = sample.sourceId.data() + sample.sourceId.size();
+                    const auto parsed = std::from_chars(sample.sourceId.data() + 5, end, sample.sourceLine);
+                    if (parsed.ec == std::errc{} && parsed.ptr == end && sample.sourceLine > 0) {
+                        linkedCounters.emplace(rollout, sample.sourceId);
+                    } else {
+                        sample.sourceLine = 0;
+                    }
                 }
                 usageAt.try_emplace(*seconds);
                 countersByRollout[rollout].push_back(std::move(sample));
@@ -2080,36 +2089,116 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 }
             };
 
-            const auto byTokens = [](const UsageSample& left, const UsageSample& right) {
-                return left.tokens < right.tokens;
+            using CounterIterator = std::vector<UsageSample>::iterator;
+            struct CounterSecond {
+                CounterIterator begin;
+                CounterIterator ordered;
+                CounterIterator end;
             };
+            const auto bySourceLine = [](const UsageSample& left, const UsageSample& right) {
+                return left.sourceLine < right.sourceLine;
+            };
+            const auto orderCounters = [&](CounterIterator begin, CounterIterator end) {
+                if (end - begin == 1 || begin->time.subsecondNs) {
+                    return begin;
+                }
+
+                const auto firstTimed = std::find_if(
+                    begin, end, [](const UsageSample& sample) { return sample.time.subsecondNs.has_value(); });
+                const bool sourcesAgreeWithTimes =
+                    std::all_of(firstTimed, end, [](const UsageSample& sample) { return sample.sourceLine != 0; }) &&
+                    std::is_sorted(firstTimed, end, bySourceLine);
+                if (!sourcesAgreeWithTimes) {
+                    return firstTimed;
+                }
+                const auto firstOrdered =
+                    std::stable_partition(begin, end, [](const UsageSample& sample) { return sample.sourceLine == 0; });
+                std::stable_sort(firstOrdered, end, bySourceLine);
+                return firstOrdered;
+            };
+
+            const auto resetBetween = [](const UsageSample* left, const UsageSample* right) {
+                return left && right && left->tokens > right->tokens;
+            };
+            const auto increaseBetween = [](const UsageSample* left, const UsageSample* right) {
+                return left && right && right->tokens > left->tokens ? right->tokens - left->tokens : 0LL;
+            };
+            const auto estimatePlacement = [&](const std::vector<const UsageSample*>& ordered,
+                                               const UsageSample& sample, const UsageSample* before,
+                                               const UsageSample* after) {
+                std::optional<std::size_t> position;
+                // A repeated total adds no boundary evidence and must not hide a known timestamp.
+                if (std::any_of(ordered.begin(), ordered.end(),
+                                [&](const UsageSample* known) { return known->tokens == sample.tokens; })) {
+                    return position;
+                }
+                long long leastIncrease = std::numeric_limits<long long>::max();
+                for (std::size_t i = 0; i <= ordered.size(); ++i) {
+                    const UsageSample* left = i == 0 ? before : ordered[i - 1];
+                    const UsageSample* right = i == ordered.size() ? after : ordered[i];
+                    if (resetBetween(left, &sample) + resetBetween(&sample, right) > resetBetween(left, right)) {
+                        continue;
+                    }
+                    const auto increase =
+                        increaseBetween(left, &sample) + increaseBetween(&sample, right) - increaseBetween(left, right);
+                    if (!position || increase < leastIncrease) {
+                        position = i;
+                        leastIncrease = increase;
+                    }
+                }
+                return position;
+            };
+
             for (auto& [rollout, counters] : countersByRollout) {
-                const UsageSample* baseline = nullptr;
-                for (auto first = counters.begin(); first != counters.end();) {
-                    const auto end = std::find_if(first + 1, counters.end(), [&](const UsageSample& sample) {
-                        return sample.time.seconds != first->time.seconds;
+                std::vector<CounterSecond> seconds;
+                for (auto begin = counters.begin(); begin != counters.end();) {
+                    const auto end = std::find_if(begin + 1, counters.end(), [&](const UsageSample& sample) {
+                        return sample.time.seconds != begin->time.seconds;
                     });
-                    if (end - first > 1 && !first->time.subsecondNs) {
-                        // SQL places untimed samples first and keeps the rest in proven chronological order.
-                        const auto firstTimed = std::find_if(
-                            first, end, [](const UsageSample& sample) { return sample.time.subsecondNs.has_value(); });
-                        legacyEstimated = true;
-                        if (std::is_sorted(firstTimed, end, byTokens)) {
-                            // Within an increasing sequence, totals can place untimed samples without moving timed
-                            // ones.
-                            std::stable_sort(first, end, byTokens);
+                    const auto ordered = orderCounters(begin, end);
+                    // Evaluate ambiguous readings consistently. Their placement still depends on neighboring counters.
+                    std::stable_sort(begin, ordered, [](const UsageSample& left, const UsageSample& right) {
+                        return left.tokens < right.tokens;
+                    });
+                    seconds.push_back({begin, ordered, end});
+                    begin = end;
+                }
+
+                const UsageSample* baseline = nullptr;
+                const auto useCounter = [&](const UsageSample& counter) {
+                    if (baseline) {
+                        accountForInterval(rollout, *baseline, counter);
+                    }
+                    baseline = &counter;
+                };
+                for (auto second = seconds.cbegin(); second != seconds.cend(); ++second) {
+                    if (second->begin == second->ordered) {
+                        std::for_each(second->begin, second->end, useCounter);
+                        continue;
+                    }
+
+                    legacyEstimated = true;
+                    std::vector<const UsageSample*> ordered;
+                    for (auto counter = second->ordered; counter != second->end; ++counter) {
+                        ordered.push_back(&*counter);
+                    }
+                    const bool hasReset =
+                        std::adjacent_find(ordered.begin(), ordered.end(), resetBetween) != ordered.end();
+                    const auto next = second + 1;
+                    const UsageSample* after =
+                        next != seconds.end() && next->ordered != next->end ? &*next->ordered : nullptr;
+                    for (auto counter = second->begin; counter != second->ordered; ++counter) {
+                        // Without source order, do not assign a sample to either side of a reset inside this second.
+                        const auto position =
+                            hasReset ? std::nullopt : estimatePlacement(ordered, *counter, baseline, after);
+                        if (position) {
+                            ordered.insert(ordered.begin() + *position, &*counter);
                         } else {
-                            // A timed reset leaves no reliable way to assign an untimed sample to either side.
-                            for (; first != firstTimed; ++first) {
-                                linkedCounters.erase({rollout, first->sourceId});
-                            }
+                            linkedCounters.erase({rollout, counter->sourceId});
                         }
                     }
-                    for (; first != end; ++first) {
-                        if (baseline) {
-                            accountForInterval(rollout, *baseline, *first);
-                        }
-                        baseline = &*first;
+                    for (const auto* counter : ordered) {
+                        useCounter(*counter);
                     }
                 }
             }
