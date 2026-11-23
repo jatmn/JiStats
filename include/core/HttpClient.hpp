@@ -45,6 +45,9 @@ public:
      */
     void setTimeout(unsigned int timeoutMs);
 
+    // Prevent forwarding credentials when an endpoint responds with a redirect.
+    void disableRedirects();
+
     /**
      * Set the WinHTTP user agent string for new requests.
      */

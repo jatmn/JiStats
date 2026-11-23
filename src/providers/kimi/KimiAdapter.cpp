@@ -1107,19 +1107,6 @@ ActivityEvent KimiLocalActivitySnapshot::toActivityEvent() const {
     return event;
 }
 
-UsageEvent KimiLocalActivitySnapshot::toUsageEvent() const {
-    UsageEvent event;
-    event.eventTime = observedAt;
-    event.modelKey = modelKey;
-    event.requestType = taskRuntime.status.empty()
-        ? "kimi_local_runtime"
-        : "kimi_local_runtime_" + taskRuntime.status;
-    event.sourceType = "local_runtime";
-    event.sourceRunId = sessionId;
-    event.rawReference = makeSanitizedReference(sessionId, taskId);
-    return event;
-}
-
 KimiAdapter::KimiAdapter(const std::string& rootPath)
     : pImpl(std::make_unique<Impl>()) {
     pImpl->rootPath = rootPath;
@@ -1132,28 +1119,7 @@ UsageResponse KimiAdapter::fetchUsage(std::time_t from, std::time_t to) {
     response.windowStart = from;
     response.windowEnd = to;
 
-    const KimiLocalParseResult result = fetchLocalActivity();
-    if (!result.success) {
-        response.success = false;
-        response.error = result.error;
-        return response;
-    }
-
-    response.success = true;
-    response.rawResponse = result.rawSummary;
-    for (const UsageEvent& event : result.normalizedUsageEvents) {
-        if (event.eventTime == 0) {
-            continue;
-        }
-        if (from > 0 && event.eventTime < from) {
-            continue;
-        }
-        if (to > 0 && event.eventTime > to) {
-            continue;
-        }
-        response.events.push_back(event);
-    }
-
+    response.error = "Kimi local runtime records do not report token usage";
     return response;
 }
 
@@ -1393,7 +1359,6 @@ KimiLocalParseResult KimiAdapter::parseLocalState(const std::string& rootPath) {
 
             result.activitySnapshots.push_back(snapshot);
             result.normalizedActivityEvents.push_back(snapshot.toActivityEvent());
-            result.normalizedUsageEvents.push_back(snapshot.toUsageEvent());
             ++result.taskCount;
 
             if (runtime.timedOut) {
@@ -1435,14 +1400,6 @@ KimiLocalParseResult KimiAdapter::parseLocalState(const std::string& rootPath) {
         [](const ActivityEvent& left, const ActivityEvent& right) {
             if (left.startedAt != right.startedAt) {
                 return left.startedAt < right.startedAt;
-            }
-            return left.rawReference < right.rawReference;
-        });
-
-    std::sort(result.normalizedUsageEvents.begin(), result.normalizedUsageEvents.end(),
-        [](const UsageEvent& left, const UsageEvent& right) {
-            if (left.eventTime != right.eventTime) {
-                return left.eventTime < right.eventTime;
             }
             return left.rawReference < right.rawReference;
         });

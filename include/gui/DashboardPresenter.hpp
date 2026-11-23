@@ -179,6 +179,8 @@ struct DashboardPreferences {
     bool miniMaxSubscriptionTrackingEnabled = false;
     bool claudeCodeEnabled = false;
     bool kimiCodeEnabled = false;
+    bool grokSubscriptionTrackingEnabled = false;
+    bool cursorSubscriptionTrackingEnabled = false;
     bool startupEnabled = false;
     bool startupStartInBackground = true;
     bool scheduledExportEnabled = false;

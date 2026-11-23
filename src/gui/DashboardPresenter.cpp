@@ -230,7 +230,7 @@ std::string buildAboutDialogBodyText(const DashboardViewModel& model) {
     stream << "Version: " << aboutDialogVersionLabel(model) << "\r\n";
     stream << "Status: Early implementation\r\n\r\n";
     stream << "Provider scope:\r\n";
-    stream << "OpenAI / Codex + MiniMax + Claude Code + Kimi Code\r\n";
+    stream << "OpenAI / Codex, MiniMax, Claude Code, Kimi Code, Grok, and Cursor\r\n";
     stream << "All provider integrations are optional and disabled by default until enabled in Settings.\r\n";
     stream << "OpenAI and MiniMax ship with subscription-level support in v1.0.\r\n";
     stream << "OpenAI API-platform import and broader MiniMax PAYG support remain follow-on refinement.\r\n";
@@ -466,14 +466,7 @@ std::vector<std::string> providerQuotaColumnHeaders() {
 }
 
 std::vector<std::string> preferencesTabLabels() {
-    return {
-        "General",
-        "OpenAI",
-        "MiniMax",
-        "Claude Code",
-        "Kilo Code",
-        "Kimi Code"
-    };
+    return {"General", "OpenAI", "MiniMax", "Claude Code", "Kilo Code", "Kimi Code", "Grok / Cursor"};
 }
 
 std::string analysisDateRangeLabel(AnalysisDateRangePreset preset) {
@@ -491,6 +484,10 @@ std::string analysisDateRangeLabel(AnalysisDateRangePreset preset) {
     default:
         return "Last 7 Days";
     }
+}
+
+bool isExternalSubscriptionQuota(const QuotaInfo& quota) {
+    return quota.providerSurface == "grok_subscription_api" || quota.providerSurface == "cursor_subscription_api";
 }
 
 std::string normalizedQuotaPlanLabel(const ProviderStatus& provider, const QuotaInfo& quota) {
@@ -525,6 +522,15 @@ std::string normalizedUsageSummaryLabel(const ProviderStatus& provider, const Qu
     }
     if (provider.providerKey == "kimi" && normalizedPlan == "Subscription") {
         return "Kimi Subscription";
+    }
+    if (isExternalSubscriptionQuota(quota)) {
+        if (quota.windowType == "auto") {
+            return provider.displayName + " Auto";
+        }
+        if (quota.windowType == "api") {
+            return provider.displayName + " API";
+        }
+        return provider.displayName + " Subscription";
     }
     if (!normalizedPlan.empty()) {
         return provider.displayName + " - " + normalizedPlan;
@@ -616,7 +622,7 @@ std::string quotaSourceLabel(const QuotaInfo& quota) {
     if (quota.providerSurface == "claude_code_local_stats") {
         return "Local";
     }
-    if (quota.providerSurface == "kimi_subscription_api") {
+    if (quota.providerSurface == "kimi_subscription_api" || isExternalSubscriptionQuota(quota)) {
         return "Subscription";
     }
     return "Local";
@@ -632,7 +638,7 @@ std::string providerQuotaUsedValue(const QuotaInfo& quota) {
 
 std::string providerQuotaLimitValue(const QuotaInfo& quota) {
     if (quota.providerSurface == "openai_subscription_codex_local" ||
-        quota.providerSurface == "kimi_subscription_api") {
+        quota.providerSurface == "kimi_subscription_api" || isExternalSubscriptionQuota(quota)) {
         return "100%";
     }
     return formatOptionalNumber(quota.limit);
@@ -640,17 +646,16 @@ std::string providerQuotaLimitValue(const QuotaInfo& quota) {
 
 std::string providerQuotaRemainingValue(const QuotaInfo& quota) {
     if (quota.providerSurface == "openai_subscription_codex_local" ||
-        quota.providerSurface == "kimi_subscription_api") {
+        quota.providerSurface == "kimi_subscription_api" || isExternalSubscriptionQuota(quota)) {
         return formatPercentageLabel(quota.remainingPercentage);
     }
     return formatOptionalNumber(quota.remaining);
 }
 
 std::string quotaSyncSourceLabel(const QuotaInfo& quota) {
-    if (quota.providerSurface == "openai_api_import" ||
-        quota.providerSurface == "minimax_subscription_coding_plan" ||
+    if (quota.providerSurface == "openai_api_import" || quota.providerSurface == "minimax_subscription_coding_plan" ||
         quota.providerSurface == "minimax_subscription_token_plan" ||
-        quota.providerSurface == "kimi_subscription_api") {
+        quota.providerSurface == "kimi_subscription_api" || isExternalSubscriptionQuota(quota)) {
         return "API";
     }
     if (quota.providerSurface == "openai_subscription_export_import") {
@@ -714,21 +719,14 @@ std::vector<ProviderQuotaRowData> buildProviderQuotaRows(const DashboardViewMode
         const std::string providerLabel = providerQuotaDisplayLabel(provider, providerCounts);
 
         if (provider.quotas.empty()) {
-            rows.push_back(ProviderQuotaRowData{
-                {
-                    providerLabel,
-                    providerState,
-                    "(no quota data)",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    baseLastSync
-                },
-                provider.providerKey,
-                provider.accountId
-            });
+            rows.push_back(ProviderQuotaRowData{{providerLabel, providerState,
+                                                 (provider.providerKey == "grok" || provider.providerKey == "cursor") &&
+                                                         !provider.detectionMessage.empty()
+                                                     ? provider.detectionMessage
+                                                     : "(no quota data)",
+                                                 "", "", "", "", "", baseLastSync},
+                                                provider.providerKey,
+                                                provider.accountId});
             continue;
         }
 
@@ -1042,6 +1040,10 @@ std::vector<UsageProgressSummary> buildUsageProgressSummaries(const DashboardVie
                         detail << " (resets " << formatResetTimeLabel(quota.secondaryWindowResetAt) << ")";
                     }
                 }
+            } else if (isExternalSubscriptionQuota(quota)) {
+                if (quota.windowResetAt > 0) {
+                    detail << " (resets " << formatResetTimeLabel(quota.windowResetAt) << ")";
+                }
             } else if (quota.limit > 0) {
                 const char* unitLabel = isMiniMaxCodingPlanQuota(provider, quota)
                     ? "prompts"
@@ -1248,6 +1250,10 @@ public:
     HWND claudeCodeDetail = nullptr;
     HWND futureProviderGroup = nullptr;
     HWND futureProviderInfo = nullptr;
+    HWND externalSubscriptionsGroup = nullptr;
+    HWND externalSubscriptionsInfo = nullptr;
+    HWND grokSubscriptionCheckbox = nullptr;
+    HWND cursorSubscriptionCheckbox = nullptr;
     HWND kimiCodeGroup = nullptr;
     HWND kimiCodeInfo = nullptr;
     HWND kimiCodeEnableCheckbox = nullptr;
@@ -1338,6 +1344,8 @@ public:
     static constexpr int kPreferencesMiniMaxSubscriptionCheckboxId = 1118;
     static constexpr int kPreferencesClaudeCodeCheckboxId = 1116;
     static constexpr int kPreferencesKimiCodeCheckboxId = 1117;
+    static constexpr int kPreferencesGrokSubscriptionCheckboxId = 1119;
+    static constexpr int kPreferencesCursorSubscriptionCheckboxId = 1120;
     static constexpr int kPreferencesScheduledExportCheckboxId = 1108;
     static constexpr int kPreferencesScheduledExportIntervalEditId = 1109;
     static constexpr int kPreferencesCloseButtonId = 1106;
@@ -2132,9 +2140,7 @@ public:
         const auto labels = preferencesTabLabels();
         const size_t index = static_cast<size_t>(std::clamp(selectedPreferencesTab, 0, static_cast<int>(labels.size()) - 1));
         const std::string providerName = labels[index];
-        return utf8ToWide(
-            providerName + " subscription tracking is planned but not implemented yet.\r\n\r\n"
-            "This tab exists now so the settings shell stays provider-oriented as JiStats expands beyond the current four-provider v1.0 baseline.");
+        return utf8ToWide(providerName + " subscription tracking is planned.");
     }
 
     void syncPreferencesTabVisibility() {
@@ -2144,6 +2150,7 @@ public:
         const int claudeFlag = selectedPreferencesTab == 3 ? SW_SHOW : SW_HIDE;
         const int futureFlag = selectedPreferencesTab == 4 ? SW_SHOW : SW_HIDE;
         const int kimiFlag = selectedPreferencesTab == 5 ? SW_SHOW : SW_HIDE;
+        const int externalSubscriptionsFlag = selectedPreferencesTab == 6 ? SW_SHOW : SW_HIDE;
 
         const HWND generalControls[] = {
             preferencesGeneralGroup,
@@ -2226,6 +2233,14 @@ public:
                 const size_t index = static_cast<size_t>(std::clamp(selectedPreferencesTab, 0, static_cast<int>(labels.size()) - 1));
                 setWindowText(futureProviderGroup, utf8ToWide(labels[index] + " Subscription"));
                 setWindowText(futureProviderInfo, futureProviderPlaceholderText());
+            }
+        }
+
+        const HWND externalSubscriptionControls[] = {externalSubscriptionsGroup, externalSubscriptionsInfo,
+                                                     grokSubscriptionCheckbox, cursorSubscriptionCheckbox};
+        for (const auto control : externalSubscriptionControls) {
+            if (control != nullptr) {
+                ShowWindow(control, externalSubscriptionsFlag);
             }
         }
 
@@ -2398,6 +2413,13 @@ public:
         }
         if (futureProviderInfo != nullptr) {
             MoveWindow(futureProviderInfo, innerLeft, innerTop + 18, innerWidth - 12, 120, TRUE);
+        }
+
+        if (externalSubscriptionsGroup != nullptr) {
+            MoveWindow(externalSubscriptionsGroup, pageLeft, pageTop, pageWidth, pageHeight, TRUE);
+            MoveWindow(externalSubscriptionsInfo, innerLeft, innerTop + 8, innerWidth - 12, 80, TRUE);
+            MoveWindow(grokSubscriptionCheckbox, innerLeft, innerTop + 100, 300, rowHeight, TRUE);
+            MoveWindow(cursorSubscriptionCheckbox, innerLeft, innerTop + 132, 300, rowHeight, TRUE);
         }
 
         if (kimiCodeGroup != nullptr) {
@@ -3537,6 +3559,14 @@ public:
                 claudeDetailLabel,
                 utf8ToWide(localProviderSettingsDetailText(model, "claude_code")));
         }
+        if (grokSubscriptionCheckbox != nullptr) {
+            SendMessageW(grokSubscriptionCheckbox, BM_SETCHECK,
+                         model.preferences.grokSubscriptionTrackingEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        if (cursorSubscriptionCheckbox != nullptr) {
+            SendMessageW(cursorSubscriptionCheckbox, BM_SETCHECK,
+                         model.preferences.cursorSubscriptionTrackingEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
         if (kimiToggle != nullptr) {
             SendMessageW(
                 kimiToggle,
@@ -4044,6 +4074,20 @@ public:
         if (notify) {
             notifyPreferencesChanged(preferences);
         }
+    }
+
+    void setExternalSubscriptionEnabled(bool isGrok, bool enabled) {
+        DashboardPreferences preferences;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto& current = viewModel.preferences;
+            auto& preference =
+                isGrok ? current.grokSubscriptionTrackingEnabled : current.cursorSubscriptionTrackingEnabled;
+            preference = enabled;
+            preferences = current;
+        }
+        requestViewModelSync();
+        notifyPreferencesChanged(preferences);
     }
 
     void setStartupEnabled(bool enabled, bool notify) {
@@ -4638,6 +4682,23 @@ public:
             GetModuleHandleW(nullptr),
             nullptr);
 
+        externalSubscriptionsGroup = CreateWindowExW(0, L"BUTTON", L"Subscription Quota", WS_CHILD | BS_GROUPBOX, 0, 0,
+                                                     0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        externalSubscriptionsInfo = CreateWindowExW(
+            0, L"STATIC",
+            L"Grok uses the account signed in with grok login. Cursor uses CURSOR_API_KEY or CURSOR_AUTH_TOKEN "
+            L"from JiStats' environment. Restart JiStats after changing a Cursor environment variable.",
+            WS_CHILD, 0, 0, 0, 0, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        auto makeSubscriptionCheckbox = [&](const wchar_t* label, int id) {
+            return CreateWindowExW(0, L"BUTTON", label, WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr),
+                                   nullptr);
+        };
+        grokSubscriptionCheckbox =
+            makeSubscriptionCheckbox(L"Track Grok subscription quota", kPreferencesGrokSubscriptionCheckboxId);
+        cursorSubscriptionCheckbox =
+            makeSubscriptionCheckbox(L"Track Cursor subscription quota", kPreferencesCursorSubscriptionCheckboxId);
+
         kimiCodeGroup = CreateWindowExW(
             0, L"BUTTON", L"Kimi Code Local Tracking",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 10, 10, 484, 170,
@@ -4765,6 +4826,10 @@ public:
         applyBodyFont(miniMaxFeedbackLabel);
         applyBodyFont(futureProviderGroup);
         applyBodyFont(futureProviderInfo);
+        applyBodyFont(externalSubscriptionsGroup);
+        applyBodyFont(externalSubscriptionsInfo);
+        applyBodyFont(grokSubscriptionCheckbox);
+        applyBodyFont(cursorSubscriptionCheckbox);
         applyBodyFont(kimiCodeGroup);
         applyBodyFont(kimiCodeInfo);
         applyBodyFont(kimiCodeEnableCheckbox);
@@ -5065,6 +5130,14 @@ public:
                     setClaudeCodeEnabled(checked, true);
                 }
                 return 0;
+            case kPreferencesGrokSubscriptionCheckboxId:
+            case kPreferencesCursorSubscriptionCheckboxId:
+                if (HIWORD(wParam) == BN_CLICKED) {
+                    const bool isGrok = LOWORD(wParam) == kPreferencesGrokSubscriptionCheckboxId;
+                    const HWND checkbox = isGrok ? grokSubscriptionCheckbox : cursorSubscriptionCheckbox;
+                    setExternalSubscriptionEnabled(isGrok, SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                }
+                return 0;
             case kPreferencesKimiCodeCheckboxId:
                 if (HIWORD(wParam) == BN_CLICKED) {
                     const bool checked =
@@ -5207,6 +5280,10 @@ public:
                 miniMaxFeedbackLabel = nullptr;
                 futureProviderGroup = nullptr;
                 futureProviderInfo = nullptr;
+                externalSubscriptionsGroup = nullptr;
+                externalSubscriptionsInfo = nullptr;
+                grokSubscriptionCheckbox = nullptr;
+                cursorSubscriptionCheckbox = nullptr;
                 kimiCodeGroup = nullptr;
                 kimiCodeInfo = nullptr;
                 kimiCodeEnableCheckbox = nullptr;

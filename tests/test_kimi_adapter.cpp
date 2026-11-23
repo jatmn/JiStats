@@ -305,7 +305,6 @@ TEST_CASE("Kimi parser reads bounded synthetic fixture snapshots", "[kimi][fixtu
     REQUIRE(result.timedOutTaskCount == 1);
     REQUIRE(result.activitySnapshots.size() == 2);
     REQUIRE(result.normalizedActivityEvents.size() == 2);
-    REQUIRE(result.normalizedUsageEvents.size() == 2);
     REQUIRE(result.latestObservedAt == 1776679530);
 
     const KimiLocalActivitySnapshot& completed = result.activitySnapshots[0];
@@ -476,7 +475,7 @@ base_url = "https://api.kimi.com/coding/v1"
     CHECK(result.normalizedActivityEvents.front().sourceRunId == "root-session/run-123");
 }
 
-TEST_CASE("Kimi adapter exposes filtered local usage events without fabricating quota estimates", "[kimi]") {
+TEST_CASE("Kimi task activity does not become token usage or subscription quota", "[kimi]") {
     KimiAdapter adapter(kFixtureRoot);
 
     const QuotaResponse quota = adapter.fetchQuota();
@@ -485,11 +484,11 @@ TEST_CASE("Kimi adapter exposes filtered local usage events without fabricating 
     REQUIRE(quota.error == "Kimi quota API credentials are not available");
 
     const UsageResponse usage = adapter.fetchUsage(1776679500, 1776679530);
-    REQUIRE(usage.success);
-    REQUIRE(usage.events.size() == 1);
-    REQUIRE(usage.events[0].eventTime == 1776679530);
-    REQUIRE(usage.events[0].requestType == "kimi_local_runtime_failed");
-    REQUIRE(usage.events[0].sourceType == "local_runtime");
+    REQUIRE_FALSE(usage.success);
+    CHECK(usage.events.empty());
+    CHECK(usage.totalInputTokens == 0);
+    CHECK(usage.totalOutputTokens == 0);
+    CHECK_FALSE(adapter.fetchLocalActivity().normalizedActivityEvents.empty());
 }
 
 TEST_CASE("Kimi adapter reports missing local roots without pretending quota truth", "[kimi]") {

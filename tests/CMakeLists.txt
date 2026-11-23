@@ -64,6 +64,7 @@ if(WIN32)
         ${CMAKE_SOURCE_DIR}/src/gui/NotificationService.cpp
         ${CMAKE_SOURCE_DIR}/src/taskbar/TaskbarPresenter.cpp
         ${CMAKE_SOURCE_DIR}/src/providers/ProviderManager.cpp
+        ${CMAKE_SOURCE_DIR}/src/providers/SubscriptionQuotaAdapter.cpp
         ${CMAKE_SOURCE_DIR}/src/providers/minimax/MiniMaxAdapter.cpp
         ${CMAKE_SOURCE_DIR}/src/providers/minimax/MiniMaxLiveCapture.cpp
         ${CMAKE_SOURCE_DIR}/src/providers/openai/OpenAIAdapter.cpp

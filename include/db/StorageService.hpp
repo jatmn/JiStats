@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <optional>
+#include <utility>
 #include <ctime>
 #include "analytics/GapClassifier.hpp"
 #include "db/QueryResult.hpp"
@@ -122,6 +123,7 @@ struct PersistedUsageEvent {
     bool isBackfilled = false;
     std::string rawReference;
     std::string createdAtUtc;
+    std::optional<int> eventSubsecondNs;
 };
 
 struct PersistedUsageRollup {
@@ -196,6 +198,30 @@ struct PersistedQuotaSnapshot {
     bool isReconciled = false;
     std::string basisSummary;
     std::string createdAtUtc;
+
+    bool observeBillingWindow(std::optional<std::pair<std::time_t, std::time_t>>& previous) const {
+        if (quotaDimension != "percent") {
+            const bool changed = previous && *previous != std::make_pair(windowStart, windowEnd);
+            previous = std::make_pair(windowStart, windowEnd);
+            return changed;
+        }
+        if (windowStart <= 0 && windowEnd <= 0) {
+            return false;
+        }
+        const bool changed = previous && ((previous->first > 0 && windowStart > 0 && previous->first != windowStart) ||
+                                          (previous->second > 0 && windowEnd > 0 && previous->second != windowEnd));
+        if (!previous || changed) {
+            previous = std::make_pair(windowStart, windowEnd);
+        } else {
+            if (windowStart > 0) {
+                previous->first = windowStart;
+            }
+            if (windowEnd > 0) {
+                previous->second = windowEnd;
+            }
+        }
+        return changed;
+    }
 };
 
 struct PersistedQuotaSnapshotRollup {
@@ -391,7 +417,8 @@ public:
     bool deleteUsageRollupsOlderThan(UsageRollupResolution resolution, std::time_t olderThan);
 
     // Batch persist usage events for backfill/recovery
-    bool insertUsageEvents(const std::vector<PersistedUsageEvent>& events);
+    bool insertUsageEvents(const std::vector<PersistedUsageEvent>& events,
+                           const std::vector<PersistedUsageEvent>& savedCodexCounters = {});
     std::vector<PersistedUsageEvent> getUsageEvents(
         int providerId,
         int accountId,

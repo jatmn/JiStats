@@ -13,6 +13,7 @@
 #include "observation/ObservationPersistenceBridge.hpp"
 #include "platform/StartupManager.hpp"
 #include "providers/ProviderManager.hpp"
+#include "providers/SubscriptionQuotaAdapter.hpp"
 #include "providers/openai/OpenAIAdapter.hpp"
 #include "providers/openai/OpenAIExportImport.hpp"
 #include "providers/openai/CodexLocalSqliteReader.hpp"
@@ -129,6 +130,12 @@ bool isProviderTrackingEnabled(
     }
     if (providerKey == "kimi") {
         return preferences.kimiCodeEnabled;
+    }
+    if (providerKey == "grok") {
+        return preferences.grokSubscriptionTrackingEnabled;
+    }
+    if (providerKey == "cursor") {
+        return preferences.cursorSubscriptionTrackingEnabled;
     }
     return true;
 }
@@ -1269,6 +1276,12 @@ std::string reportSourceLabelForSurface(const std::string& providerSurface) {
     }
     if (providerSurface == "claude_code_local_stats") {
         return "Claude Local";
+    }
+    if (providerSurface == "grok_subscription_api") {
+        return "Grok Subscription";
+    }
+    if (providerSurface == "cursor_subscription_api") {
+        return "Cursor Subscription";
     }
     if (providerSurface == "kimi_subscription_api") {
         return "Kimi Subscription";
@@ -2534,6 +2547,10 @@ std::string quotaPlanLabelForProvider(
         return "Local Activity";
     }
 
+    if (providerKey == "grok" || providerKey == "cursor") {
+        return "Subscription";
+    }
+
     if (!persistedPlanLabel.empty()) {
         return persistedPlanLabel;
     }
@@ -2568,7 +2585,7 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         "       COALESCE(qs.limit_value, 0), "
         "       COALESCE(qs.remaining_value, "
         "           CASE WHEN qs.limit_value IS NOT NULL THEN qs.limit_value - qs.used_value ELSE 0 END), "
-        "       qs.confidence_tier "
+        "       qs.confidence_tier, qs.window_end_utc "
         "FROM latest_provider_snapshots latest "
         "JOIN quota_snapshots qs "
         "  ON qs.provider_id = latest.provider_id "
@@ -2588,16 +2605,7 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
     std::time_t freshestSnapshotTime = 0;
     for (size_t row = 0; row < result.rowCount(); ++row) {
         const std::string providerKey = result.getString(row, 0);
-        if (providerKey == "openai" && !preferences.openaiSubscriptionTrackingEnabled) {
-            continue;
-        }
-        if (providerKey == "minimax" && !preferences.miniMaxSubscriptionTrackingEnabled) {
-            continue;
-        }
-        if (providerKey == "claude_code" && !preferences.claudeCodeEnabled) {
-            continue;
-        }
-        if (providerKey == "kimi" && !preferences.kimiCodeEnabled) {
+        if (!isProviderTrackingEnabled(preferences, providerKey)) {
             continue;
         }
 
@@ -2642,6 +2650,11 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
             limit,
             result.getString(row, 9),
             remaining);
+        if (providerKey == "grok" || providerKey == "cursor") {
+            quota.providerSurface = providerKey + "_subscription_api";
+            const auto resetTime = parseRuntimeTimestamp(result.getString(row, 10));
+            quota.windowResetAt = resetTime > snapshotTime ? resetTime : 0;
+        }
         providerIt->quotas.push_back(std::move(quota));
     }
 
@@ -2740,6 +2753,9 @@ void applyRuntimeStateToViewModel(DashboardViewModel& viewModel) {
 }
 
 ProviderState determineProviderState(const QuotaResponse& quota, std::time_t now) {
+    if (quota.unavailable) {
+        return ProviderState::Sample;
+    }
     if (!quota.success) {
         return ProviderState::Offline;
     }
@@ -2783,10 +2799,9 @@ bool isTaskbarSubscriptionQuota(const ProviderStatus& provider, const QuotaInfo&
             provider.providerKey == "kimi";
     }
 
-    if (surface == "openai_subscription_codex_local" ||
-        surface == "minimax_subscription_coding_plan" ||
-        surface == "minimax_subscription_token_plan" ||
-        surface == "kimi_subscription_api") {
+    if (surface == "openai_subscription_codex_local" || surface == "minimax_subscription_coding_plan" ||
+        surface == "minimax_subscription_token_plan" || surface == "kimi_subscription_api" ||
+        surface == "grok_subscription_api" || surface == "cursor_subscription_api") {
         return true;
     }
 
@@ -3218,38 +3233,42 @@ std::optional<int> ensureQuotaSnapshotPlanId(
     return static_cast<int>(insert.lastInsertRowId());
 }
 
-bool persistQuotaSnapshotRow(
-    StorageService& storage,
-    int providerId,
-    int accountId,
-    std::optional<int> planId,
-    std::time_t snapshotTime,
-    std::time_t windowStart,
-    std::time_t windowEnd,
-    long long used,
-    long long limit,
-    long long remaining,
-    const std::string& confidenceTier,
-    const std::string& basisSummary) {
+bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accountId, std::optional<int> planId,
+                             std::time_t snapshotTime, std::time_t windowStart, std::time_t windowEnd, long long used,
+                             long long limit, long long remaining, const std::string& confidenceTier,
+                             const std::string& basisSummary, bool percentageReading) {
+    if (percentageReading && !planId.has_value()) {
+        return false;
+    }
     if (snapshotTime <= 0) {
         snapshotTime = std::time(nullptr);
     }
-    if (windowEnd <= 0) {
-        windowEnd = snapshotTime;
-    }
-    if (windowStart <= 0) {
-        windowStart = windowEnd;
+    if (!percentageReading) {
+        if (windowEnd <= 0) {
+            windowEnd = snapshotTime;
+        }
+        if (windowStart <= 0) {
+            windowStart = windowEnd;
+        }
     }
 
     std::string sql =
         "INSERT INTO quota_snapshots ("
         "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
         "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled"
-        ") VALUES (?, ?, ";
+        ") ";
+    sql += percentageReading ? "SELECT ?, ?, " : "VALUES (?, ?, ";
     sql += planId.has_value() ? "?" : "NULL";
     sql += ", ?, ?, ?, ?, ";
     sql += limit > 0 ? "?" : "NULL";
-    sql += ", ?, ?, ?, ?, ?);";
+    sql += ", ?, ?, ?, ?, ?";
+    if (percentageReading) {
+        // Refreshes may reuse the same provider response until its polling budget expires.
+        sql += " WHERE NOT EXISTS (SELECT 1 FROM quota_snapshots WHERE provider_id = ? AND account_id = ? "
+               "AND plan_id = ? AND snapshot_time_utc = ?);";
+    } else {
+        sql += ");";
+    }
 
     std::vector<std::string> params = {
         std::to_string(providerId),
@@ -3259,17 +3278,23 @@ bool persistQuotaSnapshotRow(
         params.push_back(std::to_string(*planId));
     }
     params.push_back(formatTimeUtcIso(snapshotTime));
-    params.push_back(formatTimeUtcIso(windowStart));
-    params.push_back(formatTimeUtcIso(windowEnd));
+    params.push_back(windowStart > 0 ? formatTimeUtcIso(windowStart) : std::string{});
+    params.push_back(windowEnd > 0 ? formatTimeUtcIso(windowEnd) : std::string{});
     params.push_back(std::to_string(std::max<long long>(0, used)));
     if (limit > 0) {
         params.push_back(std::to_string(limit));
     }
     params.push_back(confidenceTier.empty() ? "Unknown" : confidenceTier);
     params.push_back(basisSummary);
-    params.push_back("requests");
+    params.push_back(percentageReading ? "percent" : "requests");
     params.push_back(std::to_string(std::max<long long>(0, remaining)));
     params.push_back("0");
+    if (percentageReading) {
+        params.push_back(std::to_string(providerId));
+        params.push_back(std::to_string(accountId));
+        params.push_back(std::to_string(*planId));
+        params.push_back(formatTimeUtcIso(snapshotTime));
+    }
 
     QueryResult insert = storage.execute(sql, params);
     return insert.success();
@@ -3647,6 +3672,9 @@ DashboardViewModel buildDashboardViewModelFromResolvedProviderData(
             }
 
             status.state = determineProviderState(quota, now);
+            if (quota.unavailable) {
+                status.detectionMessage = quota.error;
+            }
             if (quota.success && quota.snapshotTime > 0) {
                 status.lastSyncTime = formatTimeUtc(quota.snapshotTime);
             }
@@ -3669,18 +3697,16 @@ DashboardViewModel buildDashboardViewModelFromResolvedProviderData(
                 quotaInfo.providerSurface = quota.providerSurface;
                 status.quotas.push_back(quotaInfo);
 
-                if (status.providerKey == "kimi" &&
-                    quota.secondaryWindowType == "weekly") {
-                    QuotaInfo weeklyQuota = makeQuota(
-                        quotaPlanLabelForResponse(status.providerKey, quota),
-                        quota.secondaryWindowType,
-                        std::max<long long>(0, quota.secondaryUsed),
-                        std::max<long long>(0, quota.secondaryLimit),
+                if ((status.providerKey == "kimi" && quota.secondaryWindowType == "weekly") ||
+                    (status.providerKey == "cursor" && quota.secondaryLimit > 0)) {
+                    QuotaInfo secondaryQuota = makeQuota(
+                        quotaPlanLabelForResponse(status.providerKey, quota), quota.secondaryWindowType,
+                        std::max<long long>(0, quota.secondaryUsed), std::max<long long>(0, quota.secondaryLimit),
                         quotaConfidenceTierForResponse(status.providerKey, quota),
                         std::max<long long>(0, quota.secondaryRemaining));
-                    weeklyQuota.windowResetAt = quota.secondaryWindowEnd;
-                    weeklyQuota.providerSurface = quota.providerSurface;
-                    status.quotas.push_back(std::move(weeklyQuota));
+                    secondaryQuota.windowResetAt = quota.secondaryWindowEnd;
+                    secondaryQuota.providerSurface = quota.providerSurface;
+                    status.quotas.push_back(std::move(secondaryQuota));
                 }
             }
             ++quotaIndex;
@@ -3708,6 +3734,8 @@ const char* const OPENAI_SUBSCRIPTION_TRACKING_ENABLED = "runtime.openai_subscri
 const char* const MINIMAX_SUBSCRIPTION_TRACKING_ENABLED = "runtime.minimax_subscription_tracking_enabled";
 const char* const CLAUDE_CODE_ENABLED = "runtime.claude_code_enabled";
 const char* const KIMI_CODE_ENABLED = "runtime.kimi_code_enabled";
+const char* const GROK_TRACKING_ENABLED = "runtime.grok_subscription_tracking_enabled";
+const char* const CURSOR_TRACKING_ENABLED = "runtime.cursor_subscription_tracking_enabled";
 const char* const STARTUP_ENABLED = "runtime.startup_enabled";
 const char* const STARTUP_BACKGROUND = "runtime.startup_background";
 const char* const LAST_SELECTED_PROVIDER_ID = "ui.last_selected_provider_id";
@@ -3751,6 +3779,7 @@ public:
         std::set<std::string> fetchedProviderKeys;
         // Subset of fetchedProviderKeys whose result came from a direct provider API.
         std::set<std::string> providerApiKeys;
+        bool deferNewSubscriptions = false;
     };
 
     struct StagedConnectivity {
@@ -3811,6 +3840,7 @@ public:
     mutable std::mutex persistedMetricMutex;
     std::mutex scheduledExportMutex;
     std::condition_variable refreshWatcherCv;
+    std::atomic<unsigned> subscriptionWatchMask{0};
     std::condition_variable interactionWorkCv;
     std::optional<DashboardPreferences> pendingInteractionPreferences;
     bool pendingInteractionRequiresRuntimeRefresh = false;
@@ -4111,7 +4141,15 @@ public:
         std::vector<QuotaResponse> responses;
         responses.reserve(providers.size());
         for (const auto& provider : providers) {
-            responses.push_back(fetchQuotaWithDirectApiBudget(provider, now, refresh));
+            const auto key = provider->getProviderKey();
+            if (refresh.deferNewSubscriptions && (key == "grok" || key == "cursor")) {
+                QuotaResponse pending;
+                pending.unavailable = true;
+                pending.error = "Checking subscription quota";
+                responses.push_back(std::move(pending));
+            } else {
+                responses.push_back(fetchQuotaWithDirectApiBudget(provider, now, refresh));
+            }
         }
         return responses;
     }
@@ -4166,6 +4204,7 @@ public:
 
             const std::string confidenceTier = quotaConfidenceTierForResponse(providerKey, quota);
             const std::string displayName = quotaPlanLabelForResponse(providerKey, quota);
+            const bool percentageReading = providerKey == "grok" || providerKey == "cursor";
             const std::time_t snapshotTime = quota.snapshotTime > 0 ? quota.snapshotTime : now;
 
             const NormalizedQuotaValues primaryValues = normalizeQuotaValues(quota);
@@ -4180,19 +4219,9 @@ public:
             const std::string primaryBasisSummary =
                 "Runtime quota snapshot captured from " +
                 reportSourceLabelForSurface(quota.providerSurface.empty() ? providerKey : quota.providerSurface);
-            persistQuotaSnapshotRow(
-                storageService,
-                *providerId,
-                *accountId,
-                primaryPlanId,
-                snapshotTime,
-                quota.windowStart,
-                quota.windowEnd,
-                primaryValues.used,
-                primaryValues.limit,
-                primaryValues.remaining,
-                confidenceTier,
-                primaryBasisSummary);
+            persistQuotaSnapshotRow(storageService, *providerId, *accountId, primaryPlanId, snapshotTime,
+                                    quota.windowStart, quota.windowEnd, primaryValues.used, primaryValues.limit,
+                                    primaryValues.remaining, confidenceTier, primaryBasisSummary, percentageReading);
 
             if (quota.secondaryLimit > 0 || quota.secondaryUsed > 0 || quota.secondaryRemaining > 0) {
                 QuotaResponse secondaryQuota = quota;
@@ -4223,19 +4252,10 @@ public:
                     reportSourceLabelForSurface(quota.providerSurface.empty() ? providerKey : quota.providerSurface) +
                     " (" + (secondaryQuota.windowType.empty() ? std::string("secondary") : secondaryQuota.windowType) +
                     " window)";
-                persistQuotaSnapshotRow(
-                    storageService,
-                    *providerId,
-                    *accountId,
-                    secondaryPlanId,
-                    snapshotTime,
-                    secondaryQuota.windowStart,
-                    secondaryQuota.windowEnd,
-                    secondaryValues.used,
-                    secondaryValues.limit,
-                    secondaryValues.remaining,
-                    confidenceTier,
-                    secondaryBasisSummary);
+                persistQuotaSnapshotRow(storageService, *providerId, *accountId, secondaryPlanId, snapshotTime,
+                                        secondaryQuota.windowStart, secondaryQuota.windowEnd, secondaryValues.used,
+                                        secondaryValues.limit, secondaryValues.remaining, confidenceTier,
+                                        secondaryBasisSummary, percentageReading);
             }
         }
 
@@ -4386,6 +4406,21 @@ public:
         applyMiniMaxPreferenceToProviderManager(preferences.miniMaxSubscriptionTrackingEnabled);
         applyClaudeCodePreferenceToProviderManager(preferences.claudeCodeEnabled);
         applyKimiCodePreferenceToProviderManager(preferences.kimiCodeEnabled);
+        for (const auto* key : {"grok", "cursor"}) {
+            if (const auto provider = activeProviderManager().getProvider(key)) {
+                provider->setEnabled(isProviderTrackingEnabled(preferences, key));
+            }
+        }
+        const unsigned subscriptionMask = (preferences.grokSubscriptionTrackingEnabled ? 1u : 0u) |
+                                          (preferences.cursorSubscriptionTrackingEnabled ? 2u : 0u);
+        bool changed;
+        {
+            std::lock_guard<std::mutex> lock(refreshWatcherMutex);
+            changed = subscriptionWatchMask.exchange(subscriptionMask) != subscriptionMask;
+        }
+        if (changed) {
+            refreshWatcherCv.notify_all();
+        }
     }
 
     void importEnabledLocalProviderActivity(const DashboardPreferences& preferences) {
@@ -4432,33 +4467,15 @@ public:
             if (!codexRolloutDir.empty()) {
                 std::error_code ec;
                 if (std::filesystem::exists(codexRolloutDir, ec)) {
-                    const auto snapshots = OpenAIAdapter::collectCodexTokenUsageSnapshots(codexRolloutDir);
-                    if (!snapshots.empty()) {
+                    const auto batch = OpenAIAdapter::collectCodexTokenUsageSnapshots(codexRolloutDir);
+                    if (!batch.observations.empty() || !batch.savedCounters.empty()) {
                         const auto providerId = findProviderIdByKey(storageService, "openai");
                         const auto accountId =
                             ensureRuntimeTrackingAccountId(storageService, "openai", "OpenAI");
-                        if (providerId && accountId) {
-                            std::vector<PersistedUsageEvent> events;
-                            events.reserve(snapshots.size());
-                            for (const auto& snap : snapshots) {
-                                PersistedUsageEvent evt;
-                                evt.providerId = *providerId;
-                                evt.accountId = *accountId;
-                                evt.eventTime = snap.eventTime;
-                                evt.sourceType = "codex_local_rollout";
-                                evt.sourceRunId = "codex_token_usage";
-                                evt.modelKey = "codex";
-                                evt.requestType = "codex_turn";
-                                evt.inputTokens = snap.inputTokens;
-                                evt.outputTokens = snap.outputTokens;
-                                evt.totalTokens = snap.totalTokens;
-                                evt.costMinorUnits = 0;
-                                evt.rawReference = snap.sourcePath;
-                                events.push_back(std::move(evt));
-                            }
-                            if (storageService.insertUsageEvents(events)) {
-                                importedActivity = true;
-                            }
+                        if (providerId && accountId &&
+                            OpenAIAdapter::persistCodexTokenUsageSnapshots(storageService, *providerId, *accountId,
+                                                                           batch)) {
+                            importedActivity = true;
                         }
                     }
                 }
@@ -4484,8 +4501,8 @@ public:
         if (claudeProvider) {
             claudeCodeDetected = claudeProvider->validateCredentials();
             claudeCodeDetectionMessage = claudeCodeDetected
-                ? "Detected at ~/.claude/stats-cache.json"
-                : "Not detected. Install Claude Code to enable local tracking.";
+                                             ? "Detected Claude Code stats cache"
+                                             : "Not detected. Install Claude Code to enable local tracking.";
         }
 
         kimiCodeDetected = KimiAdapter::hasLocalInstallation();
@@ -4496,14 +4513,16 @@ public:
 
     bool shouldImportLocalActivityDuringStartupRefresh(
         const DashboardPreferences& preferences) const {
-        return preferences.claudeCodeEnabled || preferences.kimiCodeEnabled;
+        return preferences.openaiSubscriptionTrackingEnabled || preferences.claudeCodeEnabled ||
+               preferences.kimiCodeEnabled;
     }
 
     bool shouldQueueDeferredStartupRefresh(
         const DashboardPreferences& preferences,
         bool usedPersistedStartupHydration,
         bool executedStartupCatchUp) {
-        if (executedStartupCatchUp || hasPendingRecovery()) {
+        if (executedStartupCatchUp || hasPendingRecovery() || preferences.grokSubscriptionTrackingEnabled ||
+            preferences.cursorSubscriptionTrackingEnabled) {
             return true;
         }
 
@@ -4847,13 +4866,20 @@ public:
         miniMaxRefreshThread = std::thread([this]() {
             while (!shouldStopMiniMaxValidation()) {
                 const std::time_t now = currentTime();
-                if (shouldRunMiniMaxRefreshWatcher()) {
+                const unsigned subscriptionMask = subscriptionWatchMask.load();
+                const bool additionalSubscriptions = subscriptionMask != 0;
+                if (additionalSubscriptions || shouldRunMiniMaxRefreshWatcher()) {
                     refreshProviderRuntimeState(now, false, false);
                 }
 
-                if (waitForRefreshWatcherInterval(nextMiniMaxRefreshWaitInterval(now))) {
-                    break;
+                auto interval = nextMiniMaxRefreshWaitInterval(now);
+                if (additionalSubscriptions) {
+                    interval = std::min(interval, miniMaxRefreshPollInterval);
                 }
+                std::unique_lock<std::mutex> lock(refreshWatcherMutex);
+                refreshWatcherCv.wait_for(lock, interval, [this, subscriptionMask]() {
+                    return shuttingDown.load() || subscriptionWatchMask.load() != subscriptionMask;
+                });
             }
         });
     }
@@ -6237,16 +6263,15 @@ public:
 
         // Execute provider-side backfill first to populate usage_events before rollup rebuild
         for (const auto& provider : viewModel.providers) {
+            const auto adapter = activeProviderManager.getProvider(provider.providerKey);
+            if (!adapter || !adapter->isEnabled() || !adapter->supportsUsageHistory()) {
+                continue;
+            }
+
             const auto providerId = findProviderIdByKey(storageService, provider.providerKey);
             const auto runtimeAccountId =
                 ensureRuntimeTrackingAccountId(storageService, provider.providerKey, provider.displayName);
             if (!providerId.has_value() || !runtimeAccountId.has_value()) {
-                continue;
-            }
-
-            // Check if provider supports history fetch and has credentials
-            const auto adapter = activeProviderManager.getProvider(provider.providerKey);
-            if (!adapter || !adapter->isEnabled()) {
                 continue;
             }
 
@@ -6769,6 +6794,12 @@ public:
             if (auto value = settingsService.getBool(preference_keys::KIMI_CODE_ENABLED)) {
                 preferences.kimiCodeEnabled = *value;
             }
+            if (auto value = settingsService.getBool(preference_keys::GROK_TRACKING_ENABLED)) {
+                preferences.grokSubscriptionTrackingEnabled = *value;
+            }
+            if (auto value = settingsService.getBool(preference_keys::CURSOR_TRACKING_ENABLED)) {
+                preferences.cursorSubscriptionTrackingEnabled = *value;
+            }
             if (auto value = settingsService.getBool(preference_keys::STARTUP_ENABLED)) {
                 preferences.startupEnabled = *value;
             }
@@ -6833,6 +6864,10 @@ public:
                                     preferences.claudeCodeEnabled);
             settingsService.setBool(preference_keys::KIMI_CODE_ENABLED,
                                     preferences.kimiCodeEnabled);
+            settingsService.setBool(preference_keys::GROK_TRACKING_ENABLED,
+                                    preferences.grokSubscriptionTrackingEnabled);
+            settingsService.setBool(preference_keys::CURSOR_TRACKING_ENABLED,
+                                    preferences.cursorSubscriptionTrackingEnabled);
             settingsService.setBool(preference_keys::STARTUP_ENABLED,
                                     preferences.startupEnabled);
             settingsService.setBool(preference_keys::STARTUP_BACKGROUND,
@@ -6873,27 +6908,25 @@ public:
         }
 
         if (viewModel.preferences.taskbarOverlayEnabled == preferences.taskbarOverlayEnabled &&
-            viewModel.preferences.openaiSubscriptionTrackingEnabled ==
-                preferences.openaiSubscriptionTrackingEnabled &&
+            viewModel.preferences.openaiSubscriptionTrackingEnabled == preferences.openaiSubscriptionTrackingEnabled &&
             viewModel.preferences.miniMaxSubscriptionTrackingEnabled ==
                 preferences.miniMaxSubscriptionTrackingEnabled &&
             viewModel.preferences.claudeCodeEnabled == preferences.claudeCodeEnabled &&
             viewModel.preferences.kimiCodeEnabled == preferences.kimiCodeEnabled &&
+            viewModel.preferences.grokSubscriptionTrackingEnabled == preferences.grokSubscriptionTrackingEnabled &&
+            viewModel.preferences.cursorSubscriptionTrackingEnabled == preferences.cursorSubscriptionTrackingEnabled &&
             viewModel.preferences.startupEnabled == preferences.startupEnabled &&
             viewModel.preferences.startupStartInBackground == preferences.startupStartInBackground &&
             viewModel.preferences.scheduledExportEnabled == preferences.scheduledExportEnabled &&
-            viewModel.preferences.scheduledExportIntervalMinutes ==
-                preferences.scheduledExportIntervalMinutes &&
+            viewModel.preferences.scheduledExportIntervalMinutes == preferences.scheduledExportIntervalMinutes &&
             viewModel.preferences.scheduledExportPath == preferences.scheduledExportPath &&
             viewModel.preferences.lastSelectedProviderId == preferences.lastSelectedProviderId &&
             viewModel.preferences.lastSelectedAccountId == preferences.lastSelectedAccountId &&
             viewModel.preferences.analysisSelectedProviderId == preferences.analysisSelectedProviderId &&
             viewModel.preferences.analysisSelectedAccountId == preferences.analysisSelectedAccountId &&
             viewModel.preferences.analysisDateRangePreset == preferences.analysisDateRangePreset &&
-            viewModel.preferences.analysisCustomRangeStartUtc ==
-                preferences.analysisCustomRangeStartUtc &&
-            viewModel.preferences.analysisCustomRangeEndUtc ==
-                preferences.analysisCustomRangeEndUtc) {
+            viewModel.preferences.analysisCustomRangeStartUtc == preferences.analysisCustomRangeStartUtc &&
+            viewModel.preferences.analysisCustomRangeEndUtc == preferences.analysisCustomRangeEndUtc) {
             return;
         }
 
@@ -7121,6 +7154,9 @@ bool AppController::init(bool launchInBackground) {
         auto claudeAdapter = std::make_shared<ClaudeCodeAdapter>();
         pImpl->providerManager.addProvider(claudeAdapter);
 
+        pImpl->providerManager.addProvider(std::make_shared<SubscriptionQuotaAdapter>(SubscriptionProvider::Grok));
+        pImpl->providerManager.addProvider(std::make_shared<SubscriptionQuotaAdapter>(SubscriptionProvider::Cursor));
+
 #if JISTATS_HAS_KIMI_ADAPTER
         auto kimiAdapter = std::make_shared<KimiAdapter>();
         pImpl->providerManager.addProvider(kimiAdapter);
@@ -7139,7 +7175,7 @@ bool AppController::init(bool launchInBackground) {
         } else {
             pImpl->runProviderDiscovery();
             pImpl->importEnabledLocalProviderActivity(loadedPreferences);
-            Impl::QuotaRefresh refresh{++pImpl->quotaRefreshGeneration, {}, {}};
+            Impl::QuotaRefresh refresh{++pImpl->quotaRefreshGeneration, {}, {}, true};
             viewModel = pImpl->buildDashboardViewModel(now, refresh);
             viewModel.preferences = loadedPreferences; // Use persisted preferences
             executedStartupCatchUp =

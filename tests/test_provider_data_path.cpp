@@ -12,7 +12,9 @@
 #include <ctime>
 
 #include "providers/ProviderManager.hpp"
+#include "providers/SubscriptionQuotaAdapter.hpp"
 #include "app/AppController.hpp"
+#include "core/HttpClient.hpp"
 #include "db/SettingsService.hpp"
 #include "db/StorageService.hpp"
 #include "gui/DashboardPresenter.hpp"
@@ -24,6 +26,10 @@ using namespace JiStats;
 using namespace JiStats::TestSupport;
 
 namespace {
+
+QuotaResponse subscriptionFixture(SubscriptionProvider provider, const std::string& body, std::time_t now) {
+    return SubscriptionQuotaAdapter::parseQuotaResponse(provider, HttpResponse{true, 200, body, {}}, now);
+}
 
 void seedProviderTrackingPreferences(
     const std::string& path,
@@ -244,4 +250,137 @@ TEST_CASE("ProviderManager respects enabled/disabled state", "[provider_data_pat
     auto quotaResponses = providerManager->fetchAllQuota();
     REQUIRE(quotaResponses.size() == 1);
     CHECK(quotaResponses[0].used == 100);
+}
+
+TEST_CASE("Subscription quota reads provider percentages and skips unsupported balances",
+          "[provider_data_path][subscription]") {
+    const auto now = std::time(nullptr);
+    SECTION("Grok reports used allowance and reset time") {
+        const auto quota = subscriptionFixture(SubscriptionProvider::Grok, R"json({
+          "config": {
+            "creditUsagePercent": 37.6,
+            "currentPeriod": {"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-04-20T12:00:00Z","end":"2026-04-27T14:00:00+02:00"}
+          }
+        })json",
+                                               now);
+        REQUIRE(quota.success);
+        CHECK(quota.used == 38);
+        CHECK(quota.remaining == 62);
+        CHECK(quota.windowType == "weekly");
+        CHECK(quota.windowEnd - quota.windowStart == 7 * 86400);
+        CHECK(quota.providerSurface == "grok_subscription_api");
+        CHECK(quota.rawResponse.empty());
+    }
+    SECTION("Grok only infers an omitted zero with a complete recognized period") {
+        const auto quota = subscriptionFixture(SubscriptionProvider::Grok, R"json({
+          "config": {"currentPeriod": {"type":"WEEKLY","start":"2026-04-20T12:00:00Z","end":"2026-04-27T12:00:00Z"}}
+        })json",
+                                               now);
+        REQUIRE(quota.success);
+        CHECK(quota.remaining == 100);
+        const auto invalid = subscriptionFixture(SubscriptionProvider::Grok, R"json({
+          "config": {"currentPeriod": {"type":"WEEKLY","start":"2026-02-30T12:00:00Z","end":"2026-04-27T12:00:00Z"}}
+        })json",
+                                                 now);
+        CHECK_FALSE(invalid.success);
+        CHECK(invalid.unavailable);
+    }
+    SECTION("A rejected Grok sign-in returns an actionable quota state") {
+        const auto expired = SubscriptionQuotaAdapter::parseQuotaResponse(
+            SubscriptionProvider::Grok, HttpResponse{false, 401, "private response", {}}, now);
+        CHECK_FALSE(expired.success);
+        CHECK(expired.unavailable);
+        CHECK(expired.error == "Run grok login again");
+        CHECK(expired.rawResponse.empty());
+
+        const auto outage = SubscriptionQuotaAdapter::parseQuotaResponse(SubscriptionProvider::Grok,
+                                                                         HttpResponse{false, 503, {}, {}}, now);
+        CHECK_FALSE(outage.success);
+        CHECK_FALSE(outage.unavailable);
+        CHECK(outage.error.find("503") != std::string::npos);
+    }
+    SECTION("Cursor uses the provider's percentages rather than on-demand spend") {
+        const auto quota = subscriptionFixture(SubscriptionProvider::Cursor, R"json({
+            "billingCycleStart": "1776686400000", "billingCycleEnd": 1779278400000,
+            "planUsage": {"totalPercentUsed": 22}, "onDemandUsage": {"totalSpend": 42}
+        })json",
+                                               now);
+        REQUIRE(quota.success);
+        CHECK(quota.used == 22);
+        CHECK(quota.remaining == 78);
+        CHECK(quota.windowType == "monthly");
+        CHECK(quota.windowEnd == 1779278400);
+        CHECK(quota.providerSurface == "cursor_subscription_api");
+        const auto unsupported =
+            subscriptionFixture(SubscriptionProvider::Cursor, R"({"onDemandUsage":{"totalSpend":42}})", now);
+        CHECK_FALSE(unsupported.success);
+        CHECK(unsupported.unavailable);
+    }
+}
+
+TEST_CASE("Grok and Cursor quota follow independent tracking preferences", "[provider_data_path][subscription]") {
+    requireSqlite();
+    const auto now = std::time(nullptr);
+    const auto grok = subscriptionFixture(SubscriptionProvider::Grok, R"({"config":{"creditUsagePercent":42}})", now);
+    const auto cursor = subscriptionFixture(SubscriptionProvider::Cursor,
+                                            R"({"planUsage":{"autoPercentUsed":10,"apiPercentUsed":25}})", now);
+    REQUIRE(grok.success);
+    REQUIRE(cursor.success);
+    auto grokProvider = makeQuotaProvider("grok", "Grok", grok);
+    auto cursorProvider = makeQuotaProvider("cursor", "Cursor", cursor);
+    grokProvider->setDirectQuotaApiConfigured(true);
+    cursorProvider->setDirectQuotaApiConfigured(true);
+    auto providerManager = makeProviderManager({grokProvider, cursorProvider});
+    TempTestDatabase dbPath;
+    AppController controller;
+    controller.setDatabasePathForTesting(dbPath.path());
+    controller.setHeadlessForTesting(true);
+    controller.setProviderManagerForTesting(providerManager);
+    REQUIRE(controller.init());
+    auto preferences = controller.getDashboardViewModelForTesting().preferences;
+    CHECK_FALSE(preferences.grokSubscriptionTrackingEnabled);
+    CHECK_FALSE(preferences.cursorSubscriptionTrackingEnabled);
+    CHECK(controller.getDashboardViewModelForTesting().providers.empty());
+
+    preferences.grokSubscriptionTrackingEnabled = true;
+    controller.applyDashboardPreferencesForTesting(preferences);
+    auto providers = controller.getDashboardViewModelForTesting().providers;
+    REQUIRE(providers.size() == 1);
+    CHECK(providers.front().providerKey == "grok");
+    REQUIRE(providers.front().quotas.size() == 1);
+    CHECK(providers.front().quotas.front().remaining == 58);
+    controller.refreshRuntimeForTesting();
+
+    preferences.grokSubscriptionTrackingEnabled = false;
+    preferences.cursorSubscriptionTrackingEnabled = true;
+    controller.applyDashboardPreferencesForTesting(preferences);
+    providers = controller.getDashboardViewModelForTesting().providers;
+    REQUIRE(providers.size() == 1);
+    CHECK(providers.front().providerKey == "cursor");
+    REQUIRE(providers.front().quotas.size() == 2);
+    CHECK(providers.front().quotas[0].remaining == 90);
+    CHECK(providers.front().quotas[1].remaining == 75);
+    controller.refreshRuntimeForTesting();
+
+    controller.shutdown();
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    SettingsService settings(storage);
+    CHECK(settings.getBool("runtime.grok_subscription_tracking_enabled") == false);
+    CHECK(settings.getBool("runtime.cursor_subscription_tracking_enabled") == true);
+    const auto syntheticBounds =
+        storage.execute("SELECT COUNT(*) FROM quota_snapshots WHERE quota_dimension = 'percent' "
+                        "AND (window_start_utc <> '' OR window_end_utc <> '');");
+    REQUIRE(syntheticBounds.success());
+    CHECK(syntheticBounds.getInt(0, 0) == 0);
+    const auto history = storage.execute(
+        "SELECT p.provider_key, COUNT(*) FROM quota_snapshots qs JOIN providers p ON qs.provider_id = p.id "
+        "WHERE p.provider_key IN ('cursor', 'grok') AND qs.quota_dimension = 'percent' "
+        "GROUP BY p.provider_key ORDER BY p.provider_key;");
+    REQUIRE(history.success());
+    REQUIRE(history.rowCount() == 2);
+    CHECK(history.getString(0, 0) == "cursor");
+    CHECK(history.getInt(0, 1) == 2);
+    CHECK(history.getString(1, 0) == "grok");
+    CHECK(history.getInt(1, 1) == 1);
 }

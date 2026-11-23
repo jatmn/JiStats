@@ -27,6 +27,7 @@
 #include "platform/WindowsCredentialStore.hpp"
 #include "providers/IProviderAdapter.hpp"
 #include "providers/ProviderManager.hpp"
+#include "providers/SubscriptionQuotaAdapter.hpp"
 #include "providers/claude/ClaudeCodeAdapter.hpp"
 #include "providers/kimi/KimiAdapter.hpp"
 #include "providers/minimax/MiniMaxAdapter.hpp"
@@ -1643,7 +1644,7 @@ TEST_CASE("AppController About dialog reflects the current about-content contrac
     CHECK(aboutBody.find("Version:") != std::string::npos);
     CHECK(aboutBody.find("Status: Early implementation") != std::string::npos);
     CHECK(aboutBody.find("Provider scope:") != std::string::npos);
-    CHECK(aboutBody.find("OpenAI / Codex + MiniMax + Claude Code + Kimi Code") != std::string::npos);
+    CHECK(aboutBody.find("OpenAI / Codex, MiniMax, Claude Code, Kimi Code, Grok, and Cursor") != std::string::npos);
     CHECK(aboutBody.find("All provider integrations are optional and disabled by default until enabled in Settings.") != std::string::npos);
     CHECK(aboutBody.find("OpenAI and MiniMax ship with subscription-level support in v1.0.") != std::string::npos);
     CHECK(aboutBody.find("OpenAI API-platform import and broader MiniMax PAYG support remain follow-on refinement.") != std::string::npos);
@@ -3227,7 +3228,30 @@ TEST_CASE("AppController persists failed recovery backfill checkpoints and leave
     failedBackfill.success = false;
     failedBackfill.error = "network unreachable";
     liveProvider->setUsageResponse(failedBackfill);
+    class TestKimiQuota : public KimiAdapter {
+        QuotaResponse fetchQuota() override {
+            return makeQuotaResponse(std::time(nullptr), 25, 100, "interval", "kimi_subscription_api");
+        }
+    };
+    class TestSubscriptionQuota : public SubscriptionQuotaAdapter {
+      public:
+        using SubscriptionQuotaAdapter::SubscriptionQuotaAdapter;
+
+        QuotaResponse fetchQuota() override {
+            return makeQuotaResponse(std::time(nullptr), 25, 100, "weekly", getProviderKey() + "_subscription_api");
+        }
+    };
     auto providerManager = makeProviderManager({liveProvider});
+    providerManager->addProvider(std::make_shared<TestKimiQuota>());
+    providerManager->addProvider(std::make_shared<TestSubscriptionQuota>(SubscriptionProvider::Grok));
+    providerManager->addProvider(std::make_shared<TestSubscriptionQuota>(SubscriptionProvider::Cursor));
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        SettingsService settings(storage);
+        REQUIRE(settings.setBool("runtime.grok_subscription_tracking_enabled", true));
+        REQUIRE(settings.setBool("runtime.cursor_subscription_tracking_enabled", true));
+    }
 
     AppController app;
     app.setHeadlessForTesting(true);
@@ -3250,6 +3274,14 @@ TEST_CASE("AppController persists failed recovery backfill checkpoints and leave
     CHECK(backfillCheckpoint->fetchedEventCount == 0);
     CHECK(backfillCheckpoint->comparisonResult == "not_available");
     CHECK(backfillCheckpoint->failureCategory == "provider_backfill_fetch_failed");
+    for (const auto* key : {"kimi", "grok", "cursor"}) {
+        const auto providerId = requireProviderId(storage, key);
+        const auto account = requireAccountId(storage, providerId, std::string(key) + ".runtime_status");
+        CHECK_FALSE(storage.getLatestRecoveryCheckpoint(providerId, account, "runtime_backfill").has_value());
+        const auto gaps = app.getGapMarkersForTesting(key, now - 4 * 3600, std::time(nullptr));
+        REQUIRE(gaps.size() == 1);
+        CHECK(gaps.front().classification == GapClassification::Unknown);
+    }
     storage.close();
 
     const auto runtimeState = app.getPersistedRuntimeStateForTesting();
@@ -4295,7 +4327,7 @@ TEST_CASE("AppController uses quantified usage rollups for dashboard fallback an
 
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
-    const std::time_t now = std::time(nullptr);
+    const std::time_t now = utcDayStartForTest(std::time(nullptr) - 12 * 3600) + 12 * 3600;
     const std::time_t rollupFrom = now - (6 * 60 * 60);
 
     StorageService storage;
@@ -4368,6 +4400,7 @@ TEST_CASE("AppController uses quantified usage rollups for dashboard fallback an
 
     AppController app;
     app.setTaskbarTestModeForTesting(true);
+    app.setCurrentTimeForTesting(now);
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
 
@@ -4394,7 +4427,7 @@ TEST_CASE("AppController uses quantified usage rollups for dashboard fallback an
 
     const auto today = findUsageSummary(summaries, "Today");
     REQUIRE(today.has_value());
-    CHECK(today->detail.find("requests") != std::string::npos);
+    CHECK(today->detail == "4 requests, 1060 tokens across 2 providers");
 
     const auto trayState = app.getTrayStateForTesting();
     CHECK(trayState.tooltip.find("3 req / 860 tok in 30m") != std::string::npos);

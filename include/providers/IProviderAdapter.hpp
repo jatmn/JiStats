@@ -20,7 +20,10 @@ public:
     
     // Fetch usage data for a time range
     virtual UsageResponse fetchUsage(std::time_t from, std::time_t to) = 0;
-    
+    virtual bool supportsUsageHistory() const {
+        return true;
+    }
+
     // Fetch current quota information
     virtual QuotaResponse fetchQuota() = 0;
     
@@ -86,6 +89,7 @@ struct QuotaResponse {
     std::string secondaryWindowType; // e.g. a second rolling or weekly window
     std::string providerSurface; // normalized provenance label when known
     std::string rawResponse;
+    bool unavailable = false; // The configured account cannot supply quota.
 };
 
 // Provider capability

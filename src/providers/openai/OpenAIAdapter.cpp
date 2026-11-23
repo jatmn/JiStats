@@ -1,13 +1,17 @@
 #include "providers/openai/OpenAIAdapter.hpp"
 #include "core/JsonParser.hpp"
+#include "db/StorageService.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
+#include <set>
 
 namespace JiStats {
 
@@ -29,7 +33,7 @@ bool tryGetIntegralNumber(const JsonValue& value, long long& out) {
     }
 
     if (integerPart < static_cast<double>(std::numeric_limits<long long>::min()) ||
-        integerPart > static_cast<double>(std::numeric_limits<long long>::max())) {
+        integerPart >= static_cast<double>(std::numeric_limits<long long>::max())) {
         return false;
     }
 
@@ -259,16 +263,32 @@ bool tryParseCodexRateLimitBucket(
     return true;
 }
 
-bool tryParseUtcZuluTimestamp(const std::string& value, std::time_t& out) {
-    if (value.empty()) {
+bool tryParseUtcZuluTimestamp(const std::string& value, std::time_t& out, std::optional<int>* subsecond = nullptr) {
+    if (value.empty() || value.back() != 'Z') {
         return false;
     }
 
     std::string normalized = value;
-    const std::size_t decimalPoint = normalized.find('.');
-    const std::size_t zSuffix = normalized.rfind('Z');
-    if (decimalPoint != std::string::npos && zSuffix != std::string::npos && decimalPoint < zSuffix) {
-        normalized.erase(decimalPoint, zSuffix - decimalPoint);
+    const auto decimalPoint = value.find('.');
+    if (decimalPoint != std::string::npos) {
+        const auto end = value.size() - 1;
+        if (decimalPoint + 1 == end) {
+            return false;
+        }
+        int nanoseconds = 0;
+        int place = 100000000;
+        for (auto position = decimalPoint + 1; position < end; ++position) {
+            const char digit = value[position];
+            if (digit < '0' || digit > '9') {
+                return false;
+            }
+            nanoseconds += (digit - '0') * place;
+            place /= 10;
+        }
+        if (subsecond) {
+            *subsecond = nanoseconds;
+        }
+        normalized.erase(decimalPoint, end - decimalPoint);
     }
 
     std::tm utcTime{};
@@ -286,7 +306,7 @@ bool tryParseUtcZuluTimestamp(const std::string& value, std::time_t& out) {
     return out != static_cast<std::time_t>(-1);
 }
 
-std::time_t tryExtractCodexEventTimestamp(const JsonValue& root) {
+std::time_t tryExtractCodexEventTimestamp(const JsonValue& root, std::optional<int>* subsecond = nullptr) {
     if (!root.isObject()) {
         return 0;
     }
@@ -297,7 +317,7 @@ std::time_t tryExtractCodexEventTimestamp(const JsonValue& root) {
     }
 
     std::time_t parsed = 0;
-    return tryParseUtcZuluTimestamp(timestampValue->getString(), parsed) ? parsed : 0;
+    return tryParseUtcZuluTimestamp(timestampValue->getString(), parsed, subsecond) ? parsed : 0;
 }
 
 bool tryExtractCodexRateLimitObject(
@@ -335,13 +355,9 @@ bool tryExtractCodexRateLimitObject(
     return true;
 }
 
-bool tryParseCodexRateLimitSnapshot(
-    const JsonValue& rateLimitsObject,
-    const std::string& sourceType,
-    const std::string& rawResponse,
-    const std::string& sourcePath,
-    std::time_t eventTime,
-    CodexRateLimitSnapshot& snapshot) {
+bool tryParseCodexRateLimitSnapshot(const JsonValue& rateLimitsObject, const std::string& sourceType,
+                                    const std::string& sourcePath, std::time_t eventTime,
+                                    CodexRateLimitSnapshot& snapshot) {
     if (!tryParseCodexRateLimitBucket(rateLimitsObject, "primary", snapshot.primary)) {
         snapshot.error = "Codex rate-limit fixture has an invalid primary bucket";
         return false;
@@ -388,62 +404,38 @@ bool tryParseCodexRateLimitSnapshot(
     snapshot.success = true;
     snapshot.snapshotTime = eventTime > 0 ? eventTime : std::time(nullptr);
     snapshot.eventTime = eventTime;
-    snapshot.rawResponse = rawResponse;
     snapshot.sourcePath = sourcePath;
     snapshot.sourceType = sourceType;
     return true;
 }
 
-bool tryExtractCodexTokenUsage(const JsonValue& root, CodexTokenUsageSnapshot& snapshot) {
-    if (!root.isObject()) {
+bool tryReadCodexUsage(const JsonValue* usage, CodexTokenUsageSnapshot& snapshot) {
+    if (!usage || !usage->isObject() ||
+        !tryGetRequiredNonNegativeIntegralField(*usage, "input_tokens", snapshot.inputTokens) ||
+        !tryGetRequiredNonNegativeIntegralField(*usage, "output_tokens", snapshot.outputTokens)) {
         return false;
     }
 
-    const JsonValue* payload = root.getMember("payload");
-    if (!payload || !payload->isObject()) {
+    if (snapshot.inputTokens > std::numeric_limits<long long>::max() - snapshot.outputTokens) {
+        return false;
+    }
+    const long long sum = snapshot.inputTokens + snapshot.outputTokens;
+    snapshot.totalTokens = sum;
+    if (usage->getMember("total_tokens") &&
+        !tryGetRequiredNonNegativeIntegralField(*usage, "total_tokens", snapshot.totalTokens)) {
         return false;
     }
 
-    const JsonValue* typeValue = payload->getMember("type");
-    if (!typeValue || !typeValue->isString() || typeValue->getString() != "token_count") {
-        return false;
-    }
+    tryGetRequiredNonNegativeIntegralField(*usage, "cached_input_tokens", snapshot.cachedInputTokens);
+    tryGetRequiredNonNegativeIntegralField(*usage, "reasoning_output_tokens", snapshot.reasoningOutputTokens);
+    return snapshot.totalTokens >= sum && snapshot.cachedInputTokens <= snapshot.inputTokens &&
+           snapshot.reasoningOutputTokens <= snapshot.outputTokens;
+}
 
-    const JsonValue* info = payload->getMember("info");
-    if (!info || !info->isObject()) {
-        return false;
-    }
-
-    const JsonValue* totalUsage = info->getMember("total_token_usage");
-    if (!totalUsage || !totalUsage->isObject()) {
-        totalUsage = info->getMember("last_token_usage");
-        if (!totalUsage || !totalUsage->isObject()) {
-            return false;
-        }
-    }
-
-    long long inputTokens = 0;
-    long long cachedInputTokens = 0;
-    long long outputTokens = 0;
-    long long reasoningOutputTokens = 0;
-    long long totalTokens = 0;
-
-    if (!tryGetRequiredNonNegativeIntegralField(*totalUsage, "input_tokens", inputTokens) ||
-        !tryGetRequiredNonNegativeIntegralField(*totalUsage, "output_tokens", outputTokens) ||
-        !tryGetRequiredNonNegativeIntegralField(*totalUsage, "total_tokens", totalTokens)) {
-        return false;
-    }
-
-    // Optional fields
-    tryGetRequiredNonNegativeIntegralField(*totalUsage, "cached_input_tokens", cachedInputTokens);
-    tryGetRequiredNonNegativeIntegralField(*totalUsage, "reasoning_output_tokens", reasoningOutputTokens);
-
-    snapshot.inputTokens = inputTokens;
-    snapshot.cachedInputTokens = cachedInputTokens;
-    snapshot.outputTokens = outputTokens;
-    snapshot.reasoningOutputTokens = reasoningOutputTokens;
-    snapshot.totalTokens = totalTokens;
-    return true;
+bool sameCodexUsage(const CodexTokenUsageSnapshot& left, const CodexTokenUsageSnapshot& right) {
+    return left.inputTokens == right.inputTokens && left.outputTokens == right.outputTokens &&
+           left.totalTokens == right.totalTokens && left.cachedInputTokens == right.cachedInputTokens &&
+           left.reasoningOutputTokens == right.reasoningOutputTokens;
 }
 
 bool isRolloutFilePath(const std::filesystem::path& path) {
@@ -701,13 +693,7 @@ CodexRateLimitSnapshot OpenAIAdapter::parseCodexRateLimitFixtureFile(const std::
         std::string sourceType;
         if (tryExtractCodexRateLimitObject(root, rateLimitsObject, sourceType)) {
             const std::time_t eventTime = tryExtractCodexEventTimestamp(root);
-            tryParseCodexRateLimitSnapshot(
-                *rateLimitsObject,
-                sourceType,
-                content,
-                filePath,
-                eventTime,
-                snapshot);
+            tryParseCodexRateLimitSnapshot(*rateLimitsObject, sourceType, filePath, eventTime, snapshot);
             if (snapshot.success) {
                 return snapshot;
             }
@@ -735,13 +721,7 @@ CodexRateLimitSnapshot OpenAIAdapter::parseCodexRateLimitFixtureFile(const std::
 
         CodexRateLimitSnapshot candidate;
         const std::time_t eventTime = tryExtractCodexEventTimestamp(lineRoot);
-        if (!tryParseCodexRateLimitSnapshot(
-                *rateLimitsObject,
-                sourceType,
-                line,
-                filePath,
-                eventTime,
-                candidate)) {
+        if (!tryParseCodexRateLimitSnapshot(*rateLimitsObject, sourceType, filePath, eventTime, candidate)) {
             snapshot.error = candidate.error;
             continue;
         }
@@ -835,8 +815,9 @@ CodexRateLimitSnapshot OpenAIAdapter::parseLatestCodexRateLimitSnapshotFromRollo
     return latestSnapshot;
 }
 
-std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::parseCodexTokenUsageFromRolloutFile(
-    const std::string& filePath) {
+std::vector<CodexTokenUsageSnapshot>
+OpenAIAdapter::parseCodexTokenUsageFromRolloutFile(const std::string& filePath,
+                                                   std::vector<CodexTokenUsageSnapshot>* savedCounters) {
     std::vector<CodexTokenUsageSnapshot> snapshots;
 
     std::ifstream in(filePath);
@@ -844,125 +825,219 @@ std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::parseCodexTokenUsageFromRoll
         return snapshots;
     }
 
+    std::set<std::string> responseIds;
+    std::optional<CodexTokenUsageSnapshot> cumulative;
+    std::optional<CodexTokenUsageSnapshot> lastStandalone;
+    std::string sessionId;
+    bool hasRequestLedger = false;
+
     std::string line;
+    size_t lineNumber = 0;
     while (std::getline(in, line)) {
-        if (line.empty()) {
+        ++lineNumber;
+        if (line.find("\"token_count\"") == std::string::npos &&
+            line.find("\"token_usage_record\"") == std::string::npos &&
+            line.find("\"turn_context\"") == std::string::npos && line.find("\"session_meta\"") == std::string::npos) {
+            continue;
+        }
+        JsonValue root;
+        if (!JsonParser::parse(line, root) || !root.isObject()) {
             continue;
         }
 
-        JsonValue root;
-        if (!JsonParser::parse(line, root)) {
+        const JsonValue* type = root.getMember("type");
+        const JsonValue* payload = root.getMember("payload");
+        if (!type || !type->isString() || !payload || !payload->isObject()) {
+            continue;
+        }
+        if (type->getString() == "session_meta") {
+            const auto* id = payload->getMember("id");
+            if (sessionId.empty() && id && id->isString()) {
+                sessionId = id->getString();
+            }
+            continue;
+        }
+        if (type->getString() == "turn_context") {
+            hasRequestLedger = false;
+            lastStandalone.reset();
             continue;
         }
 
         CodexTokenUsageSnapshot snapshot;
-        if (!tryExtractCodexTokenUsage(root, snapshot)) {
-            continue;
-        }
-
-        snapshot.eventTime = tryExtractCodexEventTimestamp(root);
+        snapshot.eventTime = tryExtractCodexEventTimestamp(root, &snapshot.eventSubsecondNs);
         if (snapshot.eventTime <= 0) {
             continue;
         }
         snapshot.sourcePath = filePath;
+
+        if (type->getString() == "token_usage_record") {
+            const auto* id = payload->getMember("response_id");
+            const auto* threadId = payload->getMember("thread_id");
+            if (!sessionId.empty() && threadId && threadId->isString() && threadId->getString() != sessionId) {
+                continue;
+            }
+            if (id && id->isString() && !id->getString().empty() &&
+                tryReadCodexUsage(payload->getMember("usage"), snapshot) && snapshot.totalTokens > 0 &&
+                snapshot.totalTokens == snapshot.inputTokens + snapshot.outputTokens) {
+                hasRequestLedger = true;
+                if (responseIds.insert(id->getString()).second) {
+                    snapshot.requestId = "response:" + id->getString();
+                    snapshots.push_back(std::move(snapshot));
+                }
+            }
+            continue;
+        }
+
+        const JsonValue* eventType = payload->getMember("type");
+        const JsonValue* info = payload->getMember("info");
+        if (!eventType || !eventType->isString() || eventType->getString() != "token_count" || !info ||
+            !info->isObject()) {
+            continue;
+        }
+
+        const JsonValue* latest = info->getMember("last_token_usage");
+        const JsonValue* total = info->getMember("total_token_usage");
+        snapshot.sourceLine = lineNumber;
+        CodexTokenUsageSnapshot nextCumulative = snapshot;
+        const bool hasCumulative = total && !total->isNull();
+        if (hasCumulative && !tryReadCodexUsage(total, nextCumulative)) {
+            continue;
+        }
+        const bool repeatedCounter = hasCumulative && cumulative && sameCodexUsage(*cumulative, nextCumulative);
+        if (hasCumulative) {
+            cumulative = nextCumulative;
+        }
+        const auto rememberSavedCounter = [&] {
+            // A counter suppressed for new collection may still be present in older SQLite history.
+            if (savedCounters && hasCumulative) {
+                savedCounters->push_back(nextCumulative);
+            }
+        };
+        if (repeatedCounter || hasRequestLedger) {
+            rememberSavedCounter();
+            continue;
+        }
+
+        if (!latest || latest->isNull()) {
+            if (hasCumulative) {
+                snapshots.push_back(std::move(nextCumulative));
+            }
+            continue;
+        }
+
+        if (!tryReadCodexUsage(latest, snapshot) || snapshot.totalTokens == 0 ||
+            snapshot.totalTokens != snapshot.inputTokens + snapshot.outputTokens ||
+            (hasCumulative && (snapshot.inputTokens > nextCumulative.inputTokens ||
+                               snapshot.outputTokens > nextCumulative.outputTokens)) ||
+            (!hasCumulative && lastStandalone && sameCodexUsage(*lastStandalone, snapshot))) {
+            rememberSavedCounter();
+            continue;
+        }
+        lastStandalone = snapshot;
+        snapshot.requestId = "line:" + std::to_string(lineNumber);
+        if (hasCumulative) {
+            snapshot.cumulativeAtRequest = CodexTokenUsageSnapshot::CumulativeTotals{
+                nextCumulative.inputTokens, nextCumulative.outputTokens, nextCumulative.totalTokens};
+        }
         snapshots.push_back(std::move(snapshot));
     }
 
     return snapshots;
 }
 
-std::vector<CodexTokenUsageSnapshot> OpenAIAdapter::collectCodexTokenUsageSnapshots(
-    const std::string& directoryPath) {
-    std::vector<CodexTokenUsageSnapshot> allSnapshots;
+CodexTokenUsageBatch OpenAIAdapter::collectCodexTokenUsageSnapshots(const std::string& directoryPath) {
+    CodexTokenUsageBatch batch;
 
     if (directoryPath.empty()) {
-        return allSnapshots;
+        return batch;
     }
 
     std::error_code ec;
     const std::filesystem::path root(directoryPath);
     if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
-        return allSnapshots;
+        return batch;
     }
 
-    // Scan only the last N days of rollout directories to avoid enumerating
-    // the entire historical session tree. Codex stores rollouts under
-    // sessions/YYYY/MM/DD/rollout-*.jsonl.
-    const std::time_t now = std::time(nullptr);
-    std::vector<std::filesystem::path> candidateDirs;
-    for (int dayOffset = 0; dayOffset < 3; ++dayOffset) {
-        const std::time_t dayTime = now - (dayOffset * 86400);
-        std::tm utcTime{};
-        gmtime_s(&utcTime, &dayTime);
-        char year[8]{};
-        char month[8]{};
-        char day[8]{};
-        std::strftime(year, sizeof(year), "%Y", &utcTime);
-        std::strftime(month, sizeof(month), "%m", &utcTime);
-        std::strftime(day, sizeof(day), "%d", &utcTime);
-        candidateDirs.push_back(root / year / month / day);
+    // A resumed session keeps its original filename and directory.
+    const auto cutoff = std::filesystem::file_time_type::clock::now() - std::chrono::hours(72);
+    std::vector<std::pair<std::filesystem::file_time_type, std::filesystem::path>> recent;
+    for (std::filesystem::recursive_directory_iterator
+             it(root, std::filesystem::directory_options::skip_permission_denied, ec),
+         end;
+         !ec && it != end; it.increment(ec)) {
+        std::error_code fileError;
+        if (!isRolloutFilePath(it->path()) || !it->is_regular_file(fileError)) {
+            continue;
+        }
+        const auto writtenAt = it->last_write_time(fileError);
+        if (!fileError && writtenAt >= cutoff) {
+            recent.emplace_back(writtenAt, it->path());
+        }
     }
-
     constexpr std::size_t kMaxRolloutFilesToScan = 100;
-    std::size_t scannedFileCount = 0;
-
-    for (const auto& candidateDir : candidateDirs) {
-        if (!std::filesystem::exists(candidateDir, ec) || !std::filesystem::is_directory(candidateDir, ec)) {
-            continue;
-        }
-
-        std::filesystem::directory_iterator it(
-            candidateDir,
-            std::filesystem::directory_options::skip_permission_denied,
-            ec);
-        if (ec) {
-            ec.clear();
-            continue;
-        }
-
-        for (; it != std::filesystem::directory_iterator(); ++it) {
-            if (ec) {
-                ec.clear();
-                continue;
-            }
-
-            if (!it->is_regular_file(ec) || ec || !isRolloutFilePath(it->path())) {
-                ec.clear();
-                continue;
-            }
-
-            if (++scannedFileCount > kMaxRolloutFilesToScan) {
-                break;
-            }
-
-            std::vector<CodexTokenUsageSnapshot> fileSnapshots =
-                parseCodexTokenUsageFromRolloutFile(it->path().string());
-            allSnapshots.insert(
-                allSnapshots.end(),
-                std::make_move_iterator(fileSnapshots.begin()),
-                std::make_move_iterator(fileSnapshots.end()));
-        }
-
-        if (scannedFileCount > kMaxRolloutFilesToScan) {
-            break;
-        }
+    const auto filesToScan = std::min(recent.size(), kMaxRolloutFilesToScan);
+    std::partial_sort(recent.begin(), recent.begin() + filesToScan, recent.end(), std::greater<>());
+    for (std::size_t index = 0; index < filesToScan; ++index) {
+        auto snapshots = parseCodexTokenUsageFromRolloutFile(recent[index].second.string(), &batch.savedCounters);
+        batch.observations.insert(batch.observations.end(), std::make_move_iterator(snapshots.begin()),
+                                  std::make_move_iterator(snapshots.end()));
     }
 
-    std::sort(
-        allSnapshots.begin(),
-        allSnapshots.end(),
-        [](const CodexTokenUsageSnapshot& a, const CodexTokenUsageSnapshot& b) {
-            return a.eventTime < b.eventTime;
-        });
+    const auto retainRecent = [](std::vector<CodexTokenUsageSnapshot>& snapshots) {
+        std::stable_sort(snapshots.begin(), snapshots.end(),
+                         [](const CodexTokenUsageSnapshot& a, const CodexTokenUsageSnapshot& b) {
+                             return a.eventTime < b.eventTime;
+                         });
+        constexpr std::size_t kMaxSnapshotsToRetain = 1000;
+        if (snapshots.size() > kMaxSnapshotsToRetain) {
+            snapshots.erase(snapshots.begin(), snapshots.end() - kMaxSnapshotsToRetain);
+        }
+    };
+    retainRecent(batch.observations);
+    retainRecent(batch.savedCounters);
+    return batch;
+}
 
-    constexpr std::size_t kMaxSnapshotsToRetain = 1000;
-    if (allSnapshots.size() > kMaxSnapshotsToRetain) {
-        allSnapshots.erase(
-            allSnapshots.begin(),
-            allSnapshots.begin() + (allSnapshots.size() - kMaxSnapshotsToRetain));
+bool OpenAIAdapter::persistCodexTokenUsageSnapshots(StorageService& storage, int providerId, int accountId,
+                                                    const CodexTokenUsageBatch& batch) {
+    const auto makeEvent = [&](const CodexTokenUsageSnapshot& snapshot) {
+        PersistedUsageEvent event;
+        event.providerId = providerId;
+        event.accountId = accountId;
+        event.eventTime = snapshot.eventTime;
+        event.eventSubsecondNs = snapshot.eventSubsecondNs;
+        event.sourceType = "codex_local_rollout";
+        event.sourceRunId =
+            snapshot.requestId.empty() ? "line:" + std::to_string(snapshot.sourceLine) : snapshot.requestId;
+        event.requestType = snapshot.requestId.empty() ? "codex_turn" : "codex_request";
+        event.modelKey = "codex";
+        event.inputTokens = snapshot.inputTokens;
+        event.outputTokens = snapshot.outputTokens;
+        event.totalTokens = snapshot.totalTokens;
+        event.rawReference = snapshot.sourcePath;
+        return event;
+    };
+
+    std::vector<PersistedUsageEvent> events;
+    std::vector<PersistedUsageEvent> savedCounters;
+    events.reserve(batch.observations.size());
+    savedCounters.reserve(batch.savedCounters.size());
+    for (const auto& snapshot : batch.observations) {
+        events.push_back(makeEvent(snapshot));
+        if (const auto& totals = snapshot.cumulativeAtRequest) {
+            auto event = events.back();
+            // Link a legacy baseline to the request from the same token_count record.
+            event.requestType = "codex_turn";
+            event.inputTokens = totals->inputTokens;
+            event.outputTokens = totals->outputTokens;
+            event.totalTokens = totals->totalTokens;
+            savedCounters.push_back(std::move(event));
+        }
     }
-
-    return allSnapshots;
+    for (const auto& snapshot : batch.savedCounters) {
+        savedCounters.push_back(makeEvent(snapshot));
+    }
+    return storage.insertUsageEvents(events, savedCounters);
 }
 
 std::string OpenAIAdapter::resolveCodexRolloutDirectory() {

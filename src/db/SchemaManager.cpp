@@ -188,6 +188,16 @@ SchemaManager::BaselineResult SchemaManager::reconcileBaseline(bool writable) {
         }
     }
 
+    const auto subsecond =
+        storage.execute("SELECT 1 FROM pragma_table_info('usage_events', 'main') WHERE name = 'event_subsecond_ns';");
+    if (!subsecond.success()) {
+        pImpl->lastError = "Cannot inspect usage event precision: " + subsecond.error();
+        return BaselineResult::Failed;
+    }
+    if (subsecond.rowCount() == 0) {
+        repair += "ALTER TABLE main.usage_events ADD COLUMN event_subsecond_ns INTEGER;\n";
+    }
+
     const auto objects =
         storage.execute("SELECT COUNT(*) FROM main.sqlite_master WHERE "
                         "(type = 'table' AND name IN ('recovery_checkpoints', 'export_runs')) OR "
@@ -208,6 +218,17 @@ SchemaManager::BaselineResult SchemaManager::reconcileBaseline(bool writable) {
     }
     if (kimi.rowCount() == 0) {
         repair += "INSERT INTO providers (provider_key, display_name, enabled) VALUES ('kimi', 'Kimi Code', 1);";
+    }
+
+    const auto subscriptions =
+        storage.execute("SELECT COUNT(*) FROM main.providers WHERE provider_key IN ('grok', 'cursor');");
+    if (!subscriptions.success()) {
+        pImpl->lastError = "Cannot inspect subscription provider seeds: " + subscriptions.error();
+        return BaselineResult::Failed;
+    }
+    if (subscriptions.getInt(0, 0) != 2) {
+        repair += "INSERT OR IGNORE INTO providers (provider_key, display_name, enabled) "
+                  "VALUES ('grok', 'Grok', 1), ('cursor', 'Cursor', 1);";
     }
 
     if (!repair.empty()) {

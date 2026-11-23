@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
     cost_minor_units INTEGER,
     is_backfilled INTEGER NOT NULL DEFAULT 0,
     raw_reference TEXT,
-    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    event_subsecond_ns INTEGER
 );
 
 -- Quota snapshots table
@@ -399,7 +400,9 @@ INSERT OR IGNORE INTO providers (provider_key, display_name, enabled) VALUES
     ('minimax', 'MiniMax', 1),
     ('claude_code', 'Claude Code', 1),
     ('kimi', 'Kimi Code', 1),
-    ('hicap-ai', 'HICAP Ai', 1);
+    ('hicap-ai', 'HICAP Ai', 1),
+    ('grok', 'Grok', 1),
+    ('cursor', 'Cursor', 1);
 
 -- Insert default settings
 INSERT OR IGNORE INTO settings (key, value) VALUES

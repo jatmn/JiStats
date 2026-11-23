@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -564,9 +566,8 @@ void applyProviderSurface(SourceFlags& flags, const std::string& providerSurface
         return;
     }
 
-    if (value == "minimax_subscription_coding_plan" ||
-        value == "minimax_subscription_token_plan" ||
-        value == "kimi_subscription_api") {
+    if (value == "minimax_subscription_coding_plan" || value == "minimax_subscription_token_plan" ||
+        value == "kimi_subscription_api" || value == "grok_subscription_api" || value == "cursor_subscription_api") {
         flags.api = true;
     }
 }
@@ -1742,7 +1743,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
         }
 
         std::map<std::string, AnalysisQuotaTrendSeries> quotaSeriesByKey;
-        std::map<std::string, std::pair<std::time_t, std::time_t>> previousWindowsByKey;
+        std::map<std::string, std::optional<std::pair<std::time_t, std::time_t>>> previousWindowsByKey;
         std::map<std::string, std::optional<double>> rollupLowWaterBySeriesKey;
         std::map<std::string, int> rollupResetCountBySeriesKey;
         const auto configureQuotaSeries =
@@ -1759,7 +1760,9 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 const auto planIt =
                     planId.has_value() ? planLabels.find(*planId) : planLabels.end();
                 const std::string derivedWindowLabel =
-                    quotaWindowLabelFromSpan(windowStartUtc, windowEndUtc);
+                    quotaDimension == "percent" && (windowStartUtc <= 0 || windowEndUtc <= windowStartUtc)
+                        ? std::string{}
+                        : quotaWindowLabelFromSpan(windowStartUtc, windowEndUtc);
                 const std::string planDisplayName =
                     planIt != planLabels.end() && !planIt->second.first.empty()
                     ? planIt->second.first
@@ -1812,7 +1815,9 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 AnalysisQuotaTrendPoint point;
                 point.label = formatQuotaSnapshotLabel(
                     rollup.latestSnapshotTime > 0 ? rollup.latestSnapshotTime : rollup.periodStart,
-                    std::max<std::time_t>(1, (rollup.latestWindowEnd - rollup.latestWindowStart) + 1));
+                    rollup.latestWindowStart > 0
+                        ? std::max<std::time_t>(1, rollup.latestWindowEnd - rollup.latestWindowStart + 1)
+                        : 0);
                 point.snapshotTime =
                     rollup.latestSnapshotTime > 0 ? rollup.latestSnapshotTime : rollup.periodStart;
                 point.remainingPercentage = remainingPercentage;
@@ -1867,24 +1872,16 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     snapshot.windowEnd,
                     seriesKey);
 
-                bool resetPoint = false;
-                const auto previousWindowIt = previousWindowsByKey.find(seriesKey);
-                if (previousWindowIt != previousWindowsByKey.end()) {
-                    resetPoint =
-                        previousWindowIt->second.first != snapshot.windowStart ||
-                        previousWindowIt->second.second != snapshot.windowEnd;
-                }
-                previousWindowsByKey[seriesKey] = {snapshot.windowStart, snapshot.windowEnd};
-
                 AnalysisQuotaTrendPoint point;
                 point.label = formatQuotaSnapshotLabel(
-                    snapshot.snapshotTime,
-                    std::max<std::time_t>(1, (snapshot.windowEnd - snapshot.windowStart) + 1));
+                    snapshot.snapshotTime, snapshot.windowStart > 0
+                                               ? std::max<std::time_t>(1, snapshot.windowEnd - snapshot.windowStart + 1)
+                                               : 0);
                 point.snapshotTime = snapshot.snapshotTime;
                 point.remainingPercentage = remainingPercentage;
                 point.remainingValue = remainingValue;
                 point.limitValue = limitValue;
-                point.resetPoint = resetPoint;
+                point.resetPoint = snapshot.observeBillingWindow(previousWindowsByKey[seriesKey]);
                 point.reconciled = snapshot.isReconciled;
                 series.points.push_back(std::move(point));
             }
@@ -1969,7 +1966,8 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             historyWindowStart > 86400 ? historyWindowStart - 86400 : 0;
 
         std::string sql =
-            "SELECT ue.event_time_utc, ue.total_tokens, ue.raw_reference "
+            "SELECT ue.event_time_utc, ue.total_tokens, ue.raw_reference, ue.request_type, ue.source_run_id, "
+            "ue.event_subsecond_ns "
             "FROM usage_events ue "
             "JOIN providers p ON p.id = ue.provider_id "
             "JOIN accounts a ON a.id = ue.account_id "
@@ -1980,53 +1978,453 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             formatTimeUtcIso(throughputNow)};
         appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
         appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");
-        sql += " ORDER BY ue.raw_reference ASC, ue.event_time_utc ASC;";
+        sql += " ORDER BY ue.event_time_utc, ue.event_subsecond_ns, ue.id;";
 
         QueryResult result = storage_->execute(sql, params);
-        if (result.success() && result.rowCount() > 1) {
-            struct TokenEvent {
-                std::time_t eventTime = 0;
-                long long totalTokens = 0;
-                std::string rawReference;
+        if (result.success() && result.rowCount() > 0) {
+            struct EventTime {
+                std::time_t seconds;
+                std::optional<int> subsecondNs;
             };
-            std::vector<TokenEvent> events;
-            events.reserve(result.rowCount());
-            for (size_t row = 0; row < result.rowCount(); ++row) {
-                const auto parsedTime = parseUtcIso(result.getString(row, 0));
-                if (!parsedTime.has_value()) {
-                    continue;
-                }
-                TokenEvent evt;
-                evt.eventTime = *parsedTime;
-                evt.totalTokens = result.getInt64(row, 1);
-                evt.rawReference = result.getString(row, 2);
-                events.push_back(std::move(evt));
-            }
+            struct UsageSample {
+                EventTime time;
+                long long tokens;
+                std::string sourceId;
+                std::size_t sourceLine = 0;
+            };
+            const auto definitelyBefore = [](const EventTime& lhs, const EventTime& rhs) {
+                return lhs.seconds < rhs.seconds || (lhs.seconds == rhs.seconds && lhs.subsecondNs && rhs.subsecondNs &&
+                                                     *lhs.subsecondNs < *rhs.subsecondNs);
+            };
+            const auto getEventTime = [&](std::size_t row, std::time_t seconds) -> EventTime {
+                return {seconds,
+                        result.getString(row, 5).empty() ? std::nullopt : std::optional<int>(result.getInt(row, 5))};
+            };
 
             struct TokenWindowTotals {
                 long long totalTokenDelta = 0;
                 long long promptDeltaCount = 0;
             };
+            std::map<std::time_t, TokenWindowTotals> usageAt;
+            std::map<std::string, std::vector<UsageSample>> requestsByRollout;
+            std::map<std::string, std::vector<UsageSample>> countersByRollout;
+            std::set<std::pair<std::string, std::string>> linkedCounters;
+            std::set<std::pair<std::string, std::string>> indexedResponses;
+            std::set<std::string> countedResponseIds;
+            std::size_t legacySampleCount = 0;
+            bool legacyEstimated = false;
+            for (std::size_t row = 0; row < result.rowCount(); ++row) {
+                const auto seconds = parseUtcIso(result.getString(row, 0));
+                if (!seconds) {
+                    continue;
+                }
+                const auto rollout = result.getString(row, 2);
+                const auto type = result.getString(row, 3);
+                UsageSample sample{getEventTime(row, *seconds), result.getInt64(row, 1), result.getString(row, 4)};
+                if (type == "codex_request") {
+                    const bool isResponse = sample.sourceId.rfind("response:", 0) == 0;
+                    if (!isResponse || countedResponseIds.insert(sample.sourceId).second) {
+                        auto& usage = usageAt[*seconds];
+                        usage.totalTokenDelta += sample.tokens;
+                        ++usage.promptDeltaCount;
+                    }
+                    if (!isResponse || indexedResponses.emplace(rollout, sample.sourceId).second) {
+                        requestsByRollout[rollout].push_back(std::move(sample));
+                    }
+                    continue;
+                }
+
+                if (type == "codex_turn" && sample.sourceId.rfind("line:", 0) == 0) {
+                    const char* end = sample.sourceId.data() + sample.sourceId.size();
+                    const auto parsed = std::from_chars(sample.sourceId.data() + 5, end, sample.sourceLine);
+                    if (parsed.ec == std::errc{} && parsed.ptr == end && sample.sourceLine > 0) {
+                        linkedCounters.emplace(rollout, sample.sourceId);
+                    } else {
+                        sample.sourceLine = 0;
+                    }
+                }
+                usageAt.try_emplace(*seconds);
+                countersByRollout[rollout].push_back(std::move(sample));
+                ++legacySampleCount;
+            }
+
+            const auto accountForInterval = [&](const std::string& rollout, const UsageSample& baseline,
+                                                const UsageSample& counter, const EventTime& overlapStart,
+                                                const EventTime& overlapEnd) {
+                const bool estimatedOrder = baseline.time.seconds == counter.time.seconds &&
+                                            (!baseline.time.subsecondNs || !counter.time.subsecondNs);
+                legacyEstimated =
+                    legacyEstimated || estimatedOrder || counter.time.seconds - baseline.time.seconds > 300;
+                if ((!estimatedOrder && !definitelyBefore(baseline.time, counter.time)) ||
+                    counter.tokens <= baseline.tokens) {
+                    return;
+                }
+
+                long long unrecordedTokens = counter.tokens - baseline.tokens;
+                if (const auto requests = requestsByRollout.find(rollout); requests != requestsByRollout.end()) {
+                    const auto first = std::lower_bound(
+                        requests->second.begin(), requests->second.end(), baseline.time.seconds,
+                        [](const UsageSample& request, std::time_t seconds) { return request.time.seconds < seconds; });
+                    for (auto request = first; request != requests->second.end() &&
+                                               request->time.seconds <= counter.time.seconds && unrecordedTokens > 0;
+                         ++request) {
+                        // When a boundary's order is ambiguous, assume overlap and prefer the request record.
+                        const bool linked = request->sourceId.rfind("line:", 0) == 0 &&
+                                            linkedCounters.count({rollout, request->sourceId}) != 0;
+                        const bool coversRequest = linked ? request->sourceId == counter.sourceId
+                                                          : !definitelyBefore(request->time, overlapStart) &&
+                                                                !definitelyBefore(overlapEnd, request->time);
+                        if (coversRequest) {
+                            // A boundary shared by two intervals may overlap both. Consume its evidence once.
+                            const long long overlap = std::min(unrecordedTokens, request->tokens);
+                            unrecordedTokens -= overlap;
+                            request->tokens -= overlap;
+                            legacyEstimated = legacyEstimated || overlap > 0;
+                        }
+                    }
+                }
+                if (unrecordedTokens > 0) {
+                    auto& usage = usageAt[counter.time.seconds];
+                    usage.totalTokenDelta += unrecordedTokens;
+                    ++usage.promptDeltaCount;
+                }
+            };
+
+            using CounterIterator = std::vector<UsageSample>::iterator;
+            struct CounterSecond {
+                CounterIterator begin;
+                CounterIterator ordered;
+                CounterIterator end;
+            };
+            const auto bySourceLine = [](const UsageSample& left, const UsageSample& right) {
+                return left.sourceLine < right.sourceLine;
+            };
+            const auto orderCounters = [&](CounterIterator begin, CounterIterator end) {
+                if (end - begin == 1 || begin->time.subsecondNs) {
+                    return begin;
+                }
+
+                const auto firstTimed = std::find_if(
+                    begin, end, [](const UsageSample& sample) { return sample.time.subsecondNs.has_value(); });
+                const bool sourcesAgreeWithTimes =
+                    std::all_of(firstTimed, end, [](const UsageSample& sample) { return sample.sourceLine != 0; }) &&
+                    std::is_sorted(firstTimed, end, bySourceLine);
+                if (!sourcesAgreeWithTimes) {
+                    return firstTimed;
+                }
+                const auto firstOrdered =
+                    std::stable_partition(begin, end, [](const UsageSample& sample) { return sample.sourceLine == 0; });
+                std::stable_sort(firstOrdered, end, bySourceLine);
+                return firstOrdered;
+            };
+
+            using CounterCost = std::pair<std::size_t, unsigned long long>;
+            struct CounterPlacement {
+                std::size_t gap = 0;
+                const UsageSample* sample = nullptr;
+            };
+            struct CounterOrder {
+                const UsageSample* first;
+                const UsageSample* last;
+                CounterPlacement firstBound;
+                CounterPlacement secondBound;
+                CounterCost internalCost;
+                CounterCost pathCost{};
+                std::size_t previousOrder = 0;
+            };
+            const auto transitionCost = [](const UsageSample* left, const UsageSample* right) -> CounterCost {
+                if (!left || !right) {
+                    return {};
+                }
+                return {left->tokens > right->tokens,
+                        static_cast<unsigned long long>(std::max(0LL, right->tokens - left->tokens))};
+            };
+            const auto addCost = [](CounterCost left, CounterCost right) -> CounterCost {
+                return {left.first + right.first,
+                        left.second +
+                            std::min(right.second, std::numeric_limits<unsigned long long>::max() - left.second)};
+            };
+            const auto counterOrders = [&](const CounterSecond& second) {
+                const auto count = static_cast<std::size_t>(second.end - second.ordered);
+                const auto sampleAt = [&](std::size_t index) { return &*(second.ordered + index); };
+                const auto firstKnown = count > 0 ? sampleAt(0) : nullptr;
+                const auto lastKnown = count > 0 ? sampleAt(count - 1) : nullptr;
+                const auto [knownMin, knownMax] =
+                    std::minmax_element(second.ordered, second.end,
+                                        [](const auto& left, const auto& right) { return left.tokens < right.tokens; });
+
+                // Without source order only the observed bounds extend the established counter range.
+                const UsageSample* low =
+                    count == 0 || second.begin->tokens < knownMin->tokens ? &*second.begin : nullptr;
+                const UsageSample* high =
+                    count == 0 || (second.ordered - 1)->tokens > knownMax->tokens ? &*(second.ordered - 1) : nullptr;
+                if (low && high && low->tokens == high->tokens) {
+                    high = nullptr;
+                } else if (!low) {
+                    std::swap(low, high);
+                }
+
+                CounterCost knownCost{};
+                for (std::size_t i = 1; i < count; ++i) {
+                    knownCost = addCost(knownCost, transitionCost(sampleAt(i - 1), sampleAt(i)));
+                }
+                if (!low) {
+                    return std::vector<CounterOrder>{{firstKnown, lastKnown, {}, {}, knownCost}};
+                }
+
+                std::vector<CounterOrder> orders;
+                const auto extraCost = [&](std::size_t gap, const UsageSample* first, const UsageSample* last) {
+                    const auto left = gap > 0 ? sampleAt(gap - 1) : nullptr;
+                    const auto right = gap < count ? sampleAt(gap) : nullptr;
+                    const auto original = transitionCost(left, right);
+                    const auto expanded = addCost(addCost(transitionCost(left, first), transitionCost(first, last)),
+                                                  transitionCost(last, right));
+                    return CounterCost{expanded.first - original.first, expanded.second - original.second};
+                };
+                const auto consider = [&](CounterPlacement first, CounterPlacement last) {
+                    auto extra = extraCost(first.gap, first.sample,
+                                           last.sample && first.gap == last.gap ? last.sample : first.sample);
+                    if (last.sample && first.gap != last.gap) {
+                        extra = addCost(extra, extraCost(last.gap, last.sample, last.sample));
+                    }
+                    const auto from = first.gap == 0 ? first.sample : firstKnown;
+                    const auto to = last.sample && last.gap == count ? last.sample
+                                    : first.gap == count             ? first.sample
+                                                                     : lastKnown;
+                    const auto cost = addCost(knownCost, extra);
+                    const auto sameEndpoints =
+                        std::find_if(orders.begin(), orders.end(), [&](const CounterOrder& order) {
+                            return order.first == from && order.last == to;
+                        });
+                    if (sameEndpoints == orders.end()) {
+                        orders.push_back({from, to, first, last, cost});
+                    } else if (cost < sameEndpoints->internalCost) {
+                        *sameEndpoints = {from, to, first, last, cost};
+                    }
+                };
+
+                if (!high) {
+                    for (std::size_t gap = 0; gap <= count; ++gap) {
+                        consider({gap, low}, {});
+                    }
+                    return orders;
+                }
+
+                const auto placeBounds = [&](const UsageSample* first, const UsageSample* last) {
+                    std::optional<std::size_t> bestInnerGap;
+                    for (std::size_t gap = 0; gap <= count; ++gap) {
+                        consider({gap, first}, {gap, last});
+                        if (gap > 0) {
+                            consider({0, first}, {gap, last});
+                        }
+                        // Separate gaps have independent costs. Only the cheapest earlier interior gap can win.
+                        if (bestInnerGap) {
+                            consider({*bestInnerGap, first}, {gap, last});
+                        }
+                        if (gap > 0 &&
+                            (!bestInnerGap || extraCost(gap, first, first) < extraCost(*bestInnerGap, first, first))) {
+                            bestInnerGap = gap;
+                        }
+                    }
+                };
+                placeBounds(low, high);
+                placeBounds(high, low);
+                return orders;
+            };
+
+            for (auto& [rollout, counters] : countersByRollout) {
+                std::vector<CounterSecond> seconds;
+                for (auto begin = counters.begin(); begin != counters.end();) {
+                    const auto end = std::find_if(begin + 1, counters.end(), [&](const UsageSample& sample) {
+                        return sample.time.seconds != begin->time.seconds;
+                    });
+                    const auto ordered = orderCounters(begin, end);
+                    std::stable_sort(begin, ordered, [](const UsageSample& left, const UsageSample& right) {
+                        return left.tokens < right.tokens;
+                    });
+                    seconds.push_back({begin, ordered, end});
+                    begin = end;
+                }
+
+                std::vector<const UsageSample*> orderedCounters;
+                orderedCounters.reserve(counters.size());
+                const auto useEstimatedSecond = [&](const CounterSecond& second, const CounterOrder& order,
+                                                    const UsageSample* next) {
+                    std::vector<const UsageSample*> anchors;
+                    const auto count = static_cast<std::size_t>(second.end - second.ordered);
+                    for (std::size_t gap = 0; gap <= count; ++gap) {
+                        if (order.firstBound.sample && gap == order.firstBound.gap) {
+                            anchors.push_back(order.firstBound.sample);
+                        }
+                        if (order.secondBound.sample && gap == order.secondBound.gap) {
+                            anchors.push_back(order.secondBound.sample);
+                        }
+                        if (gap < count) {
+                            anchors.push_back(&*(second.ordered + gap));
+                        }
+                    }
+
+                    if (anchors.size() == static_cast<std::size_t>(second.end - second.begin)) {
+                        orderedCounters.insert(orderedCounters.end(), anchors.begin(), anchors.end());
+                        return;
+                    }
+
+                    // Keep the timestamp/source of an established boundary when its total repeats.
+                    std::map<long long, const UsageSample*> remaining;
+                    for (const auto* anchor : anchors) {
+                        remaining.emplace(anchor->tokens, anchor);
+                    }
+                    for (auto sample = second.begin; sample != second.ordered; ++sample) {
+                        const auto [existing, inserted] = remaining.emplace(sample->tokens, &*sample);
+                        if (!inserted && existing->second != &*sample) {
+                            linkedCounters.erase({rollout, sample->sourceId});
+                        }
+                    }
+                    for (const auto* anchor : anchors) {
+                        remaining.erase(anchor->tokens);
+                    }
+
+                    // Split the selected intervals at actual observations before counting prompts or overlap.
+                    std::vector<std::vector<const UsageSample*>> gaps(anchors.size() + 1);
+                    const auto fillGap = [&](std::size_t gap, long long from, long long to) {
+                        const auto first = remaining.lower_bound(std::min(from, to));
+                        const auto last = remaining.upper_bound(std::max(from, to));
+                        auto& samples = gaps[gap];
+                        for (auto it = first; it != last; ++it) {
+                            samples.push_back(it->second);
+                        }
+                        if (from > to) {
+                            std::reverse(samples.begin(), samples.end());
+                        }
+                        remaining.erase(first, last);
+                    };
+                    const auto fillInternalGaps = [&](bool rising) {
+                        for (std::size_t gap = 1; gap < anchors.size() && !remaining.empty(); ++gap) {
+                            const auto from = anchors[gap - 1]->tokens;
+                            const auto to = anchors[gap]->tokens;
+                            if ((from < to) == rising) {
+                                fillGap(gap, from, to);
+                            }
+                        }
+                    };
+                    fillInternalGaps(true);
+                    // Only a reading within an established drop can belong to that drop instead of
+                    // establishing growth across the boundary of this second.
+                    std::map<long long, const UsageSample*> withinKnownDrops;
+                    for (auto known = second.ordered; known != second.end && !remaining.empty(); ++known) {
+                        if (known == second.ordered || (known - 1)->tokens <= known->tokens) {
+                            continue;
+                        }
+                        auto it = remaining.lower_bound(known->tokens);
+                        while (it != remaining.end() && it->first < (known - 1)->tokens) {
+                            withinKnownDrops.insert(remaining.extract(it++));
+                        }
+                    }
+                    const auto* baseline = orderedCounters.empty() ? nullptr : orderedCounters.back();
+                    if (!remaining.empty() && (!baseline || baseline->tokens <= order.first->tokens)) {
+                        fillGap(0, baseline ? baseline->tokens : 0, order.first->tokens);
+                    }
+                    if (!remaining.empty() && (!next || order.last->tokens <= next->tokens)) {
+                        fillGap(anchors.size(), order.last->tokens,
+                                next ? next->tokens : std::numeric_limits<long long>::max());
+                    }
+                    remaining.merge(withinKnownDrops);
+                    fillInternalGaps(false);
+                    for (std::size_t gap = 0; gap < gaps.size(); ++gap) {
+                        orderedCounters.insert(orderedCounters.end(), gaps[gap].begin(), gaps[gap].end());
+                        if (gap < anchors.size()) {
+                            orderedCounters.push_back(anchors[gap]);
+                        }
+                    }
+                };
+                using SecondIterator = std::vector<CounterSecond>::const_iterator;
+                const auto useEstimatedRun = [&](SecondIterator begin, SecondIterator end) {
+                    legacyEstimated = true;
+                    std::vector<std::vector<CounterOrder>> choices;
+                    choices.reserve(end - begin);
+                    const auto* baseline = orderedCounters.empty() ? nullptr : orderedCounters.back();
+                    for (auto second = begin; second != end; ++second) {
+                        auto orders = counterOrders(*second);
+                        for (auto& order : orders) {
+                            order.pathCost = addCost(order.internalCost, transitionCost(baseline, order.first));
+                            if (choices.empty()) {
+                                continue;
+                            }
+                            const auto& previous = choices.back();
+                            for (std::size_t i = 0; i < previous.size(); ++i) {
+                                const auto boundary = transitionCost(previous[i].last, order.first);
+                                const auto cost = addCost(order.internalCost, addCost(previous[i].pathCost, boundary));
+                                if (i == 0 || cost < order.pathCost) {
+                                    order.pathCost = cost;
+                                    order.previousOrder = i;
+                                }
+                            }
+                        }
+                        choices.push_back(std::move(orders));
+                    }
+                    const auto after = end != seconds.cend() ? &*end->ordered : nullptr;
+                    const auto& last = choices.back();
+                    const auto best =
+                        std::min_element(last.begin(), last.end(), [&](const auto& left, const auto& right) {
+                            return addCost(left.pathCost, transitionCost(left.last, after)) <
+                                   addCost(right.pathCost, transitionCost(right.last, after));
+                        });
+
+                    // Recover the joint choice before reporting any deltas or consuming request overlap.
+                    std::vector<std::size_t> selected(choices.size());
+                    auto chosen = static_cast<std::size_t>(best - last.begin());
+                    for (std::size_t i = choices.size(); i-- > 0;) {
+                        selected[i] = chosen;
+                        chosen = choices[i][chosen].previousOrder;
+                    }
+                    for (std::size_t i = 0; i < choices.size(); ++i) {
+                        const auto& second = *(begin + i);
+                        const auto& order = choices[i][selected[i]];
+                        const auto* next = i + 1 < choices.size() ? choices[i + 1][selected[i + 1]].first : after;
+                        useEstimatedSecond(second, order, next);
+                    }
+                };
+                for (auto second = seconds.cbegin(); second != seconds.cend();) {
+                    if (second->begin == second->ordered) {
+                        for (auto sample = second->begin; sample != second->end; ++sample) {
+                            orderedCounters.push_back(&*sample);
+                        }
+                        ++second;
+                    } else {
+                        const auto end = std::find_if(second + 1, seconds.cend(), [](const CounterSecond& next) {
+                            return next.begin == next.ordered;
+                        });
+                        useEstimatedRun(second, end);
+                        second = end;
+                    }
+                }
+
+                // An untimed counter splits the token delta, but every split still lies between the
+                // nearest known timestamps. Keep those bounds when reconciling unlinked requests.
+                for (std::size_t start = 0; start + 1 < orderedCounters.size();) {
+                    std::size_t end = start + 1;
+                    while (end + 1 < orderedCounters.size() && !orderedCounters[end]->time.subsecondNs) {
+                        ++end;
+                    }
+                    const auto& firstTime = orderedCounters[start]->time;
+                    const auto& lastTime = orderedCounters[end]->time;
+                    for (std::size_t i = start; i < end; ++i) {
+                        const auto& before = *orderedCounters[i];
+                        const auto& after = *orderedCounters[i + 1];
+                        const auto& overlapStart = before.time.seconds == firstTime.seconds ? firstTime : before.time;
+                        const auto& overlapEnd = after.time.seconds == lastTime.seconds ? lastTime : after.time;
+                        accountForInterval(rollout, before, after, overlapStart, overlapEnd);
+                    }
+                    start = end;
+                }
+            }
 
             auto computeWindowTotals = [&](std::time_t windowStart, std::time_t windowEnd) {
                 TokenWindowTotals totals;
-                for (size_t i = 1; i < events.size(); ++i) {
-                    if (events[i].rawReference != events[i - 1].rawReference) {
-                        continue;
-                    }
-                    if (events[i].eventTime < windowStart || events[i].eventTime > windowEnd) {
-                        continue;
-                    }
-                    const double timeDelta = static_cast<double>(events[i].eventTime - events[i - 1].eventTime);
-                    if (timeDelta <= 0.0) {
-                        continue;
-                    }
-                    const long long tokenDelta = events[i].totalTokens - events[i - 1].totalTokens;
-                    if (tokenDelta < 0) {
-                        continue;
-                    }
-                    totals.totalTokenDelta += tokenDelta;
-                    ++totals.promptDeltaCount;
+                for (auto position = usageAt.lower_bound(windowStart);
+                     position != usageAt.end() && position->first <= windowEnd; ++position) {
+                    totals.totalTokenDelta += position->second.totalTokenDelta;
+                    totals.promptDeltaCount += position->second.promptDeltaCount;
                 }
                 return totals;
             };
@@ -2065,21 +2463,25 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             analysis.codexThroughput.averageDailyPrompts = totals30d.promptDeltaCount / 30;
             analysis.codexThroughput.averageMonthlyTokens = totalsMonth.totalTokenDelta / monthElapsedDays;
             analysis.codexThroughput.averageMonthlyPrompts = totalsMonth.promptDeltaCount / monthElapsedDays;
-            analysis.codexThroughput.hasData = true;
-
-            bool sameSource = true;
-            bool largeGap = false;
-            for (size_t i = 1; i < events.size(); ++i) {
-                if (events[i].rawReference != events[0].rawReference) {
-                    sameSource = false;
-                }
-                const std::time_t gap = events[i].eventTime - events[i - 1].eventTime;
-                if (gap > 300) {
-                    largeGap = true;
-                }
-            }
+            analysis.codexThroughput.hasData = totals30d.promptDeltaCount > 0 || legacySampleCount > 1;
             analysis.codexThroughput.confidenceLabel =
-                (sameSource && !largeGap) ? "LocalExact" : "Estimated";
+                (legacyEstimated || countersByRollout.size() > 1) ? "Estimated" : "LocalExact";
+
+            std::map<std::time_t, TokenWindowTotals> minutes;
+            for (auto position = usageAt.lower_bound(window30mStart); position != usageAt.end(); ++position) {
+                const auto minute = position->first - position->first % 60;
+                auto& totals = minutes[minute];
+                totals.totalTokenDelta += position->second.totalTokenDelta;
+                totals.promptDeltaCount += position->second.promptDeltaCount;
+            }
+            for (const auto& [minute, totals] : minutes) {
+                AnalysisCodexMinutePoint point;
+                point.snapshotTime = minute;
+                point.tokensPerMinute = static_cast<double>(totals.totalTokenDelta);
+                point.promptsPerMinute = static_cast<double>(totals.promptDeltaCount);
+                analysis.codexHourlyHistory.points.push_back(point);
+            }
+            analysis.codexHourlyHistory.hasData = !minutes.empty();
         }
     }
 
@@ -2119,46 +2521,6 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
 
     populateModelUsageChart("openai", "OpenAI Codex Usage by Model", analysis.openAiCodexModelUsage);
     populateModelUsageChart("hicap-ai", "HICAP Codex Usage by Model", analysis.hicapCodexModelUsage);
-
-    // 24-hour per-minute history for dashboard throughput chart.
-    {
-        const std::time_t chartWindowStart = std::max<std::time_t>(0, now - 1800);
-
-        std::string sql =
-            "SELECT "
-            "  strftime('%Y-%m-%dT%H:', ue.event_time_utc) || "
-            "  printf('%02d', CAST(strftime('%M', ue.event_time_utc) AS INTEGER) / 1) || ':00Z' AS minute_bucket, "
-            "  COALESCE(MAX(ue.total_tokens) - MIN(ue.total_tokens), 0) AS tokens_in_minute, "
-            "  COUNT(DISTINCT ue.raw_reference) AS prompts_in_minute "
-            "FROM usage_events ue "
-            "JOIN providers p ON p.id = ue.provider_id "
-            "JOIN accounts a ON a.id = ue.account_id "
-            "WHERE ue.source_type = 'codex_local_rollout' "
-            "  AND ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
-        std::vector<std::string> params{
-            formatTimeUtcIso(chartWindowStart),
-            formatTimeUtcIso(now)};
-        appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
-        appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");
-        sql += " GROUP BY minute_bucket ORDER BY minute_bucket ASC;";
-
-        QueryResult result = storage_->execute(sql, params);
-        if (result.success() && result.rowCount() > 0) {
-            analysis.codexHourlyHistory.points.reserve(result.rowCount());
-            for (size_t row = 0; row < result.rowCount(); ++row) {
-                const auto parsedTime = parseUtcIso(result.getString(row, 0));
-                if (!parsedTime.has_value()) {
-                    continue;
-                }
-                AnalysisCodexMinutePoint pt;
-                pt.snapshotTime = *parsedTime;
-                pt.tokensPerMinute = static_cast<double>(result.getInt64(row, 1));
-                pt.promptsPerMinute = static_cast<double>(result.getInt(row, 2));
-                analysis.codexHourlyHistory.points.push_back(std::move(pt));
-            }
-            analysis.codexHourlyHistory.hasData = !analysis.codexHourlyHistory.points.empty();
-        }
-    }
 
     long long importedBackfillCheckpoints = 0;
     long long mismatchCheckpoints = 0;

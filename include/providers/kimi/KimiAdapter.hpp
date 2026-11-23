@@ -64,7 +64,6 @@ struct KimiLocalActivitySnapshot {
     std::vector<std::string> confidenceNotes;
 
     ActivityEvent toActivityEvent() const;
-    UsageEvent toUsageEvent() const;
 };
 
 struct KimiLocalParseResult {
@@ -85,7 +84,6 @@ struct KimiLocalParseResult {
     std::time_t latestObservedAt = 0;
     std::vector<KimiLocalActivitySnapshot> activitySnapshots;
     std::vector<ActivityEvent> normalizedActivityEvents;
-    std::vector<UsageEvent> normalizedUsageEvents;
     std::string rawSummary;
 };
 
@@ -95,6 +93,9 @@ public:
     ~KimiAdapter() override;
 
     UsageResponse fetchUsage(std::time_t from, std::time_t to) override;
+    bool supportsUsageHistory() const override {
+        return false;
+    }
     QuotaResponse fetchQuota() override;
     bool validateCredentials() override;
     std::vector<Capability> getCapabilities() override;

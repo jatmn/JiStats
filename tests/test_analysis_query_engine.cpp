@@ -4,12 +4,14 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "db/StorageService.hpp"
 #include "gui/DashboardPresenter.hpp"
+#include "providers/openai/OpenAIAdapter.hpp"
 #include "reporting/AnalysisQueryEngine.hpp"
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
@@ -133,19 +135,18 @@ void seedUsageEvent(
     REQUIRE(storage.insertUsageEvents({event}));
 }
 
-void seedCodexUsageEvent(
-    StorageService& storage,
-    std::time_t eventTime,
-    long long totalTokens,
-    const std::string& rawReference = "codex://rollout/current") {
+void seedCodexUsageEvent(StorageService& storage, std::time_t eventTime, long long totalTokens,
+                         const std::string& rawReference = "codex://rollout/current", const std::string& requestId = {},
+                         std::optional<int> subsecondNs = std::nullopt) {
     PersistedUsageEvent event;
     event.providerId = requireProviderId(storage, "openai");
     event.accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
     event.eventTime = eventTime;
+    event.eventSubsecondNs = subsecondNs;
     event.sourceType = "codex_local_rollout";
-    event.sourceRunId = "codex_token_usage";
+    event.sourceRunId = requestId.empty() ? "codex_token_usage" : requestId;
     event.modelKey = "codex";
-    event.requestType = "codex_turn";
+    event.requestType = requestId.empty() ? "codex_turn" : "codex_request";
     event.inputTokens = totalTokens / 2;
     event.outputTokens = totalTokens - event.inputTokens;
     event.totalTokens = totalTokens;
@@ -437,6 +438,477 @@ TEST_CASE("AnalysisQueryEngine keeps Codex throughput separate from scoped usage
     CHECK(currentDaySummary->activityCount == 1);
 }
 
+TEST_CASE("Analysis uses the same Codex request events for totals and chart buckets", "[analysis][codex]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const std::string rollout = "codex://rollout/current";
+    seedCodexUsageEvent(storage, now - 240, 100);
+    seedCodexUsageEvent(storage, now - 180, 200);
+    seedCodexUsageEvent(storage, now - 120, 250);
+    seedCodexUsageEvent(storage, now - 120, 30, rollout, "response:one");
+    seedCodexUsageEvent(storage, now - 120, 20, rollout, "response:two");
+    seedCodexUsageEvent(storage, now - 120, 20, rollout, "response:two");
+    seedCodexUsageEvent(storage, now - 120, 20, "codex://rollout/copied", "response:two");
+
+    seedCodexUsageEvent(storage, now - 60, 370);
+    seedCodexUsageEvent(storage, now, 490);
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("openai", "OpenAI", "openai.runtime_status")};
+    AnalysisQueryEngine engine(storage);
+    const auto analysis = engine.buildViewModel(dashboard, DashboardPreferences{}, now);
+
+    REQUIRE(analysis.codexThroughput.hasData);
+    CHECK(analysis.codexThroughput.tokensLast1h == 390);
+    CHECK(analysis.codexThroughput.promptsLast1h == 5);
+    REQUIRE(analysis.codexHourlyHistory.hasData);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 5);
+    const auto& minute = analysis.codexHourlyHistory.points[2];
+    CHECK(minute.snapshotTime == now - 120);
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(120));
+    CHECK(minute.tokensPerMinute == Catch::Approx(50));
+    CHECK(minute.promptsPerMinute == Catch::Approx(2));
+}
+
+TEST_CASE("Codex accounting preserves request ordering within a second", "[analysis][codex]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/current";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const auto sameSecond = now - 120;
+    seedCodexUsageEvent(storage, sameSecond, 100);
+    seedCodexUsageEvent(storage, sameSecond, 50, rollout, "response:request");
+
+    long long expectedTokens = 150;
+    int baselineNs = 100000000;
+    SECTION("The counter precedes the request") {
+        seedCodexUsageEvent(storage, sameSecond, 100, rollout, {}, baselineNs);
+        seedCodexUsageEvent(storage, sameSecond, 50, rollout, "response:request", 500000000);
+    }
+    SECTION("The request precedes the counter") {
+        baselineNs = 800000000;
+        seedCodexUsageEvent(storage, sameSecond, 100, rollout, {}, baselineNs);
+        seedCodexUsageEvent(storage, sameSecond, 50, rollout, "response:request", 500000000);
+        expectedTokens = 200;
+    }
+    SECTION("Seconds-only legacy rows use conservative overlap") {
+        baselineNs = -1;
+    }
+    seedCodexUsageEvent(storage, now - 60, 250);
+
+    const auto stored = storage.getUsageEvents(requireProviderId(storage, "openai"),
+                                               ensureRuntimeAccountId(storage, "openai", "OpenAI"), sameSecond, now);
+    REQUIRE(stored.size() == 3);
+    const auto baseline =
+        std::find_if(stored.begin(), stored.end(), [](const auto& row) { return row.totalTokens == 100; });
+    REQUIRE(baseline != stored.end());
+    if (baselineNs >= 0) {
+        CHECK(baseline->eventSubsecondNs == baselineNs);
+    } else {
+        CHECK_FALSE(baseline->eventSubsecondNs.has_value());
+    }
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == expectedTokens);
+    CHECK(analysis.codexThroughput.promptsLast1h == 2);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 2);
+    CHECK(analysis.codexHourlyHistory.points.front().tokensPerMinute == Catch::Approx(50));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(expectedTokens - 50));
+}
+
+TEST_CASE("Codex rollout replay links requests to their previously saved cumulative baseline", "[analysis][codex]") {
+    requireSqlite();
+    const bool hasLegacyBaseline = GENERATE(true, false);
+    CAPTURE(hasLegacyBaseline);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    JiStats::TestSupport::TempTestDirectory fixture("jistats_codex_upgrade");
+    const auto rollout = fixture.path() / "rollout-upgrade.jsonl";
+    {
+        std::ofstream out(rollout);
+        out << R"json({"timestamp":"2026-04-20T17:58:00.500Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":25,"output_tokens":25,"total_tokens":50},"total_token_usage":{"input_tokens":50,"output_tokens":50,"total_tokens":100}}}}
+{"timestamp":"2026-04-20T17:59:00.123Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":100,"total_tokens":200}}}}
+)json";
+        REQUIRE(out.good());
+    }
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    const auto first = makeUtcTime(2026, 4, 20, 17, 58);
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    if (hasLegacyBaseline) {
+        seedCodexUsageEvent(storage, first, 100, rollout.string());
+    }
+
+    const auto batch = OpenAIAdapter::collectCodexTokenUsageSnapshots(fixture.path().string());
+    REQUIRE(batch.observations.size() == 2);
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+
+    const auto rows = storage.getUsageEvents(providerId, accountId, first, now);
+    REQUIRE(rows.size() == (hasLegacyBaseline ? 3 : 2));
+    const auto baseline =
+        std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.totalTokens == 100; });
+    if (hasLegacyBaseline) {
+        REQUIRE(baseline != rows.end());
+        CHECK(baseline->sourceRunId == "line:1");
+        CHECK(baseline->requestType == "codex_turn");
+        CHECK(baseline->eventSubsecondNs == 500000000);
+    } else {
+        CHECK(baseline == rows.end());
+    }
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == (hasLegacyBaseline ? 150 : 50));
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 2);
+    CHECK(analysis.codexHourlyHistory.points.front().tokensPerMinute == Catch::Approx(50));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(hasLegacyBaseline ? 100 : 0));
+}
+
+TEST_CASE("Codex rollout replay preserves the sequence of saved same-second counters", "[analysis][codex]") {
+    requireSqlite();
+    const bool laterHasPrecision = GENERATE(true, false);
+    const bool legacyRowsOutOfOrder = GENERATE(false, true);
+    CAPTURE(laterHasPrecision, legacyRowsOutOfOrder);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    JiStats::TestSupport::TempTestDirectory fixture("jistats_codex_order");
+    const auto rollout = fixture.path() / "rollout-upgrade.jsonl";
+    {
+        std::ofstream out(rollout);
+        const auto baselineTimestamp = legacyRowsOutOfOrder ? "17:58:00Z" : "17:57:00.200Z";
+        out << R"json({"timestamp":"2026-04-20T)json" << baselineTimestamp
+            << R"json(","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":50,"total_tokens":100}}}}
+{"timestamp":"2026-04-20T17:58:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":25,"output_tokens":25,"total_tokens":50},"total_token_usage":{"input_tokens":75,"output_tokens":75,"total_tokens":150}}}}
+{"timestamp":"2026-04-20T17:58:00.700Z","type":"token_usage_record","payload":{"response_id":"response-2","usage":{"input_tokens":25,"output_tokens":25,"total_tokens":50}}}
+{"timestamp":"2026-04-20T17:58:00)json";
+        out << (laterHasPrecision ? ".800" : "");
+        out << R"json(Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":100,"total_tokens":200}}}}
+{"type":"turn_context","payload":{}}
+{"timestamp":"2026-04-20T17:59:00.300Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":125,"output_tokens":125,"total_tokens":250}}}}
+)json";
+        REQUIRE(out.good());
+    }
+
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const auto sameSecond = now - 120;
+    seedCodexUsageEvent(storage, legacyRowsOutOfOrder ? sameSecond : now - 180, 100, rollout.string());
+    seedCodexUsageEvent(storage, sameSecond, legacyRowsOutOfOrder ? 200 : 150, rollout.string());
+    seedCodexUsageEvent(storage, sameSecond, legacyRowsOutOfOrder ? 150 : 200, rollout.string());
+    seedCodexUsageEvent(storage, now - 60, 250, rollout.string());
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    const auto batch = OpenAIAdapter::collectCodexTokenUsageSnapshots(fixture.path().string());
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 150);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == (legacyRowsOutOfOrder ? 2 : 3));
+    const auto& firstRequestMinute = analysis.codexHourlyHistory.points[analysis.codexHourlyHistory.points.size() - 2];
+    CHECK(firstRequestMinute.snapshotTime == sameSecond);
+    CHECK(firstRequestMinute.tokensPerMinute == Catch::Approx(100));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(50));
+
+    const auto rows = storage.getUsageEvents(providerId, accountId, now - 180, now);
+    REQUIRE(rows.size() == 6);
+    const auto laterCounter =
+        std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.totalTokens == 200; });
+    REQUIRE(laterCounter != rows.end());
+    CHECK(laterCounter->eventSubsecondNs == (laterHasPrecision ? std::optional<int>(800000000) : std::nullopt));
+}
+
+TEST_CASE("Codex collection and replay preserve resets at whole-second rollout records", "[analysis][codex]") {
+    requireSqlite();
+    const bool legacy = GENERATE(false, true);
+    const int nextCounter = GENERATE(50, 175);
+    CAPTURE(legacy, nextCounter);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    JiStats::TestSupport::TempTestDirectory fixture("jistats_codex_reset");
+    const auto rollout = fixture.path() / "rollout-reset.jsonl";
+    {
+        std::ofstream out(rollout);
+        out << R"json({"timestamp":"2026-04-20T17:57:00.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":50,"total_tokens":100}}}}
+{"timestamp":"2026-04-20T17:58:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":75,"output_tokens":75,"total_tokens":150}}}}
+{"timestamp":"2026-04-20T17:58:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":12,"output_tokens":13,"total_tokens":25}}}}
+{"timestamp":"2026-04-20T17:59:00.300Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":)json";
+        out << nextCounter / 2 << R"json(,"output_tokens":)json" << nextCounter - nextCounter / 2
+            << R"json(,"total_tokens":)json" << nextCounter << "}}}}\n";
+        REQUIRE(out.good());
+    }
+
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    if (legacy) {
+        seedCodexUsageEvent(storage, now - 180, 100, rollout.string());
+        seedCodexUsageEvent(storage, now - 120, 25, rollout.string());
+        seedCodexUsageEvent(storage, now - 120, 150, rollout.string());
+        seedCodexUsageEvent(storage, now - 60, nextCounter, rollout.string());
+    }
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    const auto batch = OpenAIAdapter::collectCodexTokenUsageSnapshots(fixture.path().string());
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+    REQUIRE(OpenAIAdapter::persistCodexTokenUsageSnapshots(storage, providerId, accountId, batch));
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 50 + nextCounter - 25);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(50));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(nextCounter - 25));
+
+    const auto rows = storage.getUsageEvents(providerId, accountId, now - 180, now);
+    REQUIRE(rows.size() == 4);
+    const auto reset = std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.totalTokens == 25; });
+    REQUIRE(reset != rows.end());
+    CHECK(reset->sourceRunId == "line:3");
+    CHECK_FALSE(reset->eventSubsecondNs.has_value());
+}
+
+TEST_CASE("Codex estimates unsequenced counters using neighboring seconds", "[analysis][codex]") {
+    requireSqlite();
+    const long long nextCounter = GENERATE(50, 175);
+    CAPTURE(nextCounter);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/current";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    seedCodexUsageEvent(storage, now - 180, 100, rollout);
+    seedCodexUsageEvent(storage, now - 120, 25, rollout);
+    seedCodexUsageEvent(storage, now - 120, 150, rollout, {}, 100000000);
+    seedCodexUsageEvent(storage, now - 60, nextCounter, rollout);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    const long long firstMinuteTokens = nextCounter == 50 ? 50 : 125;
+    CHECK(analysis.codexThroughput.tokensLast1h == firstMinuteTokens + 25);
+    CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(firstMinuteTokens));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(25));
+}
+
+TEST_CASE("Codex legacy readings in different seconds establish resets without rollout order", "[analysis][codex]") {
+    requireSqlite();
+    const bool reverseRowOrder = GENERATE(false, true);
+    const bool nextSecondIsUnsequenced = GENERATE(false, true);
+    CAPTURE(reverseRowOrder, nextSecondIsUnsequenced);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/no-longer-available";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    seedCodexUsageEvent(storage, now - 180, 100, rollout);
+    seedCodexUsageEvent(storage, now - 120, reverseRowOrder ? 50 : 25, rollout);
+    seedCodexUsageEvent(storage, now - 120, reverseRowOrder ? 25 : 50, rollout);
+    seedCodexUsageEvent(storage, now - 60, 150, rollout);
+    if (nextSecondIsUnsequenced) {
+        seedCodexUsageEvent(storage, now - 60, 125, rollout);
+        seedCodexUsageEvent(storage, now, 175, rollout);
+    }
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == (nextSecondIsUnsequenced ? 150 : 125));
+    CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
+    REQUIRE(analysis.codexHourlyHistory.points.size() == (nextSecondIsUnsequenced ? 4 : 3));
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(25));
+    CHECK(analysis.codexHourlyHistory.points[2].tokensPerMinute == Catch::Approx(100));
+    if (nextSecondIsUnsequenced) {
+        CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(25));
+    }
+}
+
+TEST_CASE("Codex estimates adjacent unordered seconds together", "[analysis][codex]") {
+    requireSqlite();
+    const bool hasFractionalOrder = GENERATE(false, true);
+    const bool reverseLegacyRows = GENERATE(false, true);
+    const bool extendsUnorderedRun = GENERATE(false, true);
+    CAPTURE(hasFractionalOrder, reverseLegacyRows, extendsUnorderedRun);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/no-longer-available";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const auto seedPair = [&](std::time_t seconds, long long first, long long last) {
+        if (hasFractionalOrder) {
+            seedCodexUsageEvent(storage, seconds, first, rollout, {}, 100000000);
+            seedCodexUsageEvent(storage, seconds, last, rollout, {}, 800000000);
+        } else {
+            seedCodexUsageEvent(storage, seconds, reverseLegacyRows ? last : first, rollout);
+            seedCodexUsageEvent(storage, seconds, reverseLegacyRows ? first : last, rollout);
+        }
+    };
+    seedCodexUsageEvent(storage, now - 240, 100, rollout);
+    seedPair(now - 180, 150, 50);
+    seedPair(now - 120, 60, 175);
+    if (extendsUnorderedRun) {
+        seedPair(now - 60, 180, 195);
+    }
+    seedCodexUsageEvent(storage, extendsUnorderedRun ? now : now - 60, 200, rollout);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 200);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == (extendsUnorderedRun ? 5 : 4));
+    CHECK(analysis.codexHourlyHistory.points[0].tokensPerMinute == Catch::Approx(0));
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(50));
+    CHECK(analysis.codexHourlyHistory.points[2].tokensPerMinute == Catch::Approx(125));
+    CHECK(analysis.codexHourlyHistory.points[3].tokensPerMinute == Catch::Approx(extendsUnorderedRun ? 20 : 25));
+    if (extendsUnorderedRun) {
+        CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(5));
+    }
+}
+
+TEST_CASE("Codex tallies distinct interior readings from a legacy second", "[analysis][codex]") {
+    requireSqlite();
+    const bool reset = GENERATE(false, true);
+    const int timedReadings = GENERATE(0, 1, 3);
+    CAPTURE(reset, timedReadings);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/no-longer-available";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    seedCodexUsageEvent(storage, now - 180, 100, rollout);
+    const std::vector<long long> readings =
+        reset ? std::vector<long long>{150, 25, 50} : std::vector<long long>{125, 150, 175};
+    // Insert out of order for the legacy, mixed-precision and fully timed controls.
+    for (int index : {2, 0, 1}) {
+        const std::optional<int> nanos =
+            index < timedReadings ? std::optional<int>((index + 1) * 100000000) : std::nullopt;
+        seedCodexUsageEvent(storage, now - 120, readings[index], rollout, {}, nanos);
+    }
+    if (reset && timedReadings == 1) {
+        // The known 150-to-145 decline cannot account for a later 25-to-50 gain.
+        seedCodexUsageEvent(storage, now - 120, 145, rollout, {}, 150000000);
+    }
+    seedCodexUsageEvent(storage, now - 60, reset ? 75 : 200, rollout);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 100);
+    CHECK(analysis.codexThroughput.promptsLast1h == (reset ? 3 : 4));
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[0].tokensPerMinute == Catch::Approx(0));
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(75));
+    CHECK(analysis.codexHourlyHistory.points[2].tokensPerMinute == Catch::Approx(25));
+}
+
+TEST_CASE("Codex request overlap stays within the enclosing timed counters", "[analysis][codex]") {
+    requireSqlite();
+    const int requestNs = GENERATE(100000000, 450000000, 900000000);
+    const bool timedInterior = GENERATE(false, true);
+    const bool twoInteriorReadings = GENERATE(false, true);
+    CAPTURE(requestNs, timedInterior, twoInteriorReadings);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/mixed-precision";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const auto second = now - 60;
+    seedCodexUsageEvent(storage, second, 100, rollout, {}, 300000000);
+    seedCodexUsageEvent(storage, second, 150, rollout, {},
+                        timedInterior ? std::optional<int>(400000000) : std::nullopt);
+    if (twoInteriorReadings) {
+        seedCodexUsageEvent(storage, second, 200, rollout, {},
+                            timedInterior ? std::optional<int>(500000000) : std::nullopt);
+    }
+    seedCodexUsageEvent(storage, second, twoInteriorReadings ? 250 : 200, rollout, {}, 600000000);
+    seedCodexUsageEvent(storage, second, 50, rollout, "response:recorded", requestNs);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    const bool separateRequest = requestNs < 300000000 || requestNs > 600000000;
+    const auto expectedPrompts = 2 + twoInteriorReadings + separateRequest;
+    CHECK(analysis.codexThroughput.promptsLast1h == expectedPrompts);
+    CHECK(analysis.codexThroughput.tokensLast1h == expectedPrompts * 50);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 1);
+    CHECK(analysis.codexHourlyHistory.points.front().tokensPerMinute == Catch::Approx(expectedPrompts * 50));
+}
+
+TEST_CASE("An unsequenced Codex counter does not replace a matching timed boundary", "[analysis][codex]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/current";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    seedCodexUsageEvent(storage, now - 180, 100, rollout);
+    seedCodexUsageEvent(storage, now - 120, 150, rollout);
+    REQUIRE(
+        storage
+            .execute(
+                "INSERT INTO usage_events (provider_id, account_id, event_time_utc, event_subsecond_ns, source_type, "
+                "source_run_id, model_key, request_type, input_tokens, output_tokens, total_tokens, raw_reference) "
+                "SELECT provider_id, account_id, event_time_utc, 100000000, source_type, 'line:2', model_key, "
+                "request_type, input_tokens, output_tokens, total_tokens, raw_reference FROM usage_events "
+                "WHERE source_type = 'codex_local_rollout' AND total_tokens = 150;")
+            .success());
+    seedCodexUsageEvent(storage, now - 120, 30, rollout, "response:after-counter", 700000000);
+    seedCodexUsageEvent(storage, now - 60, 200, rollout);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 100);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(80));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(20));
+}
+
+TEST_CASE("Codex accounting preserves timed counter resets in a mixed-precision second", "[analysis][codex]") {
+    requireSqlite();
+    const long long unsequenced = GENERATE(75, 200);
+    CAPTURE(unsequenced);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/current";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const auto sameSecond = now - 120;
+    seedCodexUsageEvent(storage, now - 180, 100, rollout);
+    seedCodexUsageEvent(storage, sameSecond, 50, rollout, {}, 800000000);
+    seedCodexUsageEvent(storage, sameSecond, unsequenced, rollout);
+    seedCodexUsageEvent(storage, sameSecond, 25, rollout, {}, 500000000);
+    seedCodexUsageEvent(storage, sameSecond, 150, rollout, {}, 100000000);
+    seedCodexUsageEvent(storage, now - 60, 100, rollout);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    const long long firstMinuteTokens = unsequenced == 75 ? 75 : 125;
+    CHECK(analysis.codexThroughput.tokensLast1h == firstMinuteTokens + 50);
+    CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
+    REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(firstMinuteTokens));
+    CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(50));
+}
+
 TEST_CASE("AnalysisQueryEngine limits Codex throughput chart history to the active thirty-minute window", "[analysis][query_engine][analysis_query_engine][codex]") {
     requireSqlite();
 
@@ -520,6 +992,58 @@ TEST_CASE("AnalysisQueryEngine computes Codex throughput within rollout session 
     CHECK(analysis.codexThroughput.tokensPerMinute5m == Catch::Approx(20.0));
     CHECK(analysis.codexThroughput.promptsPerMinute5m == Catch::Approx(0.2));
     CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
+}
+
+TEST_CASE("Percentage quota history marks resets only when reported bounds change", "[analysis][quota]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const int providerId = requireProviderId(storage, "grok");
+    const int accountId = ensureRuntimeAccountId(storage, "grok", "Grok");
+    auto insert = [&](const char* observedAt, const char* windowStart, const char* windowEnd) {
+        REQUIRE(
+            storage
+                .execute("INSERT INTO quota_snapshots (provider_id, account_id, snapshot_time_utc, window_start_utc, "
+                         "window_end_utc, used_value, limit_value, confidence_tier, quota_dimension) "
+                         "VALUES (?, ?, ?, ?, ?, 40, 100, 'high', 'percent');",
+                         {std::to_string(providerId), std::to_string(accountId), observedAt, windowStart, windowEnd})
+                .success());
+    };
+
+    // Include a previously stored poll-time placeholder and two observations without reported dates.
+    insert("2026-04-20T13:00:00Z", "2026-04-20T13:00:00Z", "2026-04-20T13:00:00Z");
+    insert("2026-04-20T14:00:00Z", "", "");
+    insert("2026-04-20T15:00:00Z", "", "");
+    insert("2026-04-20T16:00:00Z", "", "2026-04-20T17:00:00Z");
+    insert("2026-04-20T16:30:00Z", "2026-04-13T17:00:00Z", "2026-04-20T17:00:00Z");
+    insert("2026-04-20T17:15:00Z", "2026-04-13T17:00:00Z", "");
+    insert("2026-04-20T17:30:00Z", "", "2026-04-27T17:00:00Z");
+    insert("2026-04-20T17:45:00Z", "2026-04-20T17:00:00Z", "2026-04-27T17:00:00Z");
+
+    const auto from = makeUtcTime(2026, 4, 20);
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    DashboardViewModel dashboard;
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "grok";
+    preferences.analysisSelectedAccountId = "grok.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Last24Hours;
+    auto analysis = AnalysisQueryEngine(storage).buildViewModel(dashboard, preferences, now);
+    REQUIRE(analysis.quotaTrendSeries.size() == 1);
+    const auto& series = analysis.quotaTrendSeries.front();
+    REQUIRE(series.points.size() == 8);
+    CHECK(series.resetCount == 1);
+    for (std::size_t index = 0; index < series.points.size(); ++index) {
+        CHECK(series.points[index].resetPoint == (index == 6));
+    }
+    CHECK(series.points.back().remainingPercentage == Catch::Approx(60));
+
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, from, now));
+    const auto rollups = storage.getQuotaSnapshotRollups(providerId, accountId, from, from);
+    REQUIRE(rollups.size() == 1);
+    CHECK(rollups.front().sampleCount == 8);
+    CHECK(rollups.front().resetCount == 1);
 }
 
 TEST_CASE("AnalysisQueryEngine keeps Codex model usage buckets granular for recent deltas", "[analysis][query_engine][analysis_query_engine][codex]") {
