@@ -700,11 +700,44 @@ TEST_CASE("Codex estimates unsequenced counters using neighboring seconds", "[an
 
     const auto analysis =
         AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
-    CHECK(analysis.codexThroughput.tokensLast1h == 75);
+    const long long firstMinuteTokens = nextCounter == 50 ? 50 : 125;
+    CHECK(analysis.codexThroughput.tokensLast1h == firstMinuteTokens + 25);
     CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
     REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
-    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(50));
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(firstMinuteTokens));
     CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(25));
+}
+
+TEST_CASE("Codex legacy readings in different seconds establish resets without rollout order", "[analysis][codex]") {
+    requireSqlite();
+    const bool reverseRowOrder = GENERATE(false, true);
+    const bool nextSecondIsUnsequenced = GENERATE(false, true);
+    CAPTURE(reverseRowOrder, nextSecondIsUnsequenced);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/no-longer-available";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    seedCodexUsageEvent(storage, now - 180, 100, rollout);
+    seedCodexUsageEvent(storage, now - 120, reverseRowOrder ? 50 : 25, rollout);
+    seedCodexUsageEvent(storage, now - 120, reverseRowOrder ? 25 : 50, rollout);
+    seedCodexUsageEvent(storage, now - 60, 150, rollout);
+    if (nextSecondIsUnsequenced) {
+        seedCodexUsageEvent(storage, now - 60, 125, rollout);
+        seedCodexUsageEvent(storage, now, 175, rollout);
+    }
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == (nextSecondIsUnsequenced ? 150 : 125));
+    CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
+    REQUIRE(analysis.codexHourlyHistory.points.size() == (nextSecondIsUnsequenced ? 4 : 3));
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(25));
+    CHECK(analysis.codexHourlyHistory.points[2].tokensPerMinute == Catch::Approx(100));
+    if (nextSecondIsUnsequenced) {
+        CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(25));
+    }
 }
 
 TEST_CASE("An unsequenced Codex counter does not replace a matching timed boundary", "[analysis][codex]") {
@@ -739,6 +772,8 @@ TEST_CASE("An unsequenced Codex counter does not replace a matching timed bounda
 
 TEST_CASE("Codex accounting preserves timed counter resets in a mixed-precision second", "[analysis][codex]") {
     requireSqlite();
+    const long long unsequenced = GENERATE(75, 200);
+    CAPTURE(unsequenced);
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
@@ -748,17 +783,18 @@ TEST_CASE("Codex accounting preserves timed counter resets in a mixed-precision 
     const auto sameSecond = now - 120;
     seedCodexUsageEvent(storage, now - 180, 100, rollout);
     seedCodexUsageEvent(storage, sameSecond, 50, rollout, {}, 800000000);
-    seedCodexUsageEvent(storage, sameSecond, 200, rollout);
+    seedCodexUsageEvent(storage, sameSecond, unsequenced, rollout);
     seedCodexUsageEvent(storage, sameSecond, 25, rollout, {}, 500000000);
     seedCodexUsageEvent(storage, sameSecond, 150, rollout, {}, 100000000);
     seedCodexUsageEvent(storage, now - 60, 100, rollout);
 
     const auto analysis =
         AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
-    CHECK(analysis.codexThroughput.tokensLast1h == 125);
+    const long long firstMinuteTokens = unsequenced == 75 ? 75 : 125;
+    CHECK(analysis.codexThroughput.tokensLast1h == firstMinuteTokens + 50);
     CHECK(analysis.codexThroughput.confidenceLabel == "Estimated");
     REQUIRE(analysis.codexHourlyHistory.points.size() == 3);
-    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(75));
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(firstMinuteTokens));
     CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(50));
 }
 

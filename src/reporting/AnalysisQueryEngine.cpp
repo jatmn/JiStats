@@ -2132,18 +2132,24 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                                 [&](const UsageSample* known) { return known->tokens == sample.tokens; })) {
                     return position;
                 }
-                long long leastIncrease = std::numeric_limits<long long>::max();
+                // A lower reading in a later second proves a drop even without a source line.
+                const bool provesResetAcrossSeconds = resetBetween(before, &sample) || resetBetween(&sample, after);
+                std::pair<int, long long> bestCost{std::numeric_limits<int>::max(),
+                                                   std::numeric_limits<long long>::max()};
                 for (std::size_t i = 0; i <= ordered.size(); ++i) {
                     const UsageSample* left = i == 0 ? before : ordered[i - 1];
                     const UsageSample* right = i == ordered.size() ? after : ordered[i];
-                    if (resetBetween(left, &sample) + resetBetween(&sample, right) > resetBetween(left, right)) {
+                    const int addedResets =
+                        resetBetween(left, &sample) + resetBetween(&sample, right) - resetBetween(left, right);
+                    if (addedResets > 0 && !provesResetAcrossSeconds) {
                         continue;
                     }
-                    const auto increase =
+                    const auto addedTokens =
                         increaseBetween(left, &sample) + increaseBetween(&sample, right) - increaseBetween(left, right);
-                    if (!position || increase < leastIncrease) {
+                    const auto cost = std::make_pair(addedResets, addedTokens);
+                    if (cost < bestCost) {
                         position = i;
-                        leastIncrease = increase;
+                        bestCost = cost;
                     }
                 }
                 return position;
@@ -2184,13 +2190,22 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     }
                     const bool hasReset =
                         std::adjacent_find(ordered.begin(), ordered.end(), resetBetween) != ordered.end();
+                    const auto [minEstablished, maxEstablished] =
+                        std::minmax_element(second->ordered, second->end, [](const auto& left, const auto& right) {
+                            return left.tokens < right.tokens;
+                        });
                     const auto next = second + 1;
-                    const UsageSample* after =
-                        next != seconds.end() && next->ordered != next->end ? &*next->ordered : nullptr;
+                    const UsageSample* after = nullptr;
+                    if (next != seconds.end()) {
+                        // The largest value is a conservative next anchor when its entire second is unordered.
+                        after = next->ordered != next->end ? &*next->ordered : &*(next->end - 1);
+                    }
                     for (auto counter = second->begin; counter != second->ordered; ++counter) {
-                        // Without source order, do not assign a sample to either side of a reset inside this second.
+                        // A value within a known reset's range can belong to either side without proving more usage.
+                        const bool withinReset = hasReset && counter->tokens >= minEstablished->tokens &&
+                                                 counter->tokens <= maxEstablished->tokens;
                         const auto position =
-                            hasReset ? std::nullopt : estimatePlacement(ordered, *counter, baseline, after);
+                            withinReset ? std::nullopt : estimatePlacement(ordered, *counter, baseline, after);
                         if (position) {
                             ordered.insert(ordered.begin() + *position, &*counter);
                         } else {
