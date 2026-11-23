@@ -31,6 +31,8 @@ The Linux build restores compiler results seeded by pushes to the default branch
 
 Dispatch **Prepare Linux CI toolchain** to verify the MinGW and native toolchain on a standard runner. An organization with an image-generation runner can set `JISTATS_IMAGE_GENERATOR` to its label, add `snapshot: jistats-linux-build` beneath the job’s `runs-on` line, then dispatch the workflow to snapshot the verified tools. GitHub rejects workflow definitions containing `snapshot` on personal repositories before evaluating job conditions. Configure a Linux larger runner from the generated `jistats-linux-build` image, then set `JISTATS_LINUX_BUILD_RUNNER` to the consumer's label. CI uses that image for the cross-build and fingerprints the installed compiler packages on every run. With both variables unset, the current standard runners work without a subscription.
 
+Schedule refreshes before the [configured maximum image age](https://docs.github.com/en/enterprise-cloud@latest/admin/enforcing-policies/enforcing-policies-for-your-enterprise/enforcing-policies-for-github-actions-in-your-enterprise#custom-images-retention-policies). Run **Prepare Linux CI toolchain** to publish a new verified version, then select it on the consumer runner if the runner is pinned. If the configured runner cannot take jobs, clear `JISTATS_LINUX_BUILD_RUNNER` and start a new CI run. CI will use `ubuntu-latest` and install the toolchain with APT.
+
 ## Pull request lint
 
 The [Lint workflow](../../.github/workflows/lint.yml) checks changed first-party C and C++ lines under `src/`, `include/`, and `tests/` with LLVM 18 and `.clang-format`. It runs `actionlint` when workflows change.
