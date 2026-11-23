@@ -1,0 +1,26 @@
+amends "package://github.com/jdx/hk/releases/download/v2.13.0/hk@2.13.0#/Config.pkl"
+
+hooks {
+  ["pre-commit"] {
+    stash = "git"
+    fix = true
+    steps {
+      ["clang-format"] {
+        glob = List("{src,include,tests}/**/*.{c,cc,cp,cpp,cxx,c++,h,hh,hpp,hxx,h++,inc,cppm,ccm,cxxm,c++m}")
+        check = "clang-format-18 --dry-run --Werror -- {{files}}"
+        fix = "clang-format-18 -i -- {{files}}"
+      }
+      ["actionlint"] {
+        glob = List(".github/workflows/*.{yml,yaml}")
+        check = "actionlint"
+      }
+    }
+  }
+  ["pre-push"] {
+    steps {
+      ["pr-lint"] {
+        check = "bash scripts/check_pr_lint.sh --pre-push {{to_ref}}"
+      }
+    }
+  }
+}
