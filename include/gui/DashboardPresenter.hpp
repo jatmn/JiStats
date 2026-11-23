@@ -75,6 +75,7 @@ public:
 
     // Subscribe to preference changes from the dashboard UI
     void setPreferencesChangedCallback(std::function<void(const DashboardPreferences&)> callback);
+    void setCodexModelAttributionChangedCallback(std::function<void(bool, std::uint64_t)> callback);
     void setPreferencesOpenedCallback(std::function<void()> callback);
     void setPeriodicRefreshCallback(std::function<void()> callback);
 
@@ -176,6 +177,7 @@ private:
 struct DashboardPreferences {
     bool taskbarOverlayEnabled = true;
     bool openaiSubscriptionTrackingEnabled = false;
+    bool codexModelAttributionEnabled = false;
     bool miniMaxSubscriptionTrackingEnabled = false;
     bool claudeCodeEnabled = false;
     bool kimiCodeEnabled = false;
@@ -254,6 +256,8 @@ struct DashboardSummaryItem {
     std::string secondaryBadge;
 };
 
+enum class CodexAttributionSaveError { None, Enable, Revocation };
+
 // Dashboard view model
 struct DashboardViewModel {
     std::string appVersion = "1.0.0";
@@ -261,6 +265,8 @@ struct DashboardViewModel {
     bool isOnline = true;
     RuntimeState runtimeState = RuntimeState::Unknown;
     DashboardPreferences preferences;
+    std::uint64_t completedCodexAttributionRequest = 0;
+    CodexAttributionSaveError codexAttributionSaveError = CodexAttributionSaveError::None;
     bool claudeCodeLocallyDetected = false;
     std::string claudeCodeDetectionMessage;
     bool kimiCodeLocallyDetected = false;
