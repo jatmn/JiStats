@@ -133,7 +133,7 @@ jobs:
   ci-passed:
     name: CI passed
     needs: [changes, linux-cross]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ${{ needs.linux-cross.result == 'success' && 'windows-latest' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.repeat_offline_notice_tests && 15 || 5 }}
     steps:
