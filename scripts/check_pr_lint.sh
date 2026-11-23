@@ -5,6 +5,10 @@ git_common_directory() (
     common_dir=$(git rev-parse --git-common-dir) && cd "$common_dir" && pwd -P
 )
 
+cd_without_git_environment() {
+    unset "${git_local_environment[@]}" && cd -- "$1"
+}
+
 if [[ ${1:-} == --pre-push ]]; then
     start=$EPOCHREALTIME
     target=${JISTATS_PR_BASE:-origin/main}
@@ -35,6 +39,9 @@ fi
 base=$(git rev-parse --verify --end-of-options "${1:?expected a base revision}^{commit}")
 head=$(git rev-parse --verify --end-of-options "${2:-HEAD}^{commit}")
 cd "$(git rev-parse --show-toplevel)"
+# Let Git discover the repository when a subprocess enters another directory.
+git_local_variables=$(git rev-parse --local-env-vars)
+mapfile -t git_local_environment <<< "$git_local_variables"
 
 # actionlint reads local action definitions and workflow configuration from the
 # checkout. Check the committed version even on a push with uncommitted edits.
@@ -45,7 +52,7 @@ mkdir "$archive"
 git archive "$head" | tar -x -C "$archive"
 status=0
 JISTATS_FORMAT_TREE="$archive" bash scripts/check_changed_format.sh "$base" "$head" || status=1
-(cd "$archive" && git init --quiet && actionlint) || status=1
+(cd_without_git_environment "$archive" && git init --quiet && actionlint) || status=1
 if [[ ${JISTATS_PUSH_CHECK:-0} == 1 && -f "$archive/scripts/check_js_ci.sh" ]]; then
     worktree_list="$tmp/worktree-list"
     if git worktree list --porcelain -z > "$worktree_list" 2>/dev/null; then
@@ -73,7 +80,7 @@ if [[ ${JISTATS_PUSH_CHECK:-0} == 1 && -f "$archive/scripts/check_js_ci.sh" ]]; 
                 [[ -n $worktree && -e $worktree/.git ]] || continue
                 # Verify the checkout itself since Git can retain stale worktree records.
                 if ! (
-                    cd -- "$worktree" &&
+                    cd_without_git_environment "$worktree" &&
                         [[ $(git_common_directory) == "$repository" &&
                            $(git rev-parse --verify HEAD) == "$head" ]]
                 ); then
@@ -89,11 +96,11 @@ if [[ ${JISTATS_PUSH_CHECK:-0} == 1 && -f "$archive/scripts/check_js_ci.sh" ]]; 
         exit "$status"
     fi
     # The archive contains the pushed lockfile, even on a non-HEAD ref.
-    if (cd "$archive" && bun install --frozen-lockfile); then
-        (cd "$archive" && bash scripts/check_js_ci.sh) || status=1
+    if (cd_without_git_environment "$archive" && bun install --frozen-lockfile); then
+        (cd_without_git_environment "$archive" && bash scripts/check_js_ci.sh) || status=1
     else
         status=1
     fi
-    (cd "$archive" && node --test scripts/pullfrog-review-check.test.mjs) || status=1
+    (cd_without_git_environment "$archive" && node --test scripts/pullfrog-review-check.test.mjs) || status=1
 fi
 exit "$status"
