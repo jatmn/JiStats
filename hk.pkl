@@ -10,6 +10,11 @@ hooks {
         check = "clang-format-18 --dry-run --Werror -- {{files}}"
         fix = "clang-format-18 -i -- {{files}}"
       }
+      ["bun"] {
+        glob = List("scripts/*.mjs")
+        check = "node_modules/.bin/bun fmt --check {{files}} && node_modules/.bin/bun lint --type-aware --max-warnings=0 {{files}}"
+        fix = "node_modules/.bin/bun fmt {{files}} && node_modules/.bin/bun lint --type-aware --max-warnings=0 {{files}}"
+      }
       ["actionlint"] {
         glob = List(".github/workflows/*.{yml,yaml}")
         check = "actionlint"
