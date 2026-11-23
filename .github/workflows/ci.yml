@@ -209,23 +209,27 @@ jobs:
           retention-days: 30
           overwrite: true
 
-  windows-runtime:
-    name: Run cross-built tests on Windows
-    needs: linux-cross
-    if: ${{ !cancelled() && needs.linux-cross.result == 'success' }}
-    runs-on: windows-latest
+  ci-passed:
+    name: CI passed
+    needs: [changes, portable, linux-cross]
+    if: ${{ !cancelled() }}
+    runs-on: ${{ needs.linux-cross.result == 'success' && 'windows-latest' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.repeat_offline_notice_tests && 15 || 5 }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.linux-cross.result == 'success'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           filter: blob:none
           persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - if: needs.linux-cross.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: windows-tests
           path: build-mingw/bin
       # Run from the checkout root so the suite can read the test fixtures.
       - name: Run Windows suite and diagnose intermittent restart stalls
+        id: windows-tests
+        if: needs.linux-cross.result == 'success'
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
@@ -280,6 +284,7 @@ jobs:
           exit 0
 
       - name: Save verified per-file test times
+        if: needs.linux-cross.result == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-test-file-times
@@ -287,28 +292,25 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # The ruleset requires this check. It passes when the build jobs pass or were
-  # skipped because nothing they cover changed, and fails otherwise.
-  ci-passed:
-    name: CI passed
-    if: always()
-    needs: [changes, portable, linux-cross, windows-runtime]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
       - name: Check job results
+        if: always()
+        shell: bash
         env:
           EVENT: ${{ github.event_name }}
           DETECT: ${{ needs.changes.result }}
           BUILD: ${{ needs.changes.outputs.build }}
           PORTABLE: ${{ needs.portable.result }}
           LINUX: ${{ needs.linux-cross.result }}
-          WINDOWS: ${{ needs.windows-runtime.result }}
+          WINDOWS: ${{ steps.windows-tests.outcome }}
         run: |
           set -eu
           echo "Event=$EVENT detection=$DETECT build=$BUILD Portable=$PORTABLE cross=$LINUX Windows=$WINDOWS"
-          if [[ $EVENT == pull_request && $DETECT == success && $BUILD == false ]]; then
-            [[ $PORTABLE == skipped && $LINUX == skipped && $WINDOWS == skipped ]]
-            exit
+          if [[ $EVENT == pull_request ]]; then
+            [[ $DETECT == success ]]
+            if [[ $BUILD == false ]]; then
+              [[ $PORTABLE == skipped && $LINUX == skipped && $WINDOWS == skipped ]]
+              exit
+            fi
+            [[ $BUILD == true ]]
           fi
           [[ $PORTABLE == success && $LINUX == success && $WINDOWS == success ]]
