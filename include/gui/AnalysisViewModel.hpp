@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ctime>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,7 @@ struct AnalysisQuotaTrendPoint {
     long long limitValue = 0;
     bool resetPoint = false;
     bool reconciled = false;
+    bool dailyRollup = false;
 };
 
 struct AnalysisQuotaTrendSeries {
@@ -169,6 +171,10 @@ struct AnalysisViewModel {
     AnalysisProviderModelUsageChart hicapCodexModelUsage;
     std::string scopeLabel;
     std::string dataQualityNote;
+    // Echo the request separately from any provider, account, or date fallback.
+    std::optional<AnalysisScopeState> requestedScope;
+    std::time_t effectiveStartUtc = 0;
+    std::time_t effectiveEndUtc = 0;
 };
 
 } // namespace JiStats

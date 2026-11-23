@@ -1,6 +1,12 @@
 # Analysis and HTML reporting
 
-Use the dashboard's **Analysis** tab to launch the dedicated Analysis workspace. [AnalysisPresenter](../../src/gui/AnalysisPresenter.cpp) owns this view. [AnalysisQueryEngine](../../src/reporting/AnalysisQueryEngine.cpp) resolves the persisted provider, account, and date-range selection and queries history, breakdowns, trends, coverage, and provenance. The scope controls and summaries should reflect the effective date window when a saved selection falls back. Keep new Analysis behavior on this presenter and query path.
+Open the dedicated Analysis workspace from the dashboard. The provider, account, and date controls stay visible while the history pages scroll. The scope strip shows the effective UTC range, including when a saved preset falls back. Choose **Custom** to enter inclusive dates in `YYYY-MM-DD` format. The previous results stay visible while a new range loads.
+
+- **Activity** shows recorded history with a trend chart, daily rows, and provider and account breakdowns. Counts represent stored usage entries or local activity records, depending on the source available. Empty periods can lack evidence. They appear as blank chart intervals and as a dash in the daily count column. Use the chart's Left and Right keys or click a bucket to inspect the interval, count, and source.
+- **Quota history** shows subscription quota samples for a selected provider and account. Select a quota window to inspect remaining percentages, recorded units, and resets. The chart spaces samples by capture time. The lowest recorded value can include a daily minimum retained by a rollup.
+- **Coverage** explains the records and gaps behind the selected range. When recent local Codex throughput is available, its fixed 5-minute and 30-minute rates are labeled separately from the selected historical dates.
+
+[AnalysisPresenter](../../src/gui/AnalysisPresenter.cpp) owns the display. [AnalysisQueryEngine](../../src/reporting/AnalysisQueryEngine.cpp) resolves the persisted scope used for Analysis and HTML reporting.
 
 ## Exports
 

@@ -998,8 +998,13 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
     analysis.scope.customRangeStartUtc = preferences.analysisCustomRangeStartUtc;
     analysis.scope.customRangeEndUtc = preferences.analysisCustomRangeEndUtc;
 
+    analysis.scope.dateRangePreset = preferences.analysisDateRangePreset;
+    analysis.requestedScope = analysis.scope;
+
     const ResolvedAnalysisWindow window = resolveWindow(preferences, now);
     analysis.scope.dateRangePreset = window.effectivePreset;
+    analysis.effectiveStartUtc = window.start;
+    analysis.effectiveEndUtc = window.end;
     const TrendBucketConfig trendBucketConfig = resolveTrendBucketConfig(window);
     analysis.trendBucketGranularity = trendBucketConfig.granularity;
     analysis.trendBucketLabel = trendBucketConfig.label;
@@ -1825,6 +1830,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 point.limitValue = limitValue;
                 point.resetPoint = rollup.resetCount > 0;
                 point.reconciled = rollup.reconciledSampleCount > 0;
+                point.dailyRollup = true;
                 series.points.push_back(std::move(point));
 
                 if (rollup.lowWaterRemainingValue.has_value() &&

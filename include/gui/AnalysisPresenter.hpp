@@ -21,12 +21,10 @@
 namespace JiStats {
 
 /**
- * Owns the Analysis tab scope controls and in-tab analysis surface.
- * DashboardPresenter hosts this as a sub-presenter, but the analysis
- * summaries, breakdowns, trend text, and provenance remain presenter-owned here.
+ * Presents scoped activity, quota history, and data coverage in the dedicated Analysis window.
  */
 class AnalysisPresenter {
-public:
+  public:
     AnalysisPresenter();
     ~AnalysisPresenter();
 
@@ -36,8 +34,7 @@ public:
     void updateViewModel(const AnalysisViewModel& viewModel);
     void setInteractionPending(bool pending);
 
-    void setScopeChangedCallback(
-        std::function<void(const AnalysisScopeState&)> callback);
+    void setScopeChangedCallback(std::function<void(const AnalysisScopeState&)> callback);
 
     void setVisible(bool visible);
     void layout(const RECT& bounds);
@@ -47,20 +44,16 @@ public:
     bool handleTimer(UINT_PTR timerId);
     bool handleVScroll(WORD request, WORD thumbPosition = 0);
     bool handleMouseWheel(short wheelDelta);
-    bool handleDrawItem(const DRAWITEMSTRUCT& drawItem);
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
     std::string getScopeLabelForTesting() const;
     std::string getStatusHeadlineForTesting() const;
-    std::string getOverviewStatsForTesting() const;
+    std::string getCodexTextForTesting() const;
     std::string getTrendSummaryForTesting() const;
-    std::vector<std::string> getSectionTitlesForTesting() const;
     std::vector<std::string> getProviderOptionsForTesting() const;
     std::vector<std::string> getAccountOptionsForTesting() const;
     std::vector<std::string> getRangeOptionsForTesting() const;
     std::vector<std::string> getQuotaSeriesOptionsForTesting() const;
-    std::string getWorkspaceGuideTextForTesting() const;
-    std::vector<std::string> getWorkspaceNavigationLabelsForTesting() const;
     std::string getTrendComparisonTextForTesting() const;
     std::string getTrendDetailTextForTesting() const;
     std::string getCustomDateHintForTesting() const;
@@ -69,7 +62,6 @@ public:
     int getScrollOffsetForTesting() const;
     int getContentHeightForTesting() const;
     int getViewportHeightForTesting() const;
-    bool jumpToSectionForTesting(const std::string& sectionKey);
     bool selectTrendBucketForTesting(size_t index);
     bool selectQuotaTrendPointForTesting(size_t index);
     bool selectProviderForTesting(const std::string& key);
@@ -79,7 +71,7 @@ public:
     void setCustomRangeTextForTesting(const std::string& startDate, const std::string& endDate);
 #endif
 
-private:
+  private:
     class Impl;
     std::unique_ptr<Impl> pImpl;
 };

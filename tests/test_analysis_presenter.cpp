@@ -8,17 +8,13 @@
 
 #include "gui/AnalysisPresenter.hpp"
 
+#include <commctrl.h>
+
 using namespace JiStats;
 
 namespace {
 
-std::time_t makeUtcTime(
-    int year,
-    int month,
-    int day,
-    int hour = 0,
-    int minute = 0,
-    int second = 0) {
+std::time_t makeUtcTime(int year, int month, int day, int hour = 0, int minute = 0, int second = 0) {
     std::tm tm{};
     tm.tm_year = year - 1900;
     tm.tm_mon = month - 1;
@@ -30,21 +26,11 @@ std::time_t makeUtcTime(
 }
 
 class ScopedParentWindow {
-public:
+  public:
     ScopedParentWindow() {
-        hwnd_ = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"AnalysisPresenterTests",
-            WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            640,
-            240,
-            nullptr,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
+        hwnd_ =
+            CreateWindowExW(0, L"STATIC", L"AnalysisPresenterTests", WS_OVERLAPPEDWINDOW | WS_VSCROLL, CW_USEDEFAULT,
+                            CW_USEDEFAULT, 800, 640, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     }
 
     ~ScopedParentWindow() {
@@ -57,9 +43,44 @@ public:
         return hwnd_;
     }
 
-private:
+  private:
     HWND hwnd_ = nullptr;
 };
+
+HWND historyTabs(HWND parent) {
+    return FindWindowExW(parent, nullptr, WC_TABCONTROLW, nullptr);
+}
+
+void selectPage(HWND parent, int index) {
+    const HWND tabs = historyTabs(parent);
+    REQUIRE(tabs != nullptr);
+    REQUIRE(TabCtrl_GetItemCount(tabs) == 3);
+    TabCtrl_SetCurSel(tabs, index);
+    NMHDR notice{tabs, 0, TCN_SELCHANGE};
+    SendMessageW(parent, WM_NOTIFY, 0, reinterpret_cast<LPARAM>(&notice));
+}
+
+std::wstring tabTitle(HWND tabs, int index) {
+    wchar_t title[32]{};
+    TCITEMW item{};
+    item.mask = TCIF_TEXT;
+    item.pszText = title;
+    item.cchTextMax = static_cast<int>(std::size(title));
+    SendMessageW(tabs, TCM_GETITEMW, index, reinterpret_cast<LPARAM>(&item));
+    return title;
+}
+
+HWND findDescendant(HWND parent, int controlId) {
+    for (HWND child = GetWindow(parent, GW_CHILD); child != nullptr; child = GetWindow(child, GW_HWNDNEXT)) {
+        if (GetDlgCtrlID(child) == controlId) {
+            return child;
+        }
+        if (HWND descendant = findDescendant(child, controlId)) {
+            return descendant;
+        }
+    }
+    return nullptr;
+}
 
 AnalysisViewModel makeViewModel() {
     AnalysisViewModel model;
@@ -68,34 +89,22 @@ AnalysisViewModel makeViewModel() {
     model.scope.dateRangePreset = AnalysisDateRangePreset::Last7Days;
     model.scope.customRangeStartUtc = makeUtcTime(2026, 4, 10, 0, 0, 0);
     model.scope.customRangeEndUtc = makeUtcTime(2026, 4, 12, 0, 0, 0);
-    model.availableProviders = {
-        {"", "All Providers"},
-        {"openai", "OpenAI"},
-        {"minimax", "MiniMax"}
-    };
-    model.availableAccounts = {
-        {"", "All Accounts"},
-        {"acct-openai-primary", "OpenAI / acct-openai-primary"},
-        {"acct-minimax", "MiniMax / acct-minimax"}
-    };
+    model.availableProviders = {{"", "All Providers"}, {"openai", "OpenAI"}, {"minimax", "MiniMax"}};
+    model.availableAccounts = {{"", "All Accounts"},
+                               {"acct-openai-primary", "OpenAI / acct-openai-primary"},
+                               {"acct-minimax", "MiniMax / acct-minimax"}};
     model.scopeLabel = "OpenAI / OpenAI / acct-openai-primary / Last 7 Days";
-    model.dailySummaries = {
-        {"2026-04-10", 2, "OpenAI Codex-local", {}},
-        {"2026-04-11", 1, "OpenAI Local", {}}
-    };
-    model.providerBreakdown = {
-        {"openai", "OpenAI", "", 3, "Mixed OpenAI provenance"}
-    };
+    model.effectiveStartUtc = makeUtcTime(2026, 4, 10);
+    model.effectiveEndUtc = makeUtcTime(2026, 4, 12, 9, 30);
+    model.dailySummaries = {{"2026-04-10", 2, "OpenAI Codex-local", {}}, {"2026-04-11", 1, "OpenAI Local", {}}};
+    model.providerBreakdown = {{"openai", "OpenAI", "", 3, "Mixed OpenAI provenance"}};
     model.accountBreakdown = {
-        {"acct-openai-primary|OpenAI", "OpenAI / acct-openai-primary", "OpenAI", 3, "Mixed OpenAI provenance"}
-    };
+        {"acct-openai-primary|OpenAI", "OpenAI / acct-openai-primary", "OpenAI", 3, "Mixed OpenAI provenance"}};
     model.trendPoints = {
-        {"2026-04-10", 2},
-        {"2026-04-11", 1}
-    };
+        {"2026-04-10", 2, makeUtcTime(2026, 4, 10), makeUtcTime(2026, 4, 10, 23, 59), "OpenAI Codex-local"},
+        {"2026-04-11", 1, makeUtcTime(2026, 4, 11), makeUtcTime(2026, 4, 11, 23, 59), "OpenAI Local"}};
     model.gapSummaryCounts.unknownDays = 1;
-    model.dataQualityNote =
-        "Rollup-backed daily history across the current analysis scope with 1 unknown gap day.";
+    model.dataQualityNote = "Rollup-backed daily history across the current analysis scope with 1 unknown gap day.";
     return model;
 }
 
@@ -106,11 +115,9 @@ AnalysisViewModel makeQuotaTrendViewModel() {
     series.label = "OpenAI 5h";
     series.windowLabel = "5h";
     series.quotaDimension = "requests";
-    series.points = {
-        {"04-10 09:00", makeUtcTime(2026, 4, 10, 9, 0, 0), 82.0, 820, 1000, false, true},
-        {"04-10 14:00", makeUtcTime(2026, 4, 10, 14, 0, 0), 41.0, 410, 1000, false, true},
-        {"04-10 19:00", makeUtcTime(2026, 4, 10, 19, 0, 0), 95.0, 950, 1000, true, true}
-    };
+    series.points = {{"04-10 09:00", makeUtcTime(2026, 4, 10, 9, 0, 0), 82.0, 820, 1000, false, true},
+                     {"04-10 14:00", makeUtcTime(2026, 4, 10, 14, 0, 0), 41.0, 410, 1000, false, true},
+                     {"04-10 19:00", makeUtcTime(2026, 4, 10, 19, 0, 0), 95.0, 950, 1000, true, true}};
     series.latestRemainingPercentage = 95.0;
     series.lowWaterRemainingPercentage = 41.0;
     series.latestRemainingValue = 950;
@@ -127,10 +134,8 @@ AnalysisViewModel makeMultiQuotaTrendViewModel() {
     secondary.label = "MiniMax 1d";
     secondary.windowLabel = "1d";
     secondary.quotaDimension = "tokens";
-    secondary.points = {
-        {"04-10", makeUtcTime(2026, 4, 10, 0, 0, 0), 64.0, 6400, 10000, false, true},
-        {"04-11", makeUtcTime(2026, 4, 11, 0, 0, 0), 52.0, 5200, 10000, false, true}
-    };
+    secondary.points = {{"04-10", makeUtcTime(2026, 4, 10, 0, 0, 0), 64.0, 6400, 10000, false, true},
+                        {"04-11", makeUtcTime(2026, 4, 11, 0, 0, 0), 52.0, 5200, 10000, false, true}};
     secondary.latestRemainingPercentage = 52.0;
     secondary.lowWaterRemainingPercentage = 52.0;
     secondary.latestRemainingValue = 5200;
@@ -142,7 +147,8 @@ AnalysisViewModel makeMultiQuotaTrendViewModel() {
 
 } // namespace
 
-TEST_CASE("AnalysisPresenter renders Slice B scope labels and options from the view model", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter displays the effective scope and three history pages",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
 
@@ -152,50 +158,25 @@ TEST_CASE("AnalysisPresenter renders Slice B scope labels and options from the v
     presenter.updateViewModel(makeViewModel());
 
     CHECK(presenter.getScopeLabelForTesting() == "Active filters: OpenAI / OpenAI / acct-openai-primary / Last 7 Days");
-    CHECK(presenter.getSectionTitlesForTesting() == std::vector<std::string>{
-        "Filters & Scope",
-        "Overview",
-        "Activity Trend",
-        "Operational Signals",
-        "By Provider",
-        "By Account",
-        "Daily Activity",
-        "Coverage & Provenance"
-    });
-    CHECK(presenter.getCustomDateHintForTesting() == "Use YYYY-MM-DD dates. Changes apply after you pause typing.");
-    CHECK(presenter.getWorkspaceGuideTextForTesting() ==
-        "Workspace guide: jump to the section you want to review next, then refine the provider, account, and date filters above.");
-    CHECK(presenter.getWorkspaceNavigationLabelsForTesting() == std::vector<std::string>{
-        "Overview",
-        "Trend",
-        "Operational Signals",
-        "Breakdowns",
-        "Daily Activity",
-        "Coverage & Provenance"
-    });
-    CHECK(presenter.getProviderOptionsForTesting() == std::vector<std::string>{
-        "All Providers",
-        "OpenAI",
-        "MiniMax"
-    });
-    CHECK(presenter.getAccountOptionsForTesting() == std::vector<std::string>{
-        "All Accounts",
-        "OpenAI / acct-openai-primary",
-        "MiniMax / acct-minimax"
-    });
-    CHECK(presenter.getRangeOptionsForTesting() == std::vector<std::string>{
-        "Today",
-        "Last 24 Hours",
-        "Last 7 Days",
-        "Current Billing/Quota Window",
-        "This Month",
-        "Custom"
-    });
+    CHECK(presenter.getStatusHeadlineForTesting() == "2026-04-10 00:00 to 2026-04-12 09:30 UTC");
+    const HWND tabs = historyTabs(parent.get());
+    REQUIRE(tabs != nullptr);
+    REQUIRE(TabCtrl_GetItemCount(tabs) == 3);
+    CHECK(tabTitle(tabs, 0) == L"Activity");
+    CHECK(tabTitle(tabs, 1) == L"Quota history");
+    CHECK(tabTitle(tabs, 2) == L"Coverage");
+    CHECK(presenter.getProviderOptionsForTesting() == std::vector<std::string>{"All Providers", "OpenAI", "MiniMax"});
+    CHECK(presenter.getAccountOptionsForTesting() ==
+          std::vector<std::string>{"All Accounts", "OpenAI / acct-openai-primary", "MiniMax / acct-minimax"});
+    CHECK(presenter.getRangeOptionsForTesting() == std::vector<std::string>{"Today", "Last 24 Hours", "Last 7 Days",
+                                                                            "Current Billing/Quota Window",
+                                                                            "This Month", "Custom"});
 
     presenter.shutdown();
 }
 
-TEST_CASE("AnalysisPresenter emits provider scope changes through the Slice B callback seam", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter clears the account when the provider changes",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
 
@@ -222,7 +203,7 @@ TEST_CASE("AnalysisPresenter emits provider scope changes through the Slice B ca
     presenter.shutdown();
 }
 
-TEST_CASE("AnalysisPresenter emits date-range preset changes without inventing Slice C data", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter applies a saved custom date range", "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
 
@@ -235,9 +216,7 @@ TEST_CASE("AnalysisPresenter emits date-range preset changes without inventing S
     presenter.updateViewModel(model);
 
     std::optional<AnalysisScopeState> lastScope;
-    presenter.setScopeChangedCallback([&](const AnalysisScopeState& state) {
-        lastScope = state;
-    });
+    presenter.setScopeChangedCallback([&](const AnalysisScopeState& state) { lastScope = state; });
 
     REQUIRE(presenter.selectRangePresetForTesting(AnalysisDateRangePreset::Custom));
     REQUIRE(lastScope.has_value());
@@ -250,7 +229,8 @@ TEST_CASE("AnalysisPresenter emits date-range preset changes without inventing S
     presenter.shutdown();
 }
 
-TEST_CASE("AnalysisPresenter surfaces a pending refresh status while async analysis work is in flight", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter surfaces a pending refresh status while async analysis work is in flight",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
 
@@ -260,118 +240,138 @@ TEST_CASE("AnalysisPresenter surfaces a pending refresh status while async analy
     presenter.updateViewModel(makeViewModel());
     presenter.setInteractionPending(true);
 
-    CHECK(presenter.getStatusHeadlineForTesting() == "Refreshing analysis for the updated scope...");
+    CHECK(presenter.getStatusHeadlineForTesting() ==
+          "Loading the selected range. The previous results are still shown.");
     CHECK_FALSE(presenter.areScopeInputsEnabledForTesting());
 
     presenter.updateViewModel(makeViewModel());
-    CHECK(presenter.getStatusHeadlineForTesting() ==
-        "No scoped recovery, quota-history, or export metadata is available yet.");
+    CHECK(presenter.getStatusHeadlineForTesting() == "2026-04-10 00:00 to 2026-04-12 09:30 UTC");
     CHECK(presenter.areScopeInputsEnabledForTesting());
 
     presenter.shutdown();
 }
 
-TEST_CASE("AnalysisPresenter trend summary surfaces average and low-water hints", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter distinguishes missing activity buckets from recorded counts",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
-
     AnalysisPresenter presenter;
     REQUIRE(presenter.init(parent.get()));
 
-    presenter.updateViewModel(makeViewModel());
+    auto model = makeViewModel();
+    model.trendPoints.push_back(
+        {"2026-04-12", 0, makeUtcTime(2026, 4, 12), makeUtcTime(2026, 4, 12, 9, 30), "Unknown"});
+    presenter.updateViewModel(model);
+    CHECK(presenter.getTrendSummaryForTesting() == "3 records in the selected range");
+    CHECK(presenter.getTrendDetailTextForTesting().find("No recorded count for this interval.") != std::string::npos);
+    REQUIRE(presenter.selectTrendBucketForTesting(0));
+    CHECK(presenter.getTrendDetailTextForTesting().find("2 records. Source: OpenAI Codex-local.") != std::string::npos);
 
-    const std::string trendSummary = presenter.getTrendSummaryForTesting();
-    CHECK(trendSummary.find("Avg: 1 per point.") != std::string::npos);
-    CHECK(trendSummary.find("Low: 2026-04-11 (1).") != std::string::npos);
-    CHECK(trendSummary.find("Latest: 2026-04-11 (1), down 1 vs previous point.") != std::string::npos);
-
-    presenter.shutdown();
+    model.trendPoints.push_back(
+        {"2026-04-13", 0, makeUtcTime(2026, 4, 13), makeUtcTime(2026, 4, 13, 9, 30), "Unknown"});
+    presenter.updateViewModel(model);
+    CHECK(presenter.getTrendDetailTextForTesting().find("2026-04-10 00:00") != std::string::npos);
 }
 
-TEST_CASE("AnalysisPresenter surfaces Codex throughput in overview and trend text", "[analysis][presenter][analysis_presenter][codex]") {
+TEST_CASE("AnalysisPresenter totals the hourly buckets shown in the activity chart",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
-
     AnalysisPresenter presenter;
     REQUIRE(presenter.init(parent.get()));
 
-    AnalysisViewModel model = makeViewModel();
+    auto model = makeViewModel();
+    model.trendBucketGranularity = AnalysisTrendBucketGranularity::Hourly;
+    model.dailySummaries = {{"2026-04-10", 1, "Imported", {}}};
+    model.trendPoints = {{"04-10 09:00", 1, makeUtcTime(2026, 4, 10, 9), makeUtcTime(2026, 4, 10, 9, 59), "Imported"},
+                         {"04-10 10:00", 1, makeUtcTime(2026, 4, 10, 10), makeUtcTime(2026, 4, 10, 10, 59), "Local"}};
+    presenter.updateViewModel(model);
+
+    CHECK(presenter.getTrendSummaryForTesting() == "2 records in the selected range");
+}
+
+TEST_CASE("AnalysisPresenter separates recent Codex rates from selected activity counts",
+          "[analysis][presenter][analysis_presenter][codex]") {
+    ScopedParentWindow parent;
+    REQUIRE(parent.get() != nullptr);
+    AnalysisPresenter presenter;
+    REQUIRE(presenter.init(parent.get()));
+
+    auto model = makeViewModel();
     model.codexThroughput.hasData = true;
     model.codexThroughput.tokensPerMinute5m = 60.0;
     model.codexThroughput.promptsPerMinute5m = 0.4;
     model.codexThroughput.tokensPerMinute30m = 9.8;
     model.codexThroughput.promptsPerMinute30m = 0.7;
     model.codexThroughput.confidenceLabel = "LocalExact";
-
     presenter.updateViewModel(model);
 
-    const std::string overviewStats = presenter.getOverviewStatsForTesting();
-    CHECK(overviewStats.find("Codex throughput: 60 tokens/min and 0.4 prompts/min over 5m") != std::string::npos);
-    CHECK(overviewStats.find("(LocalExact)") != std::string::npos);
-
-    const std::string trendSummary = presenter.getTrendSummaryForTesting();
-    CHECK(trendSummary.find("Codex throughput (5m): 60 tokens/min, 0.4 prompts/min") != std::string::npos);
-    CHECK(trendSummary.find("Codex throughput (30m): 9.8 tokens/min, 0.7 prompts/min") != std::string::npos);
-
-    presenter.shutdown();
+    CHECK(presenter.getTrendSummaryForTesting() == "3 records in the selected range");
+    selectPage(parent.get(), 2);
+    const auto recent = presenter.getCodexTextForTesting();
+    CHECK(recent.find("Fixed windows ending at the last refresh") != std::string::npos);
+    CHECK(recent.find("5 min: 60 tokens/min, 0.4 prompts/min.") != std::string::npos);
+    CHECK(recent.find("30 min: 9.8 tokens/min, 0.7 prompts/min.") != std::string::npos);
 }
 
-TEST_CASE("AnalysisPresenter surfaces scoped quota trend low-water and reset hints", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter reports the quota low without inventing its timestamp",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
-
     AnalysisPresenter presenter;
     REQUIRE(presenter.init(parent.get()));
 
-    presenter.updateViewModel(makeQuotaTrendViewModel());
+    auto model = makeQuotaTrendViewModel();
+    model.quotaTrendSeries.front().lowWaterRemainingPercentage = 28.0;
+    presenter.updateViewModel(model);
+    selectPage(parent.get(), 1);
+    CHECK(presenter.getTrendSummaryForTesting() ==
+          "Latest in range: 95% (950 of 1,000 requests) remaining. Lowest recorded: 28%. 1 recorded reset.");
+    CHECK(presenter.getTrendDetailTextForTesting().find("Recorded reset.") != std::string::npos);
 
-    const std::string trendSummary = presenter.getTrendSummaryForTesting();
-    CHECK(trendSummary.find("Quota snapshot: OpenAI 5h at 95% remaining (950 / 1,000).") != std::string::npos);
-    CHECK(trendSummary.find("Low-water: 41% at 04-10 14:00.") != std::string::npos);
-    CHECK(trendSummary.find("Resets: 1.") != std::string::npos);
-
-    presenter.shutdown();
+    auto& latest = model.quotaTrendSeries.front().points.back();
+    latest.dailyRollup = true;
+    presenter.updateViewModel(model);
+    const auto detail = presenter.getTrendDetailTextForTesting();
+    CHECK(detail.find("remaining at the last capture") != std::string::npos);
+    CHECK(detail.find("Reset recorded that day") != std::string::npos);
+    CHECK(detail.find("Reconciled capture recorded that day") != std::string::npos);
+    CHECK(detail.find("Reconciled sample") == std::string::npos);
 }
 
-TEST_CASE("AnalysisPresenter lets the user switch between scoped quota trend series", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter keeps quota series units distinct", "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
-
     AnalysisPresenter presenter;
     REQUIRE(presenter.init(parent.get()));
 
     presenter.updateViewModel(makeMultiQuotaTrendViewModel());
-
-    CHECK(presenter.getQuotaSeriesOptionsForTesting() == std::vector<std::string>{
-        "OpenAI 5h",
-        "MiniMax 1d"
-    });
-    CHECK(presenter.getTrendSummaryForTesting().find("Quota snapshot: OpenAI 5h at 95% remaining") != std::string::npos);
-
+    selectPage(parent.get(), 1);
+    CHECK(presenter.getQuotaSeriesOptionsForTesting() == std::vector<std::string>{"OpenAI 5h", "MiniMax 1d"});
+    CHECK(presenter.getTrendSummaryForTesting().find("950 of 1,000 requests") != std::string::npos);
     REQUIRE(presenter.selectQuotaSeriesForTesting("minimax-plan|tokens|1d"));
-    CHECK(presenter.getTrendSummaryForTesting().find("Quota snapshot: MiniMax 1d at 52% remaining") != std::string::npos);
-    CHECK(presenter.getTrendSummaryForTesting().find("Low-water: 52% at 04-11.") != std::string::npos);
-
-    presenter.shutdown();
+    CHECK(presenter.getTrendSummaryForTesting().find("5,200 of 10,000 tokens") != std::string::npos);
+    CHECK(presenter.getTrendSummaryForTesting().find("Lowest recorded: 52%.") != std::string::npos);
 }
 
-TEST_CASE("AnalysisPresenter lays out the quota selector when an open view gains series",
+TEST_CASE("AnalysisPresenter lays out the quota selector when a selected account gains history",
           "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
     ShowWindow(parent.get(), SW_SHOWNA);
-
     AnalysisPresenter presenter;
     REQUIRE(presenter.init(parent.get()));
     presenter.updateViewModel(makeViewModel());
     presenter.layout(RECT{0, 0, 760, 520});
+    selectPage(parent.get(), 1);
 
-    const HWND selector = GetDlgItem(parent.get(), 2107);
+    const HWND selector = findDescendant(parent.get(), 2107);
     REQUIRE(selector != nullptr);
     CHECK_FALSE(IsWindowVisible(selector));
+    CHECK(presenter.getTrendSummaryForTesting() ==
+          "No quota samples were recorded for this account in the selected range.");
 
     presenter.updateViewModel(makeMultiQuotaTrendViewModel());
-    REQUIRE(presenter.jumpToSectionForTesting("trend"));
     REQUIRE(IsWindowVisible(selector));
     REQUIRE(IsWindowEnabled(selector));
     const RECT trend = presenter.getSectionBoundsForTesting("trend");
@@ -382,133 +382,104 @@ TEST_CASE("AnalysisPresenter lays out the quota selector when an open view gains
     CHECK(bounds.right <= trend.right);
     CHECK(bounds.top > trend.top);
     CHECK(bounds.bottom < trend.bottom);
-    REQUIRE(presenter.selectQuotaSeriesForTesting("minimax-plan|tokens|1d"));
 
     presenter.updateViewModel(makeQuotaTrendViewModel());
-    CHECK_FALSE(IsWindowVisible(selector));
-    CHECK(presenter.getTrendSummaryForTesting().find("OpenAI 5h") != std::string::npos);
+    CHECK(IsWindowVisible(selector));
+    CHECK(presenter.getTrendSummaryForTesting().find("95%") != std::string::npos);
 }
 
-TEST_CASE("AnalysisPresenter exposes trend comparison and drill-down detail text", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter exposes per-sample quota details and scope-aware empty states",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
-
     AnalysisPresenter presenter;
     REQUIRE(presenter.init(parent.get()));
 
     presenter.updateViewModel(makeMultiQuotaTrendViewModel());
-
-    const std::string comparison = presenter.getTrendComparisonTextForTesting();
-    CHECK(comparison.find("Series comparison:") != std::string::npos);
-    CHECK(comparison.find("OpenAI 5h") != std::string::npos);
-    CHECK(comparison.find("MiniMax 1d") != std::string::npos);
-
-    const std::string defaultDetail = presenter.getTrendDetailTextForTesting();
-    CHECK(defaultDetail.find("OpenAI 5h") != std::string::npos);
-    CHECK(defaultDetail.find("Remaining 95%") != std::string::npos);
-
+    selectPage(parent.get(), 1);
+    const auto comparison = presenter.getTrendComparisonTextForTesting();
+    CHECK(comparison.find("OpenAI 5h: 95% (950 of 1,000 requests) remaining on 2026-04-10 19:00 UTC") !=
+          std::string::npos);
+    CHECK(comparison.find("MiniMax 1d: 52% (5,200 of 10,000 tokens) remaining on 2026-04-11 00:00 UTC") !=
+          std::string::npos);
     REQUIRE(presenter.selectQuotaTrendPointForTesting(1));
-    const std::string selectedQuotaDetail = presenter.getTrendDetailTextForTesting();
-    CHECK(selectedQuotaDetail.find("OpenAI 5h") != std::string::npos);
-    CHECK(selectedQuotaDetail.find("Remaining 41%") != std::string::npos);
+    CHECK(presenter.getTrendDetailTextForTesting().find("2026-04-10 14:00 UTC: 41%") != std::string::npos);
 
-    REQUIRE(presenter.selectTrendBucketForTesting(0));
-    const std::string selectedActivityDetail = presenter.getTrendDetailTextForTesting();
-    CHECK(selectedActivityDetail.find("2026-04-10") != std::string::npos);
-    CHECK(selectedActivityDetail.find("Count 2") != std::string::npos);
-
-    presenter.shutdown();
+    auto model = makeViewModel();
+    model.scope = {};
+    presenter.updateViewModel(model);
+    CHECK(presenter.getTrendSummaryForTesting() == "Choose a provider and an account to see recorded quota history.");
 }
 
-TEST_CASE("AnalysisPresenter stacks sections cleanly in a narrow analysis window", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter stacks activity detail tables in a narrow window",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
-
     AnalysisPresenter presenter;
     REQUIRE(presenter.init(parent.get()));
 
     presenter.updateViewModel(makeViewModel());
     presenter.layout(RECT{0, 0, 760, 980});
-
-    const RECT summary = presenter.getSectionBoundsForTesting("summary");
     const RECT trend = presenter.getSectionBoundsForTesting("trend");
-    const RECT status = presenter.getSectionBoundsForTesting("status");
+    const RECT daily = presenter.getSectionBoundsForTesting("daily");
     const RECT provider = presenter.getSectionBoundsForTesting("provider");
     const RECT account = presenter.getSectionBoundsForTesting("account");
-    const RECT daily = presenter.getSectionBoundsForTesting("daily");
-    const RECT provenance = presenter.getSectionBoundsForTesting("provenance");
-
-    CHECK(trend.left == summary.left);
-    CHECK(status.left == summary.left);
-    CHECK(provider.left == summary.left);
-    CHECK(account.left == summary.left);
-    CHECK(daily.left == summary.left);
-    CHECK(provenance.left == summary.left);
-
-    CHECK(trend.top >= summary.bottom);
-    CHECK(status.top >= trend.bottom);
-    CHECK(provider.top >= status.bottom);
+    CHECK(daily.left == trend.left);
+    CHECK(provider.left == trend.left);
+    CHECK(account.left == trend.left);
+    CHECK(daily.top >= trend.bottom);
+    CHECK(provider.top >= daily.bottom);
     CHECK(account.top >= provider.bottom);
-    CHECK(daily.top >= account.bottom);
-    CHECK(provenance.top >= daily.bottom);
-    CHECK(presenter.getContentHeightForTesting() >= presenter.getViewportHeightForTesting());
-
-    presenter.shutdown();
 }
 
-TEST_CASE("AnalysisPresenter uses vertical scrolling instead of over-compressing small windows", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter scrolls activity details with scope controls fixed",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
-
     AnalysisPresenter presenter;
     REQUIRE(presenter.init(parent.get()));
 
-    presenter.updateViewModel(makeMultiQuotaTrendViewModel());
+    presenter.updateViewModel(makeViewModel());
     presenter.layout(RECT{0, 0, 760, 520});
-
-    CHECK(presenter.getContentHeightForTesting() > presenter.getViewportHeightForTesting());
-    CHECK(presenter.getScrollOffsetForTesting() == 0);
-
-    const RECT provenanceBefore = presenter.getSectionBoundsForTesting("provenance");
+    REQUIRE(presenter.getContentHeightForTesting() > presenter.getViewportHeightForTesting());
+    const RECT scopeBefore = presenter.getSectionBoundsForTesting("scope");
+    const RECT dailyBefore = presenter.getSectionBoundsForTesting("daily");
     REQUIRE(presenter.handleVScroll(SB_PAGEDOWN));
-    CHECK(presenter.getScrollOffsetForTesting() > 0);
-
-    const RECT provenanceAfter = presenter.getSectionBoundsForTesting("provenance");
-    CHECK(provenanceBefore.top - provenanceAfter.top == presenter.getScrollOffsetForTesting());
-    CHECK(provenanceBefore.bottom - provenanceAfter.bottom == presenter.getScrollOffsetForTesting());
+    const RECT dailyAfter = presenter.getSectionBoundsForTesting("daily");
+    const RECT scopeAfter = presenter.getSectionBoundsForTesting("scope");
+    CHECK(EqualRect(&scopeBefore, &scopeAfter));
+    CHECK(dailyBefore.top - dailyAfter.top == presenter.getScrollOffsetForTesting());
 
     REQUIRE(presenter.handleVScroll(SB_BOTTOM));
     CHECK(presenter.getScrollOffsetForTesting() ==
           presenter.getContentHeightForTesting() - presenter.getViewportHeightForTesting());
     REQUIRE(presenter.handleVScroll(SB_TOP));
-    const RECT provenanceRestored = presenter.getSectionBoundsForTesting("provenance");
-    CHECK(EqualRect(&provenanceRestored, &provenanceBefore));
-
-    presenter.shutdown();
+    const RECT dailyRestored = presenter.getSectionBoundsForTesting("daily");
+    CHECK(EqualRect(&dailyBefore, &dailyRestored));
 }
 
-TEST_CASE("AnalysisPresenter workspace navigation jumps to later sections in the dedicated window", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter changes pages without hiding the selected filters",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
-
+    ShowWindow(parent.get(), SW_SHOWNA);
     AnalysisPresenter presenter;
     REQUIRE(presenter.init(parent.get()));
-
     presenter.updateViewModel(makeMultiQuotaTrendViewModel());
     presenter.layout(RECT{0, 0, 760, 520});
 
-    const RECT dailyBefore = presenter.getSectionBoundsForTesting("daily");
-    REQUIRE(presenter.jumpToSectionForTesting("daily"));
-
-    CHECK(presenter.getScrollOffsetForTesting() > 0);
-    const RECT dailyAfter = presenter.getSectionBoundsForTesting("daily");
-    CHECK(dailyAfter.top < dailyBefore.top);
-    CHECK(dailyAfter.top <= presenter.getViewportHeightForTesting() / 3);
-
-    presenter.shutdown();
+    REQUIRE(presenter.handleVScroll(SB_PAGEDOWN));
+    selectPage(parent.get(), 1);
+    CHECK(presenter.getScrollOffsetForTesting() == 0);
+    CHECK(presenter.getTrendSummaryForTesting().find("remaining") != std::string::npos);
+    CHECK(IsWindowVisible(GetDlgItem(parent.get(), 2101)));
+    selectPage(parent.get(), 2);
+    CHECK_FALSE(IsWindowVisible(findDescendant(parent.get(), 2107)));
+    CHECK(IsWindowVisible(GetDlgItem(parent.get(), 2101)));
 }
 
-TEST_CASE("AnalysisPresenter debounces custom date edits until commit notifications", "[analysis][presenter][analysis_presenter]") {
+TEST_CASE("AnalysisPresenter debounces custom date edits until commit notifications",
+          "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
 
@@ -519,9 +490,7 @@ TEST_CASE("AnalysisPresenter debounces custom date edits until commit notificati
     presenter.updateViewModel(model);
 
     std::vector<AnalysisScopeState> scopes;
-    presenter.setScopeChangedCallback([&](const AnalysisScopeState& state) {
-        scopes.push_back(state);
-    });
+    presenter.setScopeChangedCallback([&](const AnalysisScopeState& state) { scopes.push_back(state); });
 
     presenter.setCustomRangeTextForTesting("2026-04-01", "2026-04-05");
     REQUIRE(presenter.handleCommand(2104, EN_CHANGE));
@@ -575,4 +544,55 @@ TEST_CASE("AnalysisPresenter keeps custom date input through a refresh and its d
     model.scope = scopes.front();
     presenter.updateViewModel(model);
     CHECK(presenter.areScopeInputsEnabledForTesting());
+}
+
+TEST_CASE("AnalysisPresenter waits for the selected scope when an older refresh arrives",
+          "[analysis][presenter][analysis_presenter]") {
+    ScopedParentWindow parent;
+    REQUIRE(parent.get() != nullptr);
+    AnalysisPresenter presenter;
+    REQUIRE(presenter.init(parent.get()));
+
+    auto model = makeViewModel();
+    model.requestedScope = model.scope;
+    presenter.updateViewModel(model);
+    std::optional<AnalysisScopeState> requested;
+    presenter.setScopeChangedCallback([&](const AnalysisScopeState& state) {
+        requested = state;
+        presenter.setInteractionPending(true);
+    });
+    REQUIRE(presenter.selectProviderForTesting("minimax"));
+    REQUIRE(requested.has_value());
+
+    presenter.updateViewModel(model);
+    CHECK_FALSE(presenter.areScopeInputsEnabledForTesting());
+
+    model.scope = *requested;
+    model.requestedScope = *requested;
+    model.scopeLabel = "MiniMax / All Accounts / Last 7 Days";
+    presenter.updateViewModel(model);
+    CHECK(presenter.areScopeInputsEnabledForTesting());
+    CHECK(presenter.getScopeLabelForTesting() == "Active filters: MiniMax / All Accounts / Last 7 Days");
+}
+
+TEST_CASE("AnalysisPresenter keeps invalid custom dates out of the saved scope",
+          "[analysis][presenter][analysis_presenter]") {
+    ScopedParentWindow parent;
+    REQUIRE(parent.get() != nullptr);
+    AnalysisPresenter presenter;
+    REQUIRE(presenter.init(parent.get()));
+    presenter.updateViewModel(makeViewModel());
+    int updates = 0;
+    presenter.setScopeChangedCallback([&](const AnalysisScopeState&) { ++updates; });
+
+    presenter.setCustomRangeTextForTesting("2026-04-31", "2026-05-02");
+    REQUIRE(presenter.handleCommand(2104, EN_CHANGE));
+    REQUIRE(presenter.handleCommand(2104, EN_KILLFOCUS));
+    CHECK(updates == 0);
+    CHECK(presenter.getCustomDateHintForTesting().find("Enter valid dates") != std::string::npos);
+
+    presenter.setCustomRangeTextForTesting("2026-05-01", "2026-05-02");
+    REQUIRE(presenter.handleCommand(2104, EN_CHANGE));
+    REQUIRE(presenter.handleCommand(2104, EN_KILLFOCUS));
+    CHECK(updates == 1);
 }
