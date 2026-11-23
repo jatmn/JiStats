@@ -3563,6 +3563,50 @@ TEST_CASE("AppController uses persisted MiniMax quota at startup until an explic
     app.shutdown();
 }
 
+TEST_CASE("AppController retains only matching MiniMax quota after a failed startup refresh",
+          "[app][runtime][quota_retention]") {
+    requireSqlite();
+    const std::string plan =
+        GENERATE("minimax_subscription_coding_plan:interval", "minimax_subscription_token_plan:interval", "minimax");
+    CAPTURE(plan);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, true, false, false);
+    const auto snapshotTime = std::time(nullptr) - 180;
+    seedPersistedQuotaSnapshot(dbPath.path(), "minimax", "acct-minimax-startup", "MiniMax Startup Account", plan,
+                               "MiniMax", "interval", snapshotTime, 420, 1000, 580);
+
+    auto failure = makeFailedQuotaResponse("network unreachable");
+    failure.providerSurface = "minimax_subscription_coding_plan";
+    auto provider = std::make_shared<ControlledQuotaProviderAdapter>("minimax", "MiniMax", failure);
+    auto manager = std::make_shared<ProviderManager>();
+    manager->addProvider(provider);
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(manager);
+    REQUIRE(app.init());
+    CHECK(provider->getQuotaFetchCount() == 0);
+
+    app.refreshRuntimeForTesting();
+    const auto refreshed = app.getDashboardViewModelForTesting();
+    const auto* status = findProviderStatus(refreshed, "minimax");
+    REQUIRE(status != nullptr);
+    CHECK(status->state == ProviderState::Offline);
+    CHECK(status->quotas.empty());
+    if (plan == "minimax_subscription_coding_plan:interval") {
+        REQUIRE(status->lastKnownQuota.has_value());
+        CHECK(parseRuntimeTimestamp(status->lastKnownQuota->lastSyncTime) == snapshotTime);
+        REQUIRE(status->lastKnownQuota->quotas.size() == 1);
+        CHECK(status->lastKnownQuota->quotas.front().remaining == 580);
+        CHECK(status->lastKnownQuota->quotas.front().providerSurface == failure.providerSurface);
+    } else {
+        CHECK_FALSE(status->lastKnownQuota.has_value());
+    }
+    app.shutdown();
+}
+
 TEST_CASE("AppController defers provider discovery until Settings opens after hydrated startup", "[app][shell][startup]") {
     requireSqlite();
 

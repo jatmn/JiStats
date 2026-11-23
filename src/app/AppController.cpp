@@ -2691,22 +2691,24 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
             providerIt = std::prev(viewModel.providers.end());
         }
 
+        const auto planKey = result.getString(row, 3);
         const long long used = result.getInt64(row, 6);
         const long long limit = result.getInt64(row, 7);
         const long long remaining = result.getInt64(row, 8);
-        QuotaInfo quota = makeQuota(
-            quotaPlanLabelForProvider(
-                providerKey,
-                "",
-                result.getString(row, 3),
-                result.getString(row, 4)),
-            result.getString(row, 5),
-            used,
-            limit,
-            result.getString(row, 9),
-            remaining);
+        QuotaInfo quota = makeQuota(quotaPlanLabelForProvider(providerKey, "", planKey, result.getString(row, 4)),
+                                    result.getString(row, 5), used, limit, result.getString(row, 9), remaining);
         if (providerKey == "grok" || providerKey == "cursor") {
             quota.providerSurface = providerKey + "_subscription_api";
+            const auto resetTime = parseRuntimeTimestamp(result.getString(row, 10));
+            quota.windowResetAt = resetTime > snapshotTime ? resetTime : 0;
+        } else if (providerKey == "minimax") {
+            // Runtime plan keys store the source ahead of the optional window suffix.
+            const auto planSource = planKey.substr(0, planKey.find(':'));
+            if (planSource == "minimax_subscription_coding_plan" || planSource == "coding_plan") {
+                quota.providerSurface = "minimax_subscription_coding_plan";
+            } else if (planSource == "minimax_subscription_token_plan" || planSource == "token_plan") {
+                quota.providerSurface = "minimax_subscription_token_plan";
+            }
             const auto resetTime = parseRuntimeTimestamp(result.getString(row, 10));
             quota.windowResetAt = resetTime > snapshotTime ? resetTime : 0;
         }
@@ -2877,22 +2879,20 @@ void retainLastKnownDashboardQuota(DashboardViewModel& next, const DashboardView
         if (prior == previous.providers.end()) {
             continue;
         }
-        if (provider.providerKey == "minimax" &&
-            (provider.quotaSource.empty() || provider.quotaSource != prior->quotaSource)) {
-            continue;
-        }
-        if (prior->lastKnownQuota) {
-            provider.lastKnownQuota = prior->lastKnownQuota;
-            continue;
-        }
-        if (prior->state == ProviderState::Sample || prior->lastSyncTime.empty()) {
+        if (prior->state == ProviderState::Sample) {
             continue;
         }
 
+        const auto& previousQuota = prior->lastKnownQuota ? prior->lastKnownQuota->quotas : prior->quotas;
         LastKnownQuotaReading reading;
-        reading.lastSyncTime = prior->lastSyncTime;
-        for (const auto& quota : prior->quotas) {
-            if (isSubscriptionQuotaReading(*prior, quota)) {
+        reading.lastSyncTime = prior->lastKnownQuota ? prior->lastKnownQuota->lastSyncTime : prior->lastSyncTime;
+        if (reading.lastSyncTime.empty()) {
+            continue;
+        }
+        for (const auto& quota : previousQuota) {
+            const bool matchingPlan = provider.providerKey != "minimax" ||
+                                      (!provider.quotaSource.empty() && quota.providerSurface == provider.quotaSource);
+            if (matchingPlan && isSubscriptionQuotaReading(*prior, quota)) {
                 reading.quotas.push_back(quota);
             }
         }

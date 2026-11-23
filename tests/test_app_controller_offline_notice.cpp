@@ -538,6 +538,9 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     REQUIRE(app.clickDashboardOfflineDismissForTesting());
     REQUIRE(waitForCondition([&app]() { return !app.isDashboardOfflineNoticeVisibleForTesting(); },
                              std::chrono::seconds(5)));
+    // The offline startup also queues one background refresh. Let it finish before measuring the next check.
+    REQUIRE(waitForCondition([&]() { return kimi->getCompletedQuotaFetchCount() >= 2; }, std::chrono::seconds(5)));
+    app.refreshRuntimeForTesting();
     const auto dismissed = app.getConnectivityStateForTesting("kimi");
     REQUIRE(dismissed.has_value());
     REQUIRE(dismissed->noticeDismissedAt > 0);
