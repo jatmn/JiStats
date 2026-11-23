@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace JiStats {
@@ -286,6 +287,11 @@ struct DashboardViewModel {
     std::string offlineNoticeMessage;
 };
 
+struct LastKnownQuotaReading {
+    std::string lastSyncTime;
+    std::vector<QuotaInfo> quotas;
+};
+
 // Provider status
 struct ProviderStatus {
     std::string providerKey;
@@ -295,6 +301,9 @@ struct ProviderStatus {
     ProviderState state = ProviderState::Sample; // Explicit state instead of just isConnected
     std::string lastSyncTime;  // ISO8601 timestamp of last successful sync
     std::vector<QuotaInfo> quotas;
+    // Dashboard-only subscription readings retained during an outage.
+    std::optional<LastKnownQuotaReading> lastKnownQuota;
+    bool contributesToRuntimeState = true;
     bool locallyDetected = false;  // Whether local artifacts were found at startup
     std::string detectionMessage;  // Human-readable discovery status
 };

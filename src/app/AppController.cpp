@@ -2798,7 +2798,7 @@ void applyRuntimeStateToViewModel(DashboardViewModel& viewModel) {
     std::vector<ProviderState> states;
     states.reserve(viewModel.providers.size());
     for (const auto& provider : viewModel.providers) {
-        if (provider.isEnabled) {
+        if (provider.isEnabled && provider.contributesToRuntimeState) {
             states.push_back(provider.state);
         }
     }
@@ -2842,7 +2842,7 @@ bool isLimitlessLocalActivityQuota(const ProviderStatus& provider, const QuotaIn
         quota.providerSurface == "claude_code_local_stats";
 }
 
-bool isTaskbarSubscriptionQuota(const ProviderStatus& provider, const QuotaInfo& quota) {
+bool isSubscriptionQuotaReading(const ProviderStatus& provider, const QuotaInfo& quota) {
     if (quota.limit <= 0) {
         return false;
     }
@@ -2861,6 +2861,41 @@ bool isTaskbarSubscriptionQuota(const ProviderStatus& provider, const QuotaInfo&
     }
 
     return false;
+}
+
+void retainLastKnownDashboardQuota(DashboardViewModel& next, const DashboardViewModel& previous) {
+    for (auto& provider : next.providers) {
+        if (!provider.isEnabled || provider.state != ProviderState::Offline || !provider.quotas.empty()) {
+            continue;
+        }
+
+        const auto prior = std::find_if(
+            previous.providers.begin(), previous.providers.end(), [&provider](const ProviderStatus& candidate) {
+                return candidate.isEnabled && candidate.providerKey == provider.providerKey &&
+                       candidate.accountId == provider.accountId;
+            });
+        if (prior == previous.providers.end()) {
+            continue;
+        }
+        if (prior->lastKnownQuota) {
+            provider.lastKnownQuota = prior->lastKnownQuota;
+            continue;
+        }
+        if (prior->state == ProviderState::Sample || prior->lastSyncTime.empty()) {
+            continue;
+        }
+
+        LastKnownQuotaReading reading;
+        reading.lastSyncTime = prior->lastSyncTime;
+        for (const auto& quota : prior->quotas) {
+            if (isSubscriptionQuotaReading(*prior, quota)) {
+                reading.quotas.push_back(quota);
+            }
+        }
+        if (!reading.quotas.empty()) {
+            provider.lastKnownQuota = std::move(reading);
+        }
+    }
 }
 
 const QuotaInfo* findWeeklyQuotaRow(
@@ -3011,7 +3046,7 @@ std::vector<TaskbarMetrics> buildSubscriptionQuotaTaskbarMetricsFromViewModel(
 
         const auto* primaryQuota = static_cast<const QuotaInfo*>(nullptr);
         for (const auto& quotaCandidate : provider.quotas) {
-            if (!isTaskbarSubscriptionQuota(provider, quotaCandidate)) {
+            if (!isSubscriptionQuotaReading(provider, quotaCandidate)) {
                 continue;
             }
             if (primaryQuota == nullptr || quotaCandidate.windowType == "interval") {
@@ -3029,7 +3064,7 @@ std::vector<TaskbarMetrics> buildSubscriptionQuotaTaskbarMetricsFromViewModel(
         const auto* secondaryQuota = static_cast<const QuotaInfo*>(nullptr);
         if (provider.providerKey == "openai") {
             secondaryQuota = findWeeklyQuotaRow(provider, primaryQuota);
-            if (secondaryQuota != nullptr && !isTaskbarSubscriptionQuota(provider, *secondaryQuota)) {
+            if (secondaryQuota != nullptr && !isSubscriptionQuotaReading(provider, *secondaryQuota)) {
                 secondaryQuota = nullptr;
             }
         }
@@ -3714,15 +3749,15 @@ DashboardViewModel buildDashboardViewModelFromResolvedProviderData(
         // Add quota info if we have a matching response
         if (quotaIndex < quotaResponses.size()) {
             const auto& quota = quotaResponses[quotaIndex];
-            if (isKnownLocalAvailabilityError(status.providerKey, quota.error)) {
-                status.state = ProviderState::Sample;
+            const bool missingLocalPrerequisite = isKnownLocalAvailabilityError(status.providerKey, quota.error);
+            if (missingLocalPrerequisite || shouldTreatAsSuppressedLocalKimiQuota(status.providerKey, quota)) {
+                if (status.providerKey == "kimi") {
+                    status.state = ProviderState::Sample;
+                    // The Dashboard row is useful even when no quota result can inform overall runtime status.
+                    status.contributesToRuntimeState = !missingLocalPrerequisite;
+                    viewModel.providers.push_back(std::move(status));
+                }
                 ++quotaIndex;
-                continue;
-            }
-            if (shouldTreatAsSuppressedLocalKimiQuota(status.providerKey, quota)) {
-                status.state = ProviderState::Sample;
-                ++quotaIndex;
-                viewModel.providers.push_back(status);
                 continue;
             }
 
@@ -7019,6 +7054,7 @@ public:
         viewModel.preferences = preferences;
         ProviderConnectivityUpdates connectivityUpdates;
         applyRecoveryPersistenceCycle(viewModel, preferences, now, refresh, connectivityUpdates);
+        retainLastKnownDashboardQuota(viewModel, currentViewModel);
         applyPersistedActivitySummaries(viewModel, now);
         applyDashboardOperationalStatus(viewModel);
         if (shouldRefreshAnalysisSurface()) {

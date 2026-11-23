@@ -678,8 +678,8 @@ TEST_CASE("DashboardPresenter keeps all enabled quota accounts in Overview after
     CHECK(selected->percentage == 20);
     const auto last = findSummary(summaries, "OpenAI Subscription / openai.extra-2");
     REQUIRE(last.has_value());
-    CHECK(last->badge == "5-hour: 39% remaining");
-    CHECK(last->secondaryBadge == "7-day: 65% remaining");
+    CHECK(last->badge == "Primary window: 39% remaining");
+    CHECK(last->secondaryBadge == "Secondary window: 65% remaining");
     CHECK(last->detail.find("resets ") != std::string::npos);
     CHECK(findSummary(summaries, "MiniMax - Coding Plan").has_value());
     CHECK(findSummary(summaries, "Last 30 Minutes").has_value());

@@ -555,7 +555,10 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     app.applyDashboardPreferencesForTesting(preferences);
     const DashboardViewModel localOnly = app.getDashboardViewModelForTesting();
     CHECK(localOnly.runtimeState != RuntimeState::Offline);
-    CHECK(findProviderStatus(localOnly, "kimi") == nullptr);
+    const auto* localKimi = findProviderStatus(localOnly, "kimi");
+    REQUIRE(localKimi != nullptr);
+    CHECK(localKimi->state == ProviderState::Sample);
+    CHECK(localKimi->quotas.empty());
     const auto* localClaude = findProviderStatus(localOnly, "claude_code");
     REQUIRE(localClaude != nullptr);
     CHECK(localClaude->state == ProviderState::Live);

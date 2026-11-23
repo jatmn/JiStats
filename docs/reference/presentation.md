@@ -2,7 +2,7 @@
 
 ## Dashboard and tray
 
-**Overview** starts with subscription quota for all enabled accounts. Each row shows the percentage remaining for each available window, its local reset time, and when the quota reading was last updated. Paired windows have separate tracks. Stale and offline accounts keep their last known values alongside their current status. If a provider gives no usable reading, its row says **Quota unavailable**. Hover over a row for provenance, confidence, and supporting counts.
+**Overview** starts with subscription quota for all enabled accounts. Each row shows the percentage remaining for each available window, its local reset time, and when the quota reading was last updated. Paired windows have separate tracks. Stale and offline accounts keep their last known values alongside their current status. If a provider gives no usable reading, its row says **Quota unavailable**. For Kimi, this includes enabling tracking without quota credentials. Hover over a row for provenance, confidence, and supporting counts.
 
 The **History** button opens or brings forward the dedicated Analysis window. **Settings** opens provider and application preferences. Both stay available while scrolling. **Provider Details** shows used percentages, supporting quota counts, and source information. Selecting a row remembers the account in that table. Use Left and Right to switch views when the tabs have focus. The tray stays available while the dashboard is closed and carries runtime status and offline actions.
 

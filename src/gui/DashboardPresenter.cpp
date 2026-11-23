@@ -662,6 +662,14 @@ std::string providerQuotaDisplayLabel(
     return provider.displayName;
 }
 
+const std::string& dashboardQuotaTime(const ProviderStatus& provider) {
+    return provider.lastKnownQuota ? provider.lastKnownQuota->lastSyncTime : provider.lastSyncTime;
+}
+
+const std::vector<QuotaInfo>& dashboardQuotas(const ProviderStatus& provider) {
+    return provider.lastKnownQuota ? provider.lastKnownQuota->quotas : provider.quotas;
+}
+
 std::vector<ProviderQuotaRowData> buildProviderQuotaRows(const DashboardViewModel& model) {
     std::vector<ProviderQuotaRowData> rows;
     std::map<std::string, int> providerCounts;
@@ -673,12 +681,12 @@ std::vector<ProviderQuotaRowData> buildProviderQuotaRows(const DashboardViewMode
         const std::string providerState = provider.isEnabled
             ? providerStateLabel(provider.state)
             : "Disabled";
-        const std::string baseLastSync = provider.lastSyncTime.empty()
-            ? "Pending"
-            : formatRuntimeTimeAgo(provider.lastSyncTime);
+        const auto& lastSync = dashboardQuotaTime(provider);
+        const std::string baseLastSync = lastSync.empty() ? "Pending" : formatRuntimeTimeAgo(lastSync);
         const std::string providerLabel = providerQuotaDisplayLabel(provider, providerCounts);
 
-        if (provider.quotas.empty()) {
+        const auto& quotas = dashboardQuotas(provider);
+        if (quotas.empty()) {
             rows.push_back(ProviderQuotaRowData{{providerLabel, providerState,
                                                  (provider.providerKey == "grok" || provider.providerKey == "cursor") &&
                                                          !provider.detectionMessage.empty()
@@ -690,23 +698,13 @@ std::vector<ProviderQuotaRowData> buildProviderQuotaRows(const DashboardViewMode
             continue;
         }
 
-        for (const auto& quota : provider.quotas) {
-            const std::string lastSync = baseLastSync + " (" + quotaSyncSourceLabel(quota) + ")";
+        for (const auto& quota : quotas) {
+            const std::string reading = baseLastSync + " (" + quotaSyncSourceLabel(quota) + ")";
             rows.push_back(ProviderQuotaRowData{
-                {
-                    providerLabel,
-                    providerState,
-                    quotaSourceLabel(quota),
-                    quota.windowType,
-                    providerQuotaUsedValue(quota),
-                    providerQuotaLimitValue(quota),
-                    providerQuotaRemainingValue(quota),
-                    quota.confidenceTier,
-                    lastSync
-                },
+                {providerLabel, providerState, quotaSourceLabel(quota), quota.windowType, providerQuotaUsedValue(quota),
+                 providerQuotaLimitValue(quota), providerQuotaRemainingValue(quota), quota.confidenceTier, reading},
                 provider.providerKey,
-                provider.accountId
-            });
+                provider.accountId});
         }
     }
 
@@ -970,10 +968,12 @@ bool isSubscriptionQuota(const ProviderStatus& provider, const QuotaInfo& quota)
            isExternalSubscriptionQuota(quota) || quota.providerSurface.empty();
 }
 
-std::string quotaWindowLabel(const ProviderStatus& provider, const QuotaInfo& quota, const std::string& window) {
-    if (window == "interval" &&
-        (isOpenAISubscriptionQuota(provider, quota) || isKimiSubscriptionQuota(provider, quota))) {
-        return "5-hour";
+std::string quotaWindowLabel(const ProviderStatus& provider, const QuotaInfo& quota, const std::string& window,
+                             bool secondary = false) {
+    // Codex uses coarse types for several different reported durations.
+    if ((isOpenAISubscriptionQuota(provider, quota) && (window == "interval" || window == "weekly")) ||
+        (isKimiSubscriptionQuota(provider, quota) && window == "interval")) {
+        return secondary ? "Secondary window" : "Primary window";
     }
     if (window == "weekly") {
         return "7-day";
@@ -992,7 +992,7 @@ std::string quotaResetLabel(std::time_t reset) {
 }
 
 std::string quotaStatusLabel(const ProviderStatus& provider) {
-    const auto sync = parseRuntimeTimestamp(provider.lastSyncTime);
+    const auto sync = parseRuntimeTimestamp(dashboardQuotaTime(provider));
     if (sync <= 0) {
         return provider.state == ProviderState::Live ? "Update time unknown"
                                                      : providerStateLabel(provider.state) + " / Update time unknown";
@@ -1017,9 +1017,10 @@ std::vector<UsageProgressSummary> buildUsageProgressSummaries(const DashboardVie
         const std::string providerLabel = providerQuotaDisplayLabel(provider, providerCounts);
         const std::string accountSuffix = providerLabel.substr(provider.displayName.size());
         const size_t start = summaries.size();
-        for (const auto& quota : provider.quotas) {
+        const auto& quotas = dashboardQuotas(provider);
+        for (const auto& quota : quotas) {
             if (!isSubscriptionQuota(provider, quota) || quota.limit <= 0 ||
-                isStandaloneSecondaryQuotaRow(provider, quota, provider.quotas)) {
+                isStandaloneSecondaryQuotaRow(provider, quota, quotas)) {
                 continue;
             }
 
@@ -1044,8 +1045,8 @@ std::vector<UsageProgressSummary> buildUsageProgressSummaries(const DashboardVie
             if (isPairedSubscriptionQuotaSummary(provider, quota)) {
                 summary.secondaryPercentage =
                     static_cast<int>(std::clamp(quota.secondaryRemainingPercentage, 0.0, 100.0) + 0.5);
-                summary.secondaryOverlayText = quotaWindowLabel(provider, quota, quota.secondaryWindowType) + ": " +
-                                               formatPercentageLabel(summary.secondaryPercentage) + " remaining";
+                summary.secondaryOverlayText = quotaWindowLabel(provider, quota, quota.secondaryWindowType, true) +
+                                               ": " + formatPercentageLabel(summary.secondaryPercentage) + " remaining";
                 summary.secondaryResetText = quotaResetLabel(quota.secondaryWindowResetAt);
                 detail << " | Weekly " << formatPercentageLabel(quota.secondaryRemainingPercentage) << " remaining";
                 if (quota.secondaryWindowResetAt > 0) {
