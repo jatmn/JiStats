@@ -6,10 +6,6 @@ on:
   push:
     branches: [main]
 
-concurrency:
-  group: pullfrog-checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 
