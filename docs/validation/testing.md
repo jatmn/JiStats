@@ -25,6 +25,8 @@ For build-affecting pull requests to `main` or `release/**`, Linux runs the port
 
 Protected-branch pushes compare the previous and new tips. Documentation-only pushes can reuse a successful CI run on the previous tip of the same branch. A failed, pending or missing predecessor run, or an unreadable diff, triggers the Linux build and full Windows suite. Dispatch [CI](../../.github/workflows/ci.yml) to run both jobs on a selected branch regardless of the diff. Enable **Run eight additional offline notice passes to diagnose restart stalls** when investigating offline restart timing. CI retains the cross-built test executable for 30 days so a Windows job retry can reuse it.
 
+The Linux build restores compiler results seeded by pushes to the default branch. Both native and MinGW compilers use ccache in preprocessor mode. Each run reports compiler hits and misses and still links the binaries and executes the suites.
+
 ## Pull request lint
 
 The [Lint workflow](../../.github/workflows/lint.yml) checks changed first-party C and C++ lines under `src/`, `include/`, and `tests/` with LLVM 18 and `.clang-format`. It runs `actionlint` when workflows change.
