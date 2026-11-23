@@ -84,8 +84,57 @@ jobs:
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           echo "build=$build" >> "$GITHUB_OUTPUT"
 
+  portable:
+    name: Portable tests with bundled SQLite
+    needs: changes
+    if: >-
+      ${{ !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.result != 'success' || needs.changes.outputs.build != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NODIRECT: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          filter: blob:none
+          persist-credentials: false
+      - name: Install ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ccache
+          # GCC invokes separate assembler and compiler backends. Include their
+          # installed package versions even when the driver binary is unchanged.
+          dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' > "$RUNNER_TEMP/compiler-packages"
+          echo "CCACHE_EXTRAFILES=$RUNNER_TEMP/compiler-packages" >> "$GITHUB_ENV"
+      - name: Restore compiler results
+        id: compiler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: bench-dr-native-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: bench-dr-native-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Run portable tests with bundled SQLite
+        run: |
+          ccache --zero-stats
+          cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
+          cmake --build build-linux --parallel "$(nproc)"
+          ctest --test-dir build-linux --output-on-failure
+      - name: Report compiler cache hits and misses
+        run: ccache --show-stats --verbose
+      - name: Seed compiler results for pull requests
+        if: github.event_name == 'workflow_dispatch' && github.ref_name == 'bench/combined-ci-dr' && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
   linux-cross:
-    name: Linux tests and Windows cross-build
+    name: Windows cross-build
     needs: changes
     if: >-
       ${{ !cancelled() && (github.event_name != 'pull_request' ||
@@ -120,15 +169,10 @@ jobs:
           path: .ccache
           key: bench-dr-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           restore-keys: bench-dr-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
-      - name: Run portable tests with bundled SQLite
-        run: |
-          ccache --zero-stats
-          cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
-          cmake --build build-linux --parallel
-          ctest --test-dir build-linux --output-on-failure
       - name: Check the default build and enable the MiniMax CLI and tests
         shell: bash
         run: |
+          ccache --zero-stats
           cmake -S . -B build-mingw -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake \
             -DCMAKE_BUILD_TYPE=Debug
@@ -139,7 +183,7 @@ jobs:
           fi
           cmake -S . -B build-mingw -DJISTATS_BUILD_TESTS=ON -DJISTATS_BUILD_MINIMAX_CLI=ON
       - name: Build the app, MiniMax CLI, and tests
-        run: cmake --build build-mingw --parallel --target JiStats JiStatsMiniMaxCli JiStatsTests
+        run: cmake --build build-mingw --parallel "$(nproc)" --target JiStats JiStatsMiniMaxCli JiStatsTests
       - name: Report compiler cache hits and misses
         run: ccache --show-stats --verbose
       - name: Seed compiler results for pull requests
@@ -241,7 +285,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: always()
-    needs: [changes, linux-cross, windows-runtime]
+    needs: [changes, portable, linux-cross, windows-runtime]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -250,6 +294,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           DETECT: ${{ needs.changes.result }}
           BUILD: ${{ needs.changes.outputs.build }}
+          PORTABLE: ${{ needs.portable.result }}
           LINUX: ${{ needs.linux-cross.result }}
           WINDOWS: ${{ needs.windows-runtime.result }}
         run: |
@@ -258,9 +303,9 @@ jobs:
           if [[ $EVENT == pull_request ]]; then
             [[ $DETECT == success ]]
             if [[ $BUILD == false ]]; then
-              [[ $LINUX == skipped && $WINDOWS == skipped ]]
+              [[ $PORTABLE == skipped && $LINUX == skipped && $WINDOWS == skipped ]]
               exit
             fi
             [[ $BUILD == true ]]
           fi
-          [[ $LINUX == success && $WINDOWS == success ]]
+          [[ $PORTABLE == success && $LINUX == success && $WINDOWS == success ]]
