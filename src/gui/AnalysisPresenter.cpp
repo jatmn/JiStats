@@ -380,9 +380,9 @@ class AnalysisPresenter::Impl {
         trendSummary = makeLabel(body, L"");
         chart = makeControl(body, kChartClass, L"History chart", WS_TABSTOP, 0, WS_EX_CLIENTEDGE, this);
         trendDetail = makeLabel(body, L"");
-        activityExplanation = makeLabel(body, L"Local activity supplies counts when an account has no usage entry in "
-                                              L"that bucket. Daily rows apply this per UTC day. Blank buckets have "
-                                              L"no recorded count.");
+        activityExplanation = makeLabel(body, L"Local activity counts when an account has no usage entry in the same "
+                                              L"hour for hourly charts or the same UTC day for other views. Blank "
+                                              L"buckets have no recorded count.");
         dailyGroup = makeControl(body, L"BUTTON", L"Daily activity", BS_GROUPBOX);
         dailyList = makeList(kDailyColumns);
         providerGroup = makeControl(body, L"BUTTON", L"Activity by provider", BS_GROUPBOX);
