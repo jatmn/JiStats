@@ -1,6 +1,7 @@
 #include "db/SchemaManager.hpp"
 #include "db/StorageService.hpp"
 #include "BaselineSchema.hpp"
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <filesystem>
@@ -208,25 +209,45 @@ SchemaManager::BaselineResult SchemaManager::migrateClaudeReferences(bool writab
 bool SchemaManager::checkpointClaudeRedaction() {
     // Flush the rebuilt WAL pages into the main file. SQLite bypasses the
     // connection's busy handler if another opener owns the checkpoint lock.
+    const auto normalTimeout = storage.execute("PRAGMA busy_timeout;");
+    if (!normalTimeout.success() || normalTimeout.rowCount() != 1) {
+        pImpl->lastError = "Cannot read the SQLite busy timeout for the Claude reference upgrade";
+        return false;
+    }
+    const auto normalWait = std::chrono::milliseconds(normalTimeout.getInt(0, 0));
+    const auto setBusyTimeout = [&](std::chrono::milliseconds wait) {
+        const auto result = storage.execute("PRAGMA busy_timeout = " + std::to_string(wait.count()) + ";");
+        return result.success() && result.rowCount() == 1 && result.getInt(0, 0) == wait.count();
+    };
+
     using Clock = std::chrono::steady_clock;
     const auto deadline = Clock::now() + std::chrono::seconds(5);
-    do {
+    bool checkpointed = false;
+    while (true) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+        if (remaining.count() <= 0 || !setBusyTimeout(std::min(remaining, normalWait))) {
+            break;
+        }
         const auto checkpoint = storage.execute("PRAGMA main.wal_checkpoint(TRUNCATE);");
         if (!checkpoint.success() || checkpoint.rowCount() != 1) {
             break;
         }
         const int busy = checkpoint.getInt(0, 0);
-        if (busy == 0) {
-            return true;
-        }
-        if (busy != 1 || Clock::now() >= deadline) {
+        if (busy != 1) {
+            checkpointed = busy == 0;
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    } while (Clock::now() < deadline);
+        std::this_thread::sleep_until(std::min(deadline, Clock::now() + std::chrono::milliseconds(25)));
+    }
 
-    pImpl->lastError = "Cannot checkpoint the compacted database after redacting legacy Claude references";
-    return false;
+    if (!setBusyTimeout(normalWait)) {
+        pImpl->lastError = "Cannot restore the SQLite busy timeout after the Claude reference upgrade";
+        return false;
+    }
+    if (!checkpointed) {
+        pImpl->lastError = "Cannot checkpoint the compacted database after redacting legacy Claude references";
+    }
+    return checkpointed;
 }
 
 SchemaManager::BaselineResult SchemaManager::recordClaudeRedaction(int& current) {

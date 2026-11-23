@@ -674,6 +674,10 @@ TEST_CASE("StorageService supports overlapping WAL opens during the Claude upgra
         if (!connection.init(tempDb.path())) {
             return connection.getLastError();
         }
+        const auto timeout = connection.execute("PRAGMA busy_timeout;");
+        if (!timeout.success() || timeout.rowCount() != 1 || timeout.getInt(0, 0) != 5000) {
+            return std::string("The upgrade did not restore the connection busy timeout");
+        }
         return SchemaManager(connection).getCurrentVersion() == 13 ? std::string{} : "Version 13 was not recorded";
     };
 
