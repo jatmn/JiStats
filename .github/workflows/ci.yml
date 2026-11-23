@@ -126,6 +126,12 @@ jobs:
     if: needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NODIRECT: 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -133,9 +139,17 @@ jobs:
       - name: Install MinGW-w64 and ImageMagick
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix imagemagick ninja-build
+          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix imagemagick ninja-build ccache
+      - name: Restore compiler results
+        id: compiler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Run portable tests with bundled SQLite
         run: |
+          ccache --zero-stats
           cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
           cmake --build build-linux --parallel
           ctest --test-dir build-linux --output-on-failure
@@ -153,6 +167,14 @@ jobs:
           cmake -S . -B build-mingw -DJISTATS_BUILD_TESTS=ON -DJISTATS_BUILD_MINIMAX_CLI=ON
       - name: Build the app, MiniMax CLI, and tests
         run: cmake --build build-mingw --parallel --target JiStats JiStatsMiniMaxCli JiStatsTests
+      - name: Report compiler cache hits and misses
+        run: ccache --show-stats --verbose
+      - name: Seed compiler results for pull requests
+        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
       - name: Upload the test executable for Windows
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
