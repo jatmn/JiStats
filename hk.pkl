@@ -19,7 +19,7 @@ hooks {
   ["pre-push"] {
     steps {
       ["pr-lint"] {
-        check = "bash scripts/check_pr_lint.sh {{from_ref}} {{to_ref}}"
+        check = "bash scripts/check_pr_lint.sh --pre-push {{to_ref}}"
       }
     }
   }

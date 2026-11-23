@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ ${1:-} == --pre-push ]]; then
+    # Git represents a deletion as an all-zero destination object.
+    if [[ ${2:?expected the pushed revision} =~ ^0+$ ]]; then exit 0; fi
+    target=${JISTATS_PR_BASE:-origin/main}
+    set -- "$(git merge-base "$target" "$2")" "$2"
+fi
 base=$(git rev-parse --verify --end-of-options "${1:?expected a base revision}^{commit}")
 head=$(git rev-parse --verify --end-of-options "${2:-HEAD}^{commit}")
 cd "$(git rev-parse --show-toplevel)"
