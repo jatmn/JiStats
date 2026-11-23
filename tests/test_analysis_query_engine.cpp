@@ -740,6 +740,48 @@ TEST_CASE("Codex legacy readings in different seconds establish resets without r
     }
 }
 
+TEST_CASE("Codex estimates adjacent unordered seconds together", "[analysis][codex]") {
+    requireSqlite();
+    const bool hasFractionalOrder = GENERATE(false, true);
+    const bool reverseLegacyRows = GENERATE(false, true);
+    const bool extendsUnorderedRun = GENERATE(false, true);
+    CAPTURE(hasFractionalOrder, reverseLegacyRows, extendsUnorderedRun);
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const std::string rollout = "codex://rollout/no-longer-available";
+    const auto now = makeUtcTime(2026, 4, 20, 18);
+    const auto seedPair = [&](std::time_t seconds, long long first, long long last) {
+        if (hasFractionalOrder) {
+            seedCodexUsageEvent(storage, seconds, first, rollout, {}, 100000000);
+            seedCodexUsageEvent(storage, seconds, last, rollout, {}, 800000000);
+        } else {
+            seedCodexUsageEvent(storage, seconds, reverseLegacyRows ? last : first, rollout);
+            seedCodexUsageEvent(storage, seconds, reverseLegacyRows ? first : last, rollout);
+        }
+    };
+    seedCodexUsageEvent(storage, now - 240, 100, rollout);
+    seedPair(now - 180, 150, 50);
+    seedPair(now - 120, 60, 175);
+    if (extendsUnorderedRun) {
+        seedPair(now - 60, 180, 195);
+    }
+    seedCodexUsageEvent(storage, extendsUnorderedRun ? now : now - 60, 200, rollout);
+
+    const auto analysis =
+        AnalysisQueryEngine(storage).buildViewModel(DashboardViewModel{}, DashboardPreferences{}, now);
+    CHECK(analysis.codexThroughput.tokensLast1h == 200);
+    REQUIRE(analysis.codexHourlyHistory.points.size() == (extendsUnorderedRun ? 5 : 4));
+    CHECK(analysis.codexHourlyHistory.points[0].tokensPerMinute == Catch::Approx(0));
+    CHECK(analysis.codexHourlyHistory.points[1].tokensPerMinute == Catch::Approx(50));
+    CHECK(analysis.codexHourlyHistory.points[2].tokensPerMinute == Catch::Approx(125));
+    CHECK(analysis.codexHourlyHistory.points[3].tokensPerMinute == Catch::Approx(extendsUnorderedRun ? 20 : 25));
+    if (extendsUnorderedRun) {
+        CHECK(analysis.codexHourlyHistory.points.back().tokensPerMinute == Catch::Approx(5));
+    }
+}
+
 TEST_CASE("An unsequenced Codex counter does not replace a matching timed boundary", "[analysis][codex]") {
     requireSqlite();
     TempTestDatabase tempDb;

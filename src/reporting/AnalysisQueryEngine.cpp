@@ -2117,42 +2117,118 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                 return firstOrdered;
             };
 
-            const auto resetBetween = [](const UsageSample* left, const UsageSample* right) {
-                return left && right && left->tokens > right->tokens;
+            using CounterCost = std::pair<std::size_t, unsigned long long>;
+            struct CounterPlacement {
+                std::size_t gap = 0;
+                const UsageSample* sample = nullptr;
             };
-            const auto increaseBetween = [](const UsageSample* left, const UsageSample* right) {
-                return left && right && right->tokens > left->tokens ? right->tokens - left->tokens : 0LL;
+            struct CounterOrder {
+                const UsageSample* first;
+                const UsageSample* last;
+                CounterPlacement firstBound;
+                CounterPlacement secondBound;
+                CounterCost internalCost;
+                CounterCost pathCost{};
+                std::size_t previousOrder = 0;
             };
-            const auto estimatePlacement = [&](const std::vector<const UsageSample*>& ordered,
-                                               const UsageSample& sample, const UsageSample* before,
-                                               const UsageSample* after) {
-                std::optional<std::size_t> position;
-                // A repeated total adds no boundary evidence and must not hide a known timestamp.
-                if (std::any_of(ordered.begin(), ordered.end(),
-                                [&](const UsageSample* known) { return known->tokens == sample.tokens; })) {
-                    return position;
+            const auto transitionCost = [](const UsageSample* left, const UsageSample* right) -> CounterCost {
+                if (!left || !right) {
+                    return {};
                 }
-                // A lower reading in a later second proves a drop even without a source line.
-                const bool provesResetAcrossSeconds = resetBetween(before, &sample) || resetBetween(&sample, after);
-                std::pair<int, long long> bestCost{std::numeric_limits<int>::max(),
-                                                   std::numeric_limits<long long>::max()};
-                for (std::size_t i = 0; i <= ordered.size(); ++i) {
-                    const UsageSample* left = i == 0 ? before : ordered[i - 1];
-                    const UsageSample* right = i == ordered.size() ? after : ordered[i];
-                    const int addedResets =
-                        resetBetween(left, &sample) + resetBetween(&sample, right) - resetBetween(left, right);
-                    if (addedResets > 0 && !provesResetAcrossSeconds) {
-                        continue;
-                    }
-                    const auto addedTokens =
-                        increaseBetween(left, &sample) + increaseBetween(&sample, right) - increaseBetween(left, right);
-                    const auto cost = std::make_pair(addedResets, addedTokens);
-                    if (cost < bestCost) {
-                        position = i;
-                        bestCost = cost;
-                    }
+                return {left->tokens > right->tokens,
+                        static_cast<unsigned long long>(std::max(0LL, right->tokens - left->tokens))};
+            };
+            const auto addCost = [](CounterCost left, CounterCost right) -> CounterCost {
+                return {left.first + right.first,
+                        left.second +
+                            std::min(right.second, std::numeric_limits<unsigned long long>::max() - left.second)};
+            };
+            const auto counterOrders = [&](const CounterSecond& second) {
+                const auto count = static_cast<std::size_t>(second.end - second.ordered);
+                const auto sampleAt = [&](std::size_t index) { return &*(second.ordered + index); };
+                const auto firstKnown = count > 0 ? sampleAt(0) : nullptr;
+                const auto lastKnown = count > 0 ? sampleAt(count - 1) : nullptr;
+                const auto [knownMin, knownMax] =
+                    std::minmax_element(second.ordered, second.end,
+                                        [](const auto& left, const auto& right) { return left.tokens < right.tokens; });
+
+                // Without source order only the observed bounds extend the established counter range.
+                const UsageSample* low =
+                    count == 0 || second.begin->tokens < knownMin->tokens ? &*second.begin : nullptr;
+                const UsageSample* high =
+                    count == 0 || (second.ordered - 1)->tokens > knownMax->tokens ? &*(second.ordered - 1) : nullptr;
+                if (low && high && low->tokens == high->tokens) {
+                    high = nullptr;
+                } else if (!low) {
+                    std::swap(low, high);
                 }
-                return position;
+
+                CounterCost knownCost{};
+                for (std::size_t i = 1; i < count; ++i) {
+                    knownCost = addCost(knownCost, transitionCost(sampleAt(i - 1), sampleAt(i)));
+                }
+                if (!low) {
+                    return std::vector<CounterOrder>{{firstKnown, lastKnown, {}, {}, knownCost}};
+                }
+
+                std::vector<CounterOrder> orders;
+                const auto extraCost = [&](std::size_t gap, const UsageSample* first, const UsageSample* last) {
+                    const auto left = gap > 0 ? sampleAt(gap - 1) : nullptr;
+                    const auto right = gap < count ? sampleAt(gap) : nullptr;
+                    const auto original = transitionCost(left, right);
+                    const auto expanded = addCost(addCost(transitionCost(left, first), transitionCost(first, last)),
+                                                  transitionCost(last, right));
+                    return CounterCost{expanded.first - original.first, expanded.second - original.second};
+                };
+                const auto consider = [&](CounterPlacement first, CounterPlacement last) {
+                    auto extra = extraCost(first.gap, first.sample,
+                                           last.sample && first.gap == last.gap ? last.sample : first.sample);
+                    if (last.sample && first.gap != last.gap) {
+                        extra = addCost(extra, extraCost(last.gap, last.sample, last.sample));
+                    }
+                    const auto from = first.gap == 0 ? first.sample : firstKnown;
+                    const auto to = last.sample && last.gap == count ? last.sample
+                                    : first.gap == count             ? first.sample
+                                                                     : lastKnown;
+                    const auto cost = addCost(knownCost, extra);
+                    const auto sameEndpoints =
+                        std::find_if(orders.begin(), orders.end(), [&](const CounterOrder& order) {
+                            return order.first == from && order.last == to;
+                        });
+                    if (sameEndpoints == orders.end()) {
+                        orders.push_back({from, to, first, last, cost});
+                    } else if (cost < sameEndpoints->internalCost) {
+                        *sameEndpoints = {from, to, first, last, cost};
+                    }
+                };
+
+                if (!high) {
+                    for (std::size_t gap = 0; gap <= count; ++gap) {
+                        consider({gap, low}, {});
+                    }
+                    return orders;
+                }
+
+                const auto placeBounds = [&](const UsageSample* first, const UsageSample* last) {
+                    std::optional<std::size_t> bestInnerGap;
+                    for (std::size_t gap = 0; gap <= count; ++gap) {
+                        consider({gap, first}, {gap, last});
+                        if (gap > 0) {
+                            consider({0, first}, {gap, last});
+                        }
+                        // Separate gaps have independent costs. Only the cheapest earlier interior gap can win.
+                        if (bestInnerGap) {
+                            consider({*bestInnerGap, first}, {gap, last});
+                        }
+                        if (gap > 0 &&
+                            (!bestInnerGap || extraCost(gap, first, first) < extraCost(*bestInnerGap, first, first))) {
+                            bestInnerGap = gap;
+                        }
+                    }
+                };
+                placeBounds(low, high);
+                placeBounds(high, low);
+                return orders;
             };
 
             for (auto& [rollout, counters] : countersByRollout) {
@@ -2162,7 +2238,6 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                         return sample.time.seconds != begin->time.seconds;
                     });
                     const auto ordered = orderCounters(begin, end);
-                    // Evaluate ambiguous readings consistently. Their placement still depends on neighboring counters.
                     std::stable_sort(begin, ordered, [](const UsageSample& left, const UsageSample& right) {
                         return left.tokens < right.tokens;
                     });
@@ -2177,43 +2252,77 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
                     }
                     baseline = &counter;
                 };
-                for (auto second = seconds.cbegin(); second != seconds.cend(); ++second) {
-                    if (second->begin == second->ordered) {
-                        std::for_each(second->begin, second->end, useCounter);
-                        continue;
-                    }
-
+                using SecondIterator = std::vector<CounterSecond>::const_iterator;
+                const auto useEstimatedRun = [&](SecondIterator begin, SecondIterator end) {
                     legacyEstimated = true;
-                    std::vector<const UsageSample*> ordered;
-                    for (auto counter = second->ordered; counter != second->end; ++counter) {
-                        ordered.push_back(&*counter);
+                    std::vector<std::vector<CounterOrder>> choices;
+                    choices.reserve(end - begin);
+                    for (auto second = begin; second != end; ++second) {
+                        auto orders = counterOrders(*second);
+                        for (auto& order : orders) {
+                            order.pathCost = addCost(order.internalCost, transitionCost(baseline, order.first));
+                            if (choices.empty()) {
+                                continue;
+                            }
+                            const auto& previous = choices.back();
+                            for (std::size_t i = 0; i < previous.size(); ++i) {
+                                const auto boundary = transitionCost(previous[i].last, order.first);
+                                const auto cost = addCost(order.internalCost, addCost(previous[i].pathCost, boundary));
+                                if (i == 0 || cost < order.pathCost) {
+                                    order.pathCost = cost;
+                                    order.previousOrder = i;
+                                }
+                            }
+                        }
+                        choices.push_back(std::move(orders));
                     }
-                    const bool hasReset =
-                        std::adjacent_find(ordered.begin(), ordered.end(), resetBetween) != ordered.end();
-                    const auto [minEstablished, maxEstablished] =
-                        std::minmax_element(second->ordered, second->end, [](const auto& left, const auto& right) {
-                            return left.tokens < right.tokens;
+                    const auto after = end != seconds.cend() ? &*end->ordered : nullptr;
+                    const auto& last = choices.back();
+                    const auto best =
+                        std::min_element(last.begin(), last.end(), [&](const auto& left, const auto& right) {
+                            return addCost(left.pathCost, transitionCost(left.last, after)) <
+                                   addCost(right.pathCost, transitionCost(right.last, after));
                         });
-                    const auto next = second + 1;
-                    const UsageSample* after = nullptr;
-                    if (next != seconds.end()) {
-                        // The largest value is a conservative next anchor when its entire second is unordered.
-                        after = next->ordered != next->end ? &*next->ordered : &*(next->end - 1);
+
+                    // Recover the joint choice before reporting any deltas or consuming request overlap.
+                    std::vector<std::size_t> selected(choices.size());
+                    auto chosen = static_cast<std::size_t>(best - last.begin());
+                    for (std::size_t i = choices.size(); i-- > 0;) {
+                        selected[i] = chosen;
+                        chosen = choices[i][chosen].previousOrder;
                     }
-                    for (auto counter = second->begin; counter != second->ordered; ++counter) {
-                        // A value within a known reset's range can belong to either side without proving more usage.
-                        const bool withinReset = hasReset && counter->tokens >= minEstablished->tokens &&
-                                                 counter->tokens <= maxEstablished->tokens;
-                        const auto position =
-                            withinReset ? std::nullopt : estimatePlacement(ordered, *counter, baseline, after);
-                        if (position) {
-                            ordered.insert(ordered.begin() + *position, &*counter);
-                        } else {
-                            linkedCounters.erase({rollout, counter->sourceId});
+                    for (std::size_t i = 0; i < choices.size(); ++i) {
+                        const auto& second = *(begin + i);
+                        const auto& order = choices[i][selected[i]];
+                        for (auto sample = second.begin; sample != second.ordered; ++sample) {
+                            if (&*sample != order.firstBound.sample && &*sample != order.secondBound.sample) {
+                                linkedCounters.erase({rollout, sample->sourceId});
+                            }
+                        }
+                        const auto count = static_cast<std::size_t>(second.end - second.ordered);
+                        for (std::size_t gap = 0; gap <= count; ++gap) {
+                            if (order.firstBound.sample && gap == order.firstBound.gap) {
+                                useCounter(*order.firstBound.sample);
+                            }
+                            if (order.secondBound.sample && gap == order.secondBound.gap) {
+                                useCounter(*order.secondBound.sample);
+                            }
+                            if (gap < count) {
+                                useCounter(*(second.ordered + gap));
+                            }
                         }
                     }
-                    for (const auto* counter : ordered) {
-                        useCounter(*counter);
+                };
+                for (auto second = seconds.cbegin(); second != seconds.cend();) {
+                    if (second->begin == second->ordered) {
+                        std::for_each(second->begin, second->end, useCounter);
+                        ++second;
+                    } else {
+                        const auto end = std::find_if(second + 1, seconds.cend(), [](const CounterSecond& next) {
+                            return next.begin == next.ordered;
+                        });
+                        useEstimatedRun(second, end);
+                        second = end;
                     }
                 }
             }

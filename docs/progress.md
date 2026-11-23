@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- Codex Analysis estimates adjacent unordered seconds together. It uses observed counter bounds to avoid an extra reset from a guessed first reading. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 465 Windows cases passed under Wine.
+
 - Codex Analysis keeps resets established by whole-second observations when rollout order cannot be recovered. The estimate preserves surrounding counter boundaries. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 464 Windows cases passed under Wine.
 
 - Codex replay retains rollout line order for counters with whole-second timestamps. Analysis bounds fallback estimates with neighboring counters and preserves resets established by the rollout. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 463 Windows cases passed under Wine.
