@@ -18,6 +18,8 @@
 #include <thread>
 #include <vector>
 
+#include <windows.h>
+
 #include "app/AppController.hpp"
 #include "app/TrayController.hpp"
 #include "core/Logger.hpp"
@@ -4944,106 +4946,240 @@ TEST_CASE("AppController defaults all shipped provider tracking to disabled on a
     app.shutdown();
 }
 
-TEST_CASE("AppController requires explicit consent to read Codex SQLite model attribution", "[app][runtime][codex]") {
-    requireSqlite();
+namespace {
 
-    TempTestDirectory codexHome("jistats_codex_attribution");
-    ScopedEnvironmentVariable codexHomeVariable("CODEX_HOME", codexHome.path().string());
-    StorageService codexDb;
-    REQUIRE(codexDb.init((codexHome.path() / "state_5.sqlite").string()));
-    REQUIRE(codexDb
+constexpr const char* kCodexAttributionSetting = "runtime.codex_model_attribution_generation";
+
+class CodexAttributionTestProfile {
+  public:
+    CodexAttributionTestProfile() {
+        REQUIRE(source.init((codexHome.path() / "state_5.sqlite").string()));
+        // Each fixture update appends a WAL frame even when the main file timestamp is unchanged.
+        const auto journal = source.execute("PRAGMA journal_mode = WAL;");
+        REQUIRE(journal.success());
+        REQUIRE(journal.getString(0, 0) == "wal");
+        REQUIRE(
+            source
                 .execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT, "
                          "reasoning_effort TEXT, tokens_used INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER);")
                 .success());
-    const std::string createdAtMs = std::to_string((std::time(nullptr) - 60) * 1000LL);
-    REQUIRE(codexDb
-                .execute("INSERT INTO threads VALUES ('thread-1', 'hicap-ai', 'gpt-test', 'high', 100, ?, ?);",
-                         {createdAtMs, createdAtMs})
-                .success());
+        const std::string createdAtMs = std::to_string((std::time(nullptr) - 60) * 1000LL);
+        REQUIRE(source
+                    .execute("INSERT INTO threads VALUES ('thread-1', 'hicap-ai', 'gpt-test', 'high', 100, ?, ?);",
+                             {createdAtMs, createdAtMs})
+                    .success());
+        REQUIRE(storage.init(database.path()));
+    }
 
-    TempTestDatabase dbPath;
-    seedStartupPreferences(dbPath.path(), false, false, true);
-    StorageService storage;
-    REQUIRE(storage.init(dbPath.path()));
-    const auto sourceCount = [&storage]() {
+    int generation() {
+        return SettingsService(storage).getInt(kCodexAttributionSetting).value_or(0);
+    }
+
+    int sourceCount() {
         const auto result = storage.execute("SELECT COUNT(*) FROM codex_local_sources;");
         REQUIRE(result.success());
         return result.getInt(0, 0);
-    };
+    }
 
-    const auto codexTokens = [&storage]() {
+    long long tokens() {
         const auto result = storage.execute("SELECT COALESCE(SUM(total_tokens), 0) FROM usage_events "
                                             "WHERE source_type = 'codex_local_sqlite';");
         REQUIRE(result.success());
         return result.getInt64(0, 0);
-    };
-    const auto updateSource = [&codexDb](int tokens) {
-        REQUIRE(codexDb
+    }
+
+    void updateSource(int tokens) {
+        REQUIRE(source
                     .execute("UPDATE threads SET tokens_used = ?, updated_at_ms = updated_at_ms + 1000 "
                              "WHERE id = 'thread-1';",
                              {std::to_string(tokens)})
                     .success());
-    };
-    const auto startController = [&dbPath](AppController& app) {
-        app.setHeadlessForTesting(true);
-        app.setDatabasePathForTesting(dbPath.path());
+    }
+
+    void startController(AppController& app, bool headless = true) {
+        app.setHeadlessForTesting(headless);
+        app.setDisableTaskbarForTesting(true);
+        app.setDatabasePathForTesting(database.path());
         REQUIRE(app.init());
-    };
+    }
+
+    TempTestDatabase database;
+    StorageService storage;
+
+  private:
+    TempTestDirectory codexHome{"jistats_codex_attribution"};
+    ScopedEnvironmentVariable codexHomeVariable{"CODEX_HOME", codexHome.path().string()};
+    StorageService source;
+};
+
+} // namespace
+
+TEST_CASE("AppController requires explicit consent to read Codex SQLite model attribution", "[app][runtime][codex]") {
+    requireSqlite();
+
+    CodexAttributionTestProfile profile;
+    seedStartupPreferences(profile.database.path(), false, false, true);
 
     AppController app;
-    startController(app);
+    profile.startController(app);
     DashboardPreferences preferences = app.getDashboardViewModelForTesting().preferences;
     REQUIRE(preferences.openaiSubscriptionTrackingEnabled);
     CHECK_FALSE(preferences.codexModelAttributionEnabled);
-    CHECK(sourceCount() == 0);
+    CHECK(profile.sourceCount() == 0);
 
-    updateSource(200);
+    profile.updateSource(200);
     app.refreshRuntimeForTesting();
-    CHECK(sourceCount() == 0);
-    CHECK(codexTokens() == 0);
+    CHECK(profile.sourceCount() == 0);
+    CHECK(profile.tokens() == 0);
 
     preferences.openaiSubscriptionTrackingEnabled = false;
     preferences.codexModelAttributionEnabled = true;
     app.applyDashboardPreferencesForTesting(preferences);
     REQUIRE(app.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
-    REQUIRE(sourceCount() == 1);
-    CHECK(codexTokens() == 0);
+    REQUIRE(profile.sourceCount() == 1);
+    CHECK(profile.tokens() == 0);
 
-    updateSource(250);
+    profile.updateSource(250);
     app.refreshRuntimeForTesting();
-    CHECK(codexTokens() == 50);
+    CHECK(profile.tokens() == 50);
     app.shutdown();
 
-    updateSource(300);
+    profile.updateSource(300);
     AppController restarted;
-    startController(restarted);
+    profile.startController(restarted);
     preferences = restarted.getDashboardViewModelForTesting().preferences;
     CHECK_FALSE(preferences.openaiSubscriptionTrackingEnabled);
     REQUIRE(preferences.codexModelAttributionEnabled);
-    CHECK(sourceCount() == 1);
-    CHECK(codexTokens() == 100);
+    CHECK(profile.sourceCount() == 1);
+    CHECK(profile.tokens() == 100);
+
+    AppController peer;
+    profile.startController(peer);
+    REQUIRE(peer.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
 
     preferences.codexModelAttributionEnabled = false;
     restarted.applyDashboardPreferencesForTesting(preferences);
     CHECK_FALSE(restarted.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
-    updateSource(900);
+    profile.updateSource(900);
     restarted.refreshRuntimeForTesting();
-    CHECK(codexTokens() == 100);
+    peer.refreshRuntimeForTesting();
+    CHECK_FALSE(peer.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+    CHECK(profile.tokens() == 100);
+    peer.shutdown();
     restarted.shutdown();
 
     AppController disabled;
-    startController(disabled);
+    profile.startController(disabled);
     preferences = disabled.getDashboardViewModelForTesting().preferences;
     REQUIRE_FALSE(preferences.codexModelAttributionEnabled);
-    CHECK(codexTokens() == 100);
+    CHECK(profile.tokens() == 100);
 
     preferences.codexModelAttributionEnabled = true;
     disabled.applyDashboardPreferencesForTesting(preferences);
-    REQUIRE(sourceCount() == 2);
-    CHECK(codexTokens() == 100);
-    updateSource(950);
+    REQUIRE(profile.sourceCount() == 2);
+    CHECK(profile.tokens() == 100);
+    profile.updateSource(950);
     disabled.refreshRuntimeForTesting();
-    CHECK(codexTokens() == 150);
+    CHECK(profile.tokens() == 150);
+}
+
+TEST_CASE("AppController preserves queued Codex revocation and retries a failed save", "[app][runtime][codex]") {
+    requireSqlite();
+
+    CodexAttributionTestProfile profile;
+    REQUIRE(SettingsService(profile.storage).setInt(kCodexAttributionSetting, 1));
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    std::atomic<bool> startupWriteStarted{false};
+    std::promise<void> releaseStartupWrite;
+    const auto startupWriteReleased = releaseStartupWrite.get_future().share();
+    auto startupHooks = makeStartupHooks(std::make_shared<FakeStartupHooksState>());
+    startupHooks.writeRegistryValue = [&](const std::wstring&, std::string&) {
+        startupWriteStarted.store(true);
+        return startupWriteReleased.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    };
+
+    AppController app;
+    app.setStartupManagerTestHooks(startupHooks);
+    profile.startController(app, false);
+    REQUIRE(profile.sourceCount() == 1);
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition(
+        [&app]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+    const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    REQUIRE(settings != nullptr);
+    const HWND startup = FindWindowExW(settings, nullptr, L"Button", L"Start with Windows");
+    REQUIRE(startup != nullptr);
+
+    const auto selectAttributionTab = [&]() {
+        REQUIRE(app.selectDashboardPreferencesTabForTesting(1));
+        const HWND checkbox = FindWindowExW(settings, nullptr, L"Button", L"Enable Codex model attribution");
+        REQUIRE(checkbox != nullptr);
+        REQUIRE(waitForCondition([checkbox]() { return IsWindowVisible(checkbox) != FALSE; }));
+        return checkbox;
+    };
+
+    SECTION("Off and On are queued while the interaction worker is busy") {
+        SendMessageW(startup, BM_CLICK, 0, 0);
+        REQUIRE(waitForCondition([&]() { return startupWriteStarted.load(); }));
+
+        const HWND checkbox = selectAttributionTab();
+        REQUIRE(SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        SendMessageW(checkbox, BM_CLICK, 0, 0);
+        SendMessageW(checkbox, BM_CLICK, 0, 0);
+
+        profile.updateSource(900);
+        app.refreshRuntimeForTesting();
+        CHECK(profile.generation() == 1);
+        CHECK(profile.tokens() == 0);
+        releaseStartupWrite.set_value();
+
+        const bool newBaseline = waitForCondition(
+            [&]() { return profile.generation() == 2 && profile.sourceCount() == 2; }, std::chrono::seconds(5));
+        INFO("Saved generation: " << profile.generation() << ", sources: " << profile.sourceCount());
+        REQUIRE(newBaseline);
+        CHECK(profile.tokens() == 0);
+        profile.updateSource(950);
+        app.refreshRuntimeForTesting();
+        CHECK(profile.tokens() == 50);
+    }
+
+    SECTION("SQLite rejects the Off write and an explicit retry persists it") {
+        const HWND checkbox = selectAttributionTab();
+        REQUIRE(
+            profile.storage
+                .execute(
+                    "CREATE TRIGGER fail_codex_revocation_insert BEFORE INSERT ON settings "
+                    "WHEN NEW.key = 'runtime.codex_model_attribution_generation' AND CAST(NEW.value AS INTEGER) < 0 "
+                    "BEGIN SELECT RAISE(ABORT, 'test revocation write failure'); END;"
+                    "CREATE TRIGGER fail_codex_revocation_update BEFORE UPDATE ON settings "
+                    "WHEN NEW.key = 'runtime.codex_model_attribution_generation' AND CAST(NEW.value AS INTEGER) < 0 "
+                    "BEGIN SELECT RAISE(ABORT, 'test revocation write failure'); END;")
+                .success());
+        SendMessageW(checkbox, BM_CLICK, 0, 0);
+        REQUIRE(waitForCondition([&]() {
+            return app.getDashboardViewModelForTesting().codexAttributionSaveError ==
+                   CodexAttributionSaveError::Revocation;
+        }));
+        CHECK(profile.generation() == 1);
+        CHECK(app.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+        profile.updateSource(1200);
+        app.refreshRuntimeForTesting();
+        CHECK(profile.tokens() == 0);
+
+        REQUIRE(profile.storage
+                    .execute("DROP TRIGGER fail_codex_revocation_insert; DROP TRIGGER fail_codex_revocation_update;")
+                    .success());
+        REQUIRE(waitForCondition([&]() { return SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED; }));
+        SendMessageW(checkbox, BM_CLICK, 0, 0);
+        REQUIRE(waitForCondition([&]() { return profile.generation() == -1; }));
+        app.shutdown();
+
+        AppController restarted;
+        profile.startController(restarted);
+        CHECK_FALSE(restarted.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+        CHECK(profile.tokens() == 0);
+    }
 }
 
 TEST_CASE("AppController rehydrates persisted provider tracking preferences", "[app][runtime]") {

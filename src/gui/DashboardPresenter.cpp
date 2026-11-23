@@ -139,6 +139,20 @@ std::string formatTokenPromptTotal(long long tokens, long long prompts, const ch
     return stream.str();
 }
 
+const wchar_t* codexAttributionSettingsInfo(CodexAttributionSaveError saveError) {
+    switch (saveError) {
+        case CodexAttributionSaveError::Revocation:
+            return L"Codex attribution is paused in this window. JiStats could not save Off and will retry. "
+                   L"You can also clear the checkbox again.";
+        case CodexAttributionSaveError::Enable:
+            return L"JiStats could not enable Codex model attribution. Select the checkbox to try again.";
+        case CodexAttributionSaveError::None:
+            return L"Subscription tracking reads Codex rollouts for quota and throughput. "
+                   L"Model attribution reads model names and token counts from your local Codex state database.";
+    }
+    return L"";
+}
+
 std::string modelUsageOverviewText(const AnalysisProviderModelUsageChart& chart, bool attributionEnabled) {
     if (!chart.hasData) {
         return attributionEnabled ? "No new Codex SQLite usage observed yet. First scan establishes baseline."
@@ -3547,6 +3561,7 @@ public:
         HWND overlay = nullptr;
         HWND openaiSubscription = nullptr;
         HWND codexModelAttribution = nullptr;
+        HWND openaiInfo = nullptr;
         HWND startup = nullptr;
         HWND startupBackground = nullptr;
         HWND scheduledExportToggle = nullptr;
@@ -3576,6 +3591,7 @@ public:
             overlay = overlayCheckbox;
             openaiSubscription = openaiSubscriptionCheckbox;
             codexModelAttribution = codexModelAttributionCheckbox;
+            openaiInfo = openAISettingsInfo;
             startup = startupCheckbox;
             startupBackground = startupBackgroundCheckbox;
             scheduledExportToggle = scheduledExportCheckbox;
@@ -3616,6 +3632,9 @@ public:
                 BM_SETCHECK,
                 model.preferences.openaiSubscriptionTrackingEnabled ? BST_CHECKED : BST_UNCHECKED,
                 0);
+        }
+        if (openaiInfo != nullptr) {
+            setWindowText(openaiInfo, codexAttributionSettingsInfo(model.codexAttributionSaveError));
         }
         if (codexModelAttribution != nullptr) {
             SendMessageW(codexModelAttribution, BM_SETCHECK,
@@ -4483,11 +4502,9 @@ public:
             0, L"BUTTON", L"OpenAI Subscription",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 10, 10, 484, 170,
             hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        openAISettingsInfo = CreateWindowExW(
-            0, L"STATIC",
-            L"Subscription tracking reads Codex rollouts for quota and throughput. "
-            L"Model attribution reads model names and token counts from your local Codex state database.",
-            WS_CHILD | WS_VISIBLE, 24, 34, 440, 54, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        openAISettingsInfo =
+            CreateWindowExW(0, L"STATIC", codexAttributionSettingsInfo(CodexAttributionSaveError::None),
+                            WS_CHILD | WS_VISIBLE, 24, 34, 440, 54, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
         openaiSubscriptionCheckbox = CreateWindowExW(
             0,
             L"BUTTON",

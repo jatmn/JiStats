@@ -111,3 +111,43 @@ TEST_CASE("CodexLocalUsageImporter baselines first scan then imports token delta
     CHECK(countUsageEvents(storage) == 2);
 #endif
 }
+
+TEST_CASE("CodexLocalUsageImporter retries an incomplete consent baseline without importing cumulative usage",
+          "[codex][storage][import]") {
+#if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
+    SKIP("SQLite unavailable");
+#else
+    TempTestDatabase appDb;
+    TempTestDatabase sourceDb;
+    StorageService storage;
+    REQUIRE(storage.init(appDb.path()));
+
+    writeCodexStateDb(sourceDb.path(), 950, 300);
+    REQUIRE(storage
+                .execute("CREATE TRIGGER fail_codex_baseline BEFORE INSERT ON codex_thread_import_state "
+                         "WHEN NEW.thread_id = 'thread-2' BEGIN SELECT RAISE(ABORT, 'test checkpoint failure'); END;")
+                .success());
+    CodexLocalUsageImporter importer(storage);
+    const auto failed = importer.importFromSource(sourceDb.path(), 1700003500, 2);
+    REQUIRE_FALSE(failed.success);
+    const auto state = storage.execute("SELECT (SELECT COUNT(*) FROM codex_local_sources), "
+                                       "(SELECT COUNT(*) FROM codex_thread_import_state);");
+    REQUIRE(state.success());
+    CHECK(state.getInt(0, 0) == 0);
+    CHECK(state.getInt(0, 1) == 0);
+    CHECK(countUsageEvents(storage) == 0);
+
+    REQUIRE(storage.execute("DROP TRIGGER fail_codex_baseline;").success());
+    const auto retry = importer.importFromSource(sourceDb.path(), 1700014400, 2);
+    REQUIRE(retry.success);
+    CHECK(retry.baselinedThreads == 2);
+    CHECK(countUsageEvents(storage) == 0);
+
+    std::filesystem::remove(sourceDb.path());
+    writeCodexStateDb(sourceDb.path(), 1000, 300);
+    const auto later = importer.importFromSource(sourceDb.path(), 1700018000, 2);
+    REQUIRE(later.success);
+    CHECK(countUsageEvents(storage) == 1);
+    CHECK(totalUsageTokens(storage) == 50);
+#endif
+}

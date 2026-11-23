@@ -256,6 +256,8 @@ struct DashboardSummaryItem {
     std::string secondaryBadge;
 };
 
+enum class CodexAttributionSaveError { None, Enable, Revocation };
+
 // Dashboard view model
 struct DashboardViewModel {
     std::string appVersion = "1.0.0";
@@ -263,6 +265,7 @@ struct DashboardViewModel {
     bool isOnline = true;
     RuntimeState runtimeState = RuntimeState::Unknown;
     DashboardPreferences preferences;
+    CodexAttributionSaveError codexAttributionSaveError = CodexAttributionSaveError::None;
     bool claudeCodeLocallyDetected = false;
     std::string claudeCodeDetectionMessage;
     bool kimiCodeLocallyDetected = false;

@@ -22,7 +22,9 @@ Select **Enable Codex model attribution** in **File → Settings → OpenAI** to
 
 The [read-only SQLite reader](../../src/providers/openai/CodexLocalSqliteReader.cpp) limits its `threads` query to `id`, `model_provider`, `model`, `reasoning_effort`, `tokens_used`, `created_at_ms`, and `updated_at_ms`. Apply the same allowlist to fixtures. Exclude `title`, `cwd`, prompts, messages, conversation bodies, authentication and configuration data, API keys, and bearer tokens from ingestion, persistence, and fixtures.
 
-On the first scan of each opt-in period, the [importer](../../src/providers/openai/CodexLocalUsageImporter.cpp) saves source and thread baselines in the JiStats database. Later scans persist eligible usage deltas and data for new OpenAI and HICAP threads. Disabling the setting stops source checks and preserves imported history. Re-enabling starts a fresh baseline. The freshness check considers WAL and SHM sidecars. Overview uses 5-minute model buckets from this source.
+On the first scan of each opt-in period, the [importer](../../src/providers/openai/CodexLocalUsageImporter.cpp) saves source and thread baselines in the JiStats database. Later scans persist eligible usage deltas and data for new OpenAI and HICAP threads. Disabling the setting stops source checks and preserves imported history. Re-enabling starts a fresh baseline. Each instance checks the saved choice before scanning. If JiStats cannot save Off, Settings shows the error, pauses collection in that window, and retries the write. You can also clear the checkbox again to retry.
+
+The freshness check considers WAL and SHM sidecars. Overview uses 5-minute model buckets from this source.
 
 ## Import ChatGPT history
 

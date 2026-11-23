@@ -82,6 +82,7 @@ public:
     bool isDashboardVisibleForTesting() const;
     bool dispatchTrayEventForTesting(TrayController::TestEvent event);
     bool dispatchDashboardShellCommandForTesting(DashboardShellCommand command);
+    bool selectDashboardPreferencesTabForTesting(int tabIndex);
     bool clickDashboardOfflineRetryForTesting();
     bool clickDashboardOfflineDismissForTesting();
     bool isDashboardShellDialogOpenForTesting(DashboardShellDialog dialog) const;
