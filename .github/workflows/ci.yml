@@ -124,7 +124,7 @@ jobs:
     name: Linux tests and Windows cross-build
     needs: changes
     if: needs.changes.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.JISTATS_LINUX_BUILD_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     env:
       CMAKE_C_COMPILER_LAUNCHER: ccache
@@ -137,9 +137,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Install MinGW-w64 and ImageMagick
+        if: vars.JISTATS_LINUX_BUILD_RUNNER == ''
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix imagemagick ninja-build ccache
+      - name: Identify compiler packages for the cache
+        run: |
           # GCC invokes separate assembler and compiler backends. Include their
           # installed package versions even when the driver binary is unchanged.
           dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' 'mingw-w64*' > "$RUNNER_TEMP/compiler-packages"
