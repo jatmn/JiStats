@@ -139,9 +139,24 @@ std::string formatTokenPromptTotal(long long tokens, long long prompts, const ch
     return stream.str();
 }
 
-std::string modelUsageOverviewText(const AnalysisProviderModelUsageChart& chart) {
+const wchar_t* codexAttributionSettingsInfo(CodexAttributionSaveError saveError) {
+    switch (saveError) {
+        case CodexAttributionSaveError::Revocation:
+            return L"Codex attribution is paused in this window. JiStats could not save Off and will retry. "
+                   L"You can also clear the checkbox again.";
+        case CodexAttributionSaveError::Enable:
+            return L"JiStats could not enable Codex model attribution. Select the checkbox to try again.";
+        case CodexAttributionSaveError::None:
+            return L"Subscription tracking reads Codex rollouts for quota and throughput. "
+                   L"Model attribution reads model names and token counts from your local Codex state database.";
+    }
+    return L"";
+}
+
+std::string modelUsageOverviewText(const AnalysisProviderModelUsageChart& chart, bool attributionEnabled) {
     if (!chart.hasData) {
-        return "No new Codex SQLite usage observed yet. First scan establishes baseline.";
+        return attributionEnabled ? "No new Codex SQLite usage observed yet. First scan establishes baseline."
+                                  : "Enable Codex model attribution in File > Settings > OpenAI to start collecting.";
     }
 
     std::ostringstream stream;
@@ -1103,6 +1118,9 @@ public:
     std::string lastError;
     DashboardViewModel viewModel;
     std::function<void(const DashboardPreferences&)> preferencesChangedCallback;
+    std::function<void(bool, std::uint64_t)> codexModelAttributionChangedCallback;
+    std::uint64_t codexAttributionRequest = 0;
+    bool requestedCodexAttributionEnabled = false;
     std::function<void()> preferencesOpenedCallback;
     std::function<void()> periodicRefreshCallback;
     std::function<DashboardMiniMaxCredentialResult(const DashboardMiniMaxCredentialRequest&)>
@@ -1225,6 +1243,7 @@ public:
     HWND openAISettingsGroup = nullptr;
     HWND openAISettingsInfo = nullptr;
     HWND openaiSubscriptionCheckbox = nullptr;
+    HWND codexModelAttributionCheckbox = nullptr;
     HWND startupCheckbox = nullptr;
     HWND startupBackgroundCheckbox = nullptr;
     HWND miniMaxAccountsGroup = nullptr;
@@ -1363,6 +1382,7 @@ public:
     static constexpr int kPreferencesKimiCodeCheckboxId = 1117;
     static constexpr int kPreferencesGrokSubscriptionCheckboxId = 1119;
     static constexpr int kPreferencesCursorSubscriptionCheckboxId = 1120;
+    static constexpr int kPreferencesCodexModelAttributionCheckboxId = 1121;
     static constexpr int kPreferencesScheduledExportCheckboxId = 1108;
     static constexpr int kPreferencesScheduledExportIntervalEditId = 1109;
     static constexpr int kPreferencesCloseButtonId = 1106;
@@ -2267,11 +2287,8 @@ public:
             }
         }
 
-        const HWND openAIControls[] = {
-            openAISettingsGroup,
-            openAISettingsInfo,
-            openaiSubscriptionCheckbox
-        };
+        const HWND openAIControls[] = {openAISettingsGroup, openAISettingsInfo, openaiSubscriptionCheckbox,
+                                       codexModelAttributionCheckbox};
         for (HWND control : openAIControls) {
             if (control != nullptr) {
                 ShowWindow(control, openAIFlag);
@@ -2433,6 +2450,9 @@ public:
         }
         if (openaiSubscriptionCheckbox != nullptr) {
             MoveWindow(openaiSubscriptionCheckbox, innerLeft, innerTop + 92, 320, rowHeight, TRUE);
+        }
+        if (codexModelAttributionCheckbox != nullptr) {
+            MoveWindow(codexModelAttributionCheckbox, innerLeft, innerTop + 122, 320, rowHeight, TRUE);
         }
 
         if (miniMaxAccountsGroup != nullptr) {
@@ -3542,6 +3562,9 @@ public:
         HWND tabControl = nullptr;
         HWND overlay = nullptr;
         HWND openaiSubscription = nullptr;
+        HWND codexModelAttribution = nullptr;
+        bool attributionChecked = false;
+        HWND openaiInfo = nullptr;
         HWND startup = nullptr;
         HWND startupBackground = nullptr;
         HWND scheduledExportToggle = nullptr;
@@ -3570,6 +3593,11 @@ public:
             tabControl = preferencesTab;
             overlay = overlayCheckbox;
             openaiSubscription = openaiSubscriptionCheckbox;
+            codexModelAttribution = codexModelAttributionCheckbox;
+            attributionChecked = model.completedCodexAttributionRequest < codexAttributionRequest
+                                     ? requestedCodexAttributionEnabled
+                                     : model.preferences.codexModelAttributionEnabled;
+            openaiInfo = openAISettingsInfo;
             startup = startupCheckbox;
             startupBackground = startupBackgroundCheckbox;
             scheduledExportToggle = scheduledExportCheckbox;
@@ -3610,6 +3638,12 @@ public:
                 BM_SETCHECK,
                 model.preferences.openaiSubscriptionTrackingEnabled ? BST_CHECKED : BST_UNCHECKED,
                 0);
+        }
+        if (openaiInfo != nullptr) {
+            setWindowText(openaiInfo, codexAttributionSettingsInfo(model.codexAttributionSaveError));
+        }
+        if (codexModelAttribution != nullptr) {
+            SendMessageW(codexModelAttribution, BM_SETCHECK, attributionChecked ? BST_CHECKED : BST_UNCHECKED, 0);
         }
         if (miniMaxSubscription != nullptr) {
             SendMessageW(
@@ -4030,8 +4064,11 @@ public:
         setWindowText(codexThroughputText, utf8ToWide(codexThroughputColumns.recent));
         setWindowText(codexThroughputAveragesText, utf8ToWide(codexThroughputColumns.averages));
         setWindowText(codexThroughputTotalsText, utf8ToWide(codexThroughputColumns.totals));
-        setWindowText(openAiUsageText, utf8ToWide(modelUsageOverviewText(model.analysis.openAiCodexModelUsage)));
-        setWindowText(hicapUsageText, utf8ToWide(modelUsageOverviewText(model.analysis.hicapCodexModelUsage)));
+        const bool attributionEnabled = model.preferences.codexModelAttributionEnabled;
+        setWindowText(openAiUsageText,
+                      utf8ToWide(modelUsageOverviewText(model.analysis.openAiCodexModelUsage, attributionEnabled)));
+        setWindowText(hicapUsageText,
+                      utf8ToWide(modelUsageOverviewText(model.analysis.hicapCodexModelUsage, attributionEnabled)));
         updatedTooltipBody = utf8ToWide(model.lastUpdateTime.empty() ? "Waiting for first update"
                                                                      : localizeDisplayTimestamp(model.lastUpdateTime));
         setWindowText(updatedValue, updatedTooltipBody);
@@ -4470,19 +4507,9 @@ public:
             0, L"BUTTON", L"OpenAI Subscription",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 10, 10, 484, 170,
             hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-        openAISettingsInfo = CreateWindowExW(
-            0,
-            L"STATIC",
-            L"OpenAI stays subscription-first in JiStats. Codex-local and export-import evidence remain separate from the optional API-platform path.",
-            WS_CHILD | WS_VISIBLE,
-            24,
-            34,
-            440,
-            54,
-            hwnd,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            nullptr);
+        openAISettingsInfo =
+            CreateWindowExW(0, L"STATIC", codexAttributionSettingsInfo(CodexAttributionSaveError::None),
+                            WS_CHILD | WS_VISIBLE, 24, 34, 440, 54, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
         openaiSubscriptionCheckbox = CreateWindowExW(
             0,
             L"BUTTON",
@@ -4496,6 +4523,12 @@ public:
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesOpenAISubscriptionCheckboxId)),
             GetModuleHandleW(nullptr),
             nullptr);
+
+        codexModelAttributionCheckbox =
+            CreateWindowExW(0, L"BUTTON", L"Enable Codex model attribution",
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 24, 126, 300, 22, hwnd,
+                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesCodexModelAttributionCheckboxId)),
+                            GetModuleHandleW(nullptr), nullptr);
 
         claudeCodeGroup = CreateWindowExW(
             0, L"BUTTON", L"Claude Code Local Tracking",
@@ -4889,6 +4922,7 @@ public:
         applyBodyFont(openAISettingsGroup);
         applyBodyFont(openAISettingsInfo);
         applyBodyFont(openaiSubscriptionCheckbox);
+        applyBodyFont(codexModelAttributionCheckbox);
         applyBodyFont(miniMaxSubscriptionCheckbox);
         applyBodyFont(claudeCodeGroup);
         applyBodyFont(claudeCodeInfo);
@@ -5202,6 +5236,24 @@ public:
                     setOpenAISubscriptionTrackingEnabled(checked, true);
                 }
                 return 0;
+            case kPreferencesCodexModelAttributionCheckboxId:
+                if (HIWORD(wParam) == BN_CLICKED) {
+                    const bool enabled = SendMessageW(codexModelAttributionCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                    std::function<void(bool, std::uint64_t)> callback;
+                    std::uint64_t request = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex);
+                        callback = codexModelAttributionChangedCallback;
+                        if (callback) {
+                            requestedCodexAttributionEnabled = enabled;
+                            request = ++codexAttributionRequest;
+                        }
+                    }
+                    if (callback) {
+                        callback(enabled, request);
+                    }
+                }
+                return 0;
             case kPreferencesMiniMaxSubscriptionCheckboxId:
                 if (HIWORD(wParam) == BN_CLICKED) {
                     const bool checked =
@@ -5341,6 +5393,7 @@ public:
                 openAISettingsGroup = nullptr;
                 openAISettingsInfo = nullptr;
                 openaiSubscriptionCheckbox = nullptr;
+                codexModelAttributionCheckbox = nullptr;
                 miniMaxSubscriptionCheckbox = nullptr;
                 claudeCodeGroup = nullptr;
                 claudeCodeInfo = nullptr;
@@ -5912,6 +5965,7 @@ public:
                 scheduledExportLastRunLabel = nullptr;
                 scheduledExportLastRunValue = nullptr;
                 openaiSubscriptionCheckbox = nullptr;
+                codexModelAttributionCheckbox = nullptr;
                 miniMaxSubscriptionCheckbox = nullptr;
                 startupCheckbox = nullptr;
                 startupBackgroundCheckbox = nullptr;
@@ -7207,6 +7261,11 @@ void DashboardPresenter::setPreferencesChangedCallback(std::function<void(const 
     pImpl->preferencesChangedCallback = std::move(callback);
 }
 
+void DashboardPresenter::setCodexModelAttributionChangedCallback(std::function<void(bool, std::uint64_t)> callback) {
+    std::lock_guard<std::mutex> lock(pImpl->mutex);
+    pImpl->codexModelAttributionChangedCallback = std::move(callback);
+}
+
 void DashboardPresenter::setPreferencesOpenedCallback(std::function<void()> callback) {
     std::lock_guard<std::mutex> lock(pImpl->mutex);
     pImpl->preferencesOpenedCallback = std::move(callback);
@@ -7619,8 +7678,8 @@ bool DashboardPresenter::selectPreferencesTabForTesting(int tabIndex) {
         pImpl->selectedPreferencesTab = tabIndex;
     }
     SendMessageW(tab, TCM_SETCURSEL, static_cast<WPARAM>(tabIndex), 0);
-    PostMessageW(prefs, WM_SIZE, 0, 0);
-    PostMessageW(prefs, Impl::WM_JISTATS_SYNC_PREFERENCES, 0, 0);
+    SendMessageW(prefs, WM_SIZE, 0, 0);
+    SendMessageW(prefs, Impl::WM_JISTATS_SYNC_PREFERENCES, 0, 0);
     return true;
 #else
     (void)tabIndex;

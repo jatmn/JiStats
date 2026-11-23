@@ -11,7 +11,7 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 
 ## Provider and privacy boundaries
 
-- Keep provider tracking opt-in. OpenAI/Codex is subscription-first, with separate credentials and billing for the optional API-platform path. See the [Codex SQLite reference](docs/providers/openai.md#codex-sqlite-privacy-boundary) for a current exception in the model attribution path. MiniMax focuses on subscription quota, with broader PAYG support tracked separately.
+- Keep provider tracking opt-in. OpenAI/Codex is subscription-first, with separate credentials and billing for the optional API-platform path. See the [Codex SQLite reference](docs/providers/openai.md#codex-sqlite-privacy-boundary) for the separate model attribution opt-in. MiniMax focuses on subscription quota, with broader PAYG support tracked separately.
 - Claude Code uses bounded local evidence. Kimi Code uses bounded local evidence and can show provider-exact quota through the validated OAuth-backed surface when available. Preserve the provenance and confidence of each metric and show uncertainty when source evidence is incomplete.
 - Prefer official provider signals and non-model endpoints. If a model call is needed for monitoring, use the lowest-cost suitable path and make it explicit and configurable.
 - Use the existing [logger and categories](include/core/Logger.hpp). Keep API keys, tokens, and raw request or response bodies out of logs. Never log `UsageResponse::rawResponse` or `QuotaResponse::rawResponse` directly, because they can hold raw provider payloads or local Codex session content. Use `sanitize::mask` when a sensitive value needs a log reference. The application log is at `%LOCALAPPDATA%/JiStats/logs/jistats.log`.
@@ -23,6 +23,10 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 - Keep provider-specific behavior under [src/providers/](src/providers/) and shared models provider-agnostic. AppController coordinates lifecycle and runtime state. MirrorEngine reconciles quota, while analytics and reporting produce derived summaries.
 - Route database writes through StorageService and place numbered SQL migrations in [db_migrations/](db_migrations/). Keep blocking network and database work off the UI thread. Dashboard, tray, and taskbar code should consume derived views.
 - Preserve startup responsiveness, offline recovery, and quota provenance. Keep the taskbar overlay scoped to subscription quota. Use [the TrafficMonitor research note](docs/reference/trafficmonitor-research.md) for taskbar reference.
+
+## Test failure evidence
+
+During the [two-week observation window](docs/progress.md#test-failure-observation), record each test failure when found with the failing run, case and file, the fix, and what behavior the test protected. Keep unresolved entries open and exclude their files from removal. On resolution, classify a caught regression or an assertion that only detected an intended implementation change. Record fixture and infrastructure defects explicitly when neither description fits. A whole file is eligible for removal only after the window, when its evidence shows exclusively change detection and its remaining assertions protect no behavior. Record the demonstrated pattern here when removing it. Keep authorization, privacy, migration and concurrency tests.
 
 ## Build and verify
 

@@ -2,6 +2,12 @@
 
 #include <string>
 
+#ifdef JISTATS_TEST_WRAP_SQLITE_STEP
+#include <sqlite3.h>
+#include <string_view>
+#include <thread>
+#endif
+
 #include "db/StorageService.hpp"
 #include "observation/LocalObservationService.hpp"
 #include "observation/ObservationPersistenceBridge.hpp"
@@ -13,6 +19,10 @@ using JiStats::TestSupport::TempTestDatabase;
 using JiStats::TestSupport::requireSqlite;
 
 namespace {
+
+#ifdef JISTATS_TEST_WRAP_SQLITE_STEP
+thread_local int* settingsInsertResult = nullptr;
+#endif
 
 ActivityEvent makeObservedActivityEvent() {
     ActivityEvent event;
@@ -32,6 +42,27 @@ ActivityEvent makeObservedActivityEvent() {
 }
 
 } // namespace
+
+#ifdef JISTATS_TEST_WRAP_SQLITE_STEP
+extern "C" int __real_sqlite3_step(sqlite3_stmt* statement);
+
+extern "C" int __wrap_sqlite3_step(sqlite3_stmt* statement) {
+    const int result = __real_sqlite3_step(statement);
+    if (settingsInsertResult && result == SQLITE_DONE &&
+        std::string_view(sqlite3_sql(statement)).rfind("INSERT INTO accounts ", 0) == 0) {
+        // Run a separate writer after SQLite releases its statement lock.
+        auto* const connection = sqlite3_db_handle(statement);
+        int& insertResult = *settingsInsertResult;
+        std::thread writer([&] {
+            insertResult = sqlite3_exec(
+                connection, "INSERT INTO settings (rowid, key, value) VALUES (4242, 'observation-race', '1');", nullptr,
+                nullptr, nullptr);
+        });
+        writer.join();
+    }
+    return result;
+}
+#endif
 
 TEST_CASE("Local observation runtime path persists activity through the callback wiring", "[observation][storage][integration]") {
     requireSqlite();
@@ -65,7 +96,16 @@ TEST_CASE("Local observation runtime path persists activity through the callback
     });
 
     const ActivityEvent event = makeObservedActivityEvent();
-    REQUIRE(observationService.recordActivity(event));
+#ifdef JISTATS_TEST_WRAP_SQLITE_STEP
+    int insertResult = SQLITE_ERROR;
+    settingsInsertResult = &insertResult;
+#endif
+    const bool recorded = observationService.recordActivity(event);
+#ifdef JISTATS_TEST_WRAP_SQLITE_STEP
+    settingsInsertResult = nullptr;
+    REQUIRE(insertResult == SQLITE_OK);
+#endif
+    REQUIRE(recorded);
     CHECK(observationService.getLastError().empty());
     CHECK(observationService.getPendingActivityCount() == 0);
 
