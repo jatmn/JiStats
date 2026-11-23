@@ -189,6 +189,8 @@ TEST_CASE("Claude toUsageEvents falls back to modelUsage when no daily tokens", 
     REQUIRE(events[0].totalTokens == 3000);
     REQUIRE(events[0].inputTokens == 1000);
     REQUIRE(events[0].outputTokens == 2000);
+    CHECK_FALSE(events[0].rawReference.empty());
+    CHECK(events[0].rawReference.find(std::filesystem::path(fixture.path()).filename().string()) == std::string::npos);
 }
 
 TEST_CASE("Claude adapter fetchQuota returns local aggregate", "[claude][adapter]") {
@@ -294,6 +296,87 @@ TEST_CASE("Claude importLocalActivity persists activity events", "[claude][persi
     REQUIRE(result.success());
     REQUIRE(result.rowCount() == 1);
     CHECK(result.getInt64(0, 0) == 3);
+}
+
+TEST_CASE("Claude stats-cache references are redacted and preserve historical replay identity",
+          "[claude][persistence]") {
+    requireSqlite();
+
+    TempFixtureFile source(R"json({
+        "lastComputedDate": "2025-01-02",
+        "dailyActivity": [{"date": "2025-01-02", "messageCount": 3}],
+        "dailyModelTokens": [{"date": "2025-01-02", "tokensByModel": {"fixture-model": 42}}]
+    })json");
+    const auto parsed = ClaudeCodeLocalParser::parseStatsCache(source.path());
+    REQUIRE(parsed.success);
+    const auto activities = ClaudeCodeLocalParser::toActivityEvents(parsed);
+    REQUIRE(activities.size() == 1);
+    const auto& activity = activities.front();
+    const auto& reference = activity.rawReference;
+    REQUIRE_FALSE(reference.empty());
+    const std::filesystem::path sourcePath(source.path());
+    CHECK(reference.find(sourcePath.filename().string()) == std::string::npos);
+    CHECK(reference.find(sourcePath.parent_path().filename().string()) == std::string::npos);
+
+    ClaudeCodeAdapter adapter;
+    adapter.setMockStatsCachePath(source.path());
+    const auto usage = adapter.fetchUsage(activity.startedAt - 1, activity.startedAt + 1);
+    REQUIRE(usage.success);
+    REQUIRE(usage.events.size() == 1);
+    CHECK(usage.events.front().totalTokens == 42);
+    CHECK(usage.events.front().rawReference == reference);
+
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(ClaudeCodeLocalParser::importLocalActivity(storage, source.path()));
+    const auto binding = storage.execute("SELECT provider_id, account_id, raw_reference FROM activity_events;");
+    REQUIRE(binding.success());
+    REQUIRE(binding.rowCount() == 1);
+    CHECK(binding.getString(0, 2) == reference);
+    REQUIRE(storage.execute("UPDATE activity_events SET raw_reference = ?;", {source.path() + "|date=2025-01-02"})
+                .success());
+
+    // Reproduce a usage row saved by an older version of the recovery path.
+    PersistedUsageEvent backfill;
+    backfill.providerId = binding.getInt(0, 0);
+    backfill.accountId = binding.getInt(0, 1);
+    backfill.eventTime = usage.events.front().eventTime;
+    backfill.sourceType = "provider_backfill";
+    backfill.sourceRunId = usage.events.front().sourceRunId;
+    backfill.modelKey = usage.events.front().modelKey;
+    backfill.requestType = usage.events.front().requestType;
+    backfill.totalTokens = usage.events.front().totalTokens;
+    backfill.isBackfilled = true;
+    backfill.rawReference = source.path();
+    REQUIRE(storage.insertUsageEvents({backfill}));
+
+    storage.close();
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(ClaudeCodeLocalParser::importLocalActivity(storage, source.path()));
+    backfill.rawReference = reference;
+    REQUIRE(storage.insertUsageEvents({backfill}));
+
+    storage.close();
+    REQUIRE(storage.init(tempDb.path()));
+    const auto activityRows = storage.execute("SELECT raw_reference FROM activity_events;");
+    REQUIRE(activityRows.success());
+    REQUIRE(activityRows.rowCount() == 1);
+    CHECK(activityRows.getString(0, 0) == reference);
+    const auto usageRows =
+        storage.getUsageEvents(backfill.providerId, backfill.accountId, backfill.eventTime - 1, backfill.eventTime + 1);
+    REQUIRE(usageRows.size() == 1);
+    CHECK(usageRows.front().rawReference == reference);
+    CHECK(usageRows.front().totalTokens == 42);
+
+    TempFixtureFile otherSource(R"json({
+        "lastComputedDate": "2025-01-02",
+        "dailyActivity": [{"date": "2025-01-02", "messageCount": 3}]
+    })json");
+    REQUIRE(ClaudeCodeLocalParser::importLocalActivity(storage, otherSource.path()));
+    const auto sources = storage.execute("SELECT COUNT(DISTINCT raw_reference) FROM activity_events;");
+    REQUIRE(sources.success());
+    CHECK(sources.getInt(0, 0) == 2);
 }
 
 TEST_CASE("Claude importLocalActivity fails for missing file", "[claude][persistence]") {

@@ -229,7 +229,7 @@ jobs:
               needs.changes.outputs.selector != 'success' }}
         run: bash scripts/check_native_ci_selection.sh
       - name: Run Pullfrog authorization tests
-        run: node --test scripts/pullfrog-review-check.test.mjs
+        run: node --test scripts/pullfrog-*.test.mjs
       - name: Restore compiler results
         id: compiler-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

@@ -4,7 +4,7 @@ Both integrations are opt-in. Use [the local redaction contract](local-redaction
 
 ## Claude Code
 
-[ClaudeCodeLocalParser](../../src/providers/claude/ClaudeCodeLocalParser.cpp) reads aggregate activity and token data from `~/.claude/stats-cache.json` and bounded metadata from `~/.claude/settings.json`. [ClaudeCodeAdapter](../../src/providers/claude/ClaudeCodeAdapter.cpp) uses these inputs for local activity and usage. Set `CLAUDE_CONFIG_DIR` before starting JiStats to use a different Claude configuration directory. Recovery uses dated daily totals only. The stats cache can support exact local counters. Provider quota, billing mode, and reset behavior remain unverified.
+[ClaudeCodeLocalParser](../../src/providers/claude/ClaudeCodeLocalParser.cpp) reads aggregate activity and token data from `~/.claude/stats-cache.json` and bounded metadata from `~/.claude/settings.json`. [ClaudeCodeAdapter](../../src/providers/claude/ClaudeCodeAdapter.cpp) uses these inputs for local activity and usage. Set `CLAUDE_CONFIG_DIR` before starting JiStats to use a different Claude configuration directory. Recovery uses dated daily totals only. Activity and usage references use an opaque identifier for the stats-cache path. When a matching row from an older version is replayed, JiStats replaces its raw reference in place. The stats cache can support exact local counters. Provider quota, billing mode, and reset behavior remain unverified.
 
 Replay the [Claude fixtures](../fixtures/claude/) with [the Claude parser tests](../../tests/test_claude_local_parser.cpp). Keep transcripts, tool payloads, and credentials outside the parser and fixture scope.
 

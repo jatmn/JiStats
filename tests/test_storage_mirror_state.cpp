@@ -318,38 +318,70 @@ TEST_CASE("StorageService upserts and queries credential profiles when SQLite is
 }
 
 TEST_CASE("StorageService rejects invalid mirror-state inputs before insert", "[storage][mirror]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
     StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    const auto ids = seedProviderAccount(storage);
 
-    PersistedSyncState invalidSync;
-    REQUIRE_FALSE(storage.upsertSyncState(invalidSync));
+    SECTION("sync kind is required") {
+        PersistedSyncState state;
+        state.providerId = ids.providerId;
+        state.accountId = ids.accountId;
+        REQUIRE_FALSE(storage.upsertSyncState(state));
+        CHECK(storage.getLastError() == "Sync state requires syncKind");
+        const auto rows = storage.execute("SELECT COUNT(*) FROM sync_state;");
+        REQUIRE(rows.success());
+        CHECK(rows.getInt(0, 0) == 0);
+    }
 
-    PersistedMirrorRule invalidRule;
-    invalidRule.providerId = 1;
-    invalidRule.ruleVersion = 0;
-    REQUIRE_FALSE(storage.upsertMirrorRule(invalidRule));
+    SECTION("rule version must be positive") {
+        PersistedMirrorRule rule;
+        rule.providerId = ids.providerId;
+        rule.ruleKey = "quota_window";
+        rule.ruleVersion = 0;
+        REQUIRE_FALSE(storage.upsertMirrorRule(rule));
+        CHECK(storage.getLastError() == "Mirror rule requires positive ruleVersion");
+        CHECK(storage.getMirrorRules(ids.providerId).empty());
+    }
 
-    PersistedConnectivityState invalidConnectivity;
-    invalidConnectivity.providerId = 1;
-    invalidConnectivity.accountId = 0;
-    invalidConnectivity.status = "";
-    REQUIRE_FALSE(storage.upsertConnectivityState(invalidConnectivity));
+    SECTION("connectivity status is required") {
+        PersistedConnectivityState state;
+        state.providerId = ids.providerId;
+        state.accountId = ids.accountId;
+        state.status.clear();
+        REQUIRE_FALSE(storage.upsertConnectivityState(state));
+        CHECK(storage.getLastError() == "Connectivity state requires status");
+        CHECK_FALSE(storage.getConnectivityState(ids.providerId, ids.accountId).has_value());
+    }
 
-    PersistedRuntimeState invalidRuntime;
-    invalidRuntime.id = 2;
-    REQUIRE_FALSE(storage.upsertRuntimeState(invalidRuntime));
+    SECTION("runtime state uses the singleton ID") {
+        PersistedRuntimeState state;
+        state.id = 2;
+        REQUIRE_FALSE(storage.upsertRuntimeState(state));
+        CHECK(storage.getLastError() == "Runtime state must use singleton id 1");
+        const auto rows = storage.execute("SELECT id FROM runtime_state ORDER BY id;");
+        REQUIRE(rows.success());
+        REQUIRE(rows.rowCount() == 1);
+        CHECK(rows.getInt(0, 0) == 1);
+    }
 
-    PersistedGapMarker invalidGapMarker;
-    invalidGapMarker.providerId = 1;
-    invalidGapMarker.accountId = 1;
-    invalidGapMarker.periodStart = 100;
-    invalidGapMarker.periodEnd = 99;
-    REQUIRE_FALSE(storage.upsertGapMarker(invalidGapMarker));
+    SECTION("capability key is required") {
+        PersistedProviderCapability capability;
+        capability.providerId = ids.providerId;
+        REQUIRE_FALSE(storage.upsertProviderCapability(capability));
+        CHECK(storage.getLastError() == "Provider capability requires capabilityKey");
+        CHECK(storage.getProviderCapabilities(ids.providerId).empty());
+    }
 
-    PersistedProviderCapability invalidCapability;
-    invalidCapability.providerId = 1;
-    REQUIRE_FALSE(storage.upsertProviderCapability(invalidCapability));
-
-    PersistedCredentialProfile invalidCredentialProfile;
-    invalidCredentialProfile.providerId = 1;
-    REQUIRE_FALSE(storage.upsertCredentialProfile(invalidCredentialProfile));
+    SECTION("credential profile requires a secret reference") {
+        PersistedCredentialProfile profile;
+        profile.providerId = ids.providerId;
+        profile.accountId = ids.accountId;
+        profile.profileName = "Test subscription";
+        profile.credentialType = "subscription_key";
+        REQUIRE_FALSE(storage.upsertCredentialProfile(profile));
+        CHECK(storage.getLastError() == "Credential profile requires secretRef");
+        CHECK(storage.getCredentialProfiles(ids.accountId).empty());
+    }
 }

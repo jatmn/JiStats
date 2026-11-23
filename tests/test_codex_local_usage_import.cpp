@@ -154,3 +154,56 @@ TEST_CASE("CodexLocalUsageImporter retries an incomplete consent baseline withou
     CHECK(totalUsageTokens(storage) == 50);
 #endif
 }
+
+TEST_CASE("CodexLocalUsageImporter retries later checkpoint writes without counting overlapping deltas",
+          "[codex][storage][import]") {
+#if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
+    SKIP("SQLite unavailable");
+#else
+    TempTestDatabase appDb;
+    TempTestDatabase sourceDb;
+    StorageService storage;
+    REQUIRE(storage.init(appDb.path()));
+    CodexLocalUsageImporter importer(storage);
+    const bool newThread = GENERATE(false, true);
+    CAPTURE(newThread);
+
+    writeCodexStateDb(sourceDb.path(), 1000);
+    REQUIRE(importer.importFromSource(sourceDb.path(), 1700007200, 2).success);
+    CHECK(countUsageEvents(storage) == 0);
+
+    const std::string failure = newThread ? "INSERT" : "UPDATE";
+    const std::string thread = newThread ? "thread-2" : "thread-1";
+    REQUIRE(storage
+                .execute("CREATE TRIGGER reject_checkpoint BEFORE " + failure +
+                         " ON codex_thread_import_state WHEN NEW.thread_id = '" + thread +
+                         "' BEGIN SELECT RAISE(ABORT, 'test checkpoint failure'); END;")
+                .success());
+    std::filesystem::remove(sourceDb.path());
+    writeCodexStateDb(sourceDb.path(), 1250, newThread ? 300 : -1);
+    const auto failed = importer.importFromSource(sourceDb.path(), 1700010800, 2);
+    REQUIRE_FALSE(failed.success);
+    CHECK(failed.error.find("Failed to upsert Codex thread import state") != std::string::npos);
+    CHECK(failed.deltaEventsInserted == 0);
+    CHECK(totalUsageTokens(storage) == 0);
+
+    REQUIRE(storage.execute("DROP TRIGGER reject_checkpoint;").success());
+    storage.close();
+    REQUIRE(storage.init(appDb.path()));
+    std::filesystem::remove(sourceDb.path());
+    writeCodexStateDb(sourceDb.path(), 1350, newThread ? 400 : -1);
+    const auto retry = importer.importFromSource(sourceDb.path(), 1700014400, 2);
+    REQUIRE(retry.success);
+    const int expectedEvents = newThread ? 2 : 1;
+    const int expectedTokens = newThread ? 750 : 350;
+    CHECK(retry.deltaEventsInserted == expectedEvents);
+    CHECK(countUsageEvents(storage) == expectedEvents);
+    CHECK(totalUsageTokens(storage) == expectedTokens);
+
+    const auto repeated = importer.importFromSource(sourceDb.path(), 1700018000, 2);
+    REQUIRE(repeated.success);
+    CHECK(repeated.deltaEventsInserted == 0);
+    CHECK(countUsageEvents(storage) == expectedEvents);
+    CHECK(totalUsageTokens(storage) == expectedTokens);
+#endif
+}

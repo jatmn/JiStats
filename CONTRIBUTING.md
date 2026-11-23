@@ -14,4 +14,4 @@ With hk 2.13.0, clang-format-18, actionlint 1.7.12 and Bash on your path, run `h
 
 In the Pullfrog console, keep automatic PR reviews, draft reviews, and re-reviews on new commits enabled, with reviews for external contributors disabled. The [workflow](.github/workflows/pullfrog.yml) checks the PR author against GitHub before starting a review. Automatic reviews cover public JiStats PRs opened by `jatmn`, even when someone else pushes to them. The owner can still use `@pullfrog` commands in issue and PR comments.
 
-Run `node --test scripts/pullfrog-review-check.test.mjs` to check the authorization logic locally. GitHub Actions runs the same tests on Pullfrog workflow and script changes.
+Run `node --test scripts/pullfrog-*.test.mjs` to check the authorization logic locally. GitHub Actions runs the same tests on Pullfrog workflow and script changes.

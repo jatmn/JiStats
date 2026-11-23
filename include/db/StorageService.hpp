@@ -416,7 +416,7 @@ public:
     bool deleteUsageEventsOlderThan(std::time_t olderThan);
     bool deleteUsageRollupsOlderThan(UsageRollupResolution resolution, std::time_t olderThan);
 
-    // Batch persist usage events for backfill/recovery
+    // Batch persist usage events for backfill/recovery. An open transaction belongs to its caller.
     bool insertUsageEvents(const std::vector<PersistedUsageEvent>& events,
                            const std::vector<PersistedUsageEvent>& savedCodexCounters = {});
     std::vector<PersistedUsageEvent> getUsageEvents(

@@ -12,11 +12,11 @@
 namespace JiStats {
 namespace {
 
-class InitialBaselineTransaction {
+class ImportTransaction {
   public:
-    explicit InitialBaselineTransaction(StorageService& storage) : storage_(storage) {}
+    explicit ImportTransaction(StorageService& storage) : storage_(storage) {}
 
-    ~InitialBaselineTransaction() {
+    ~ImportTransaction() {
         if (active_) {
             storage_.rollbackTransaction();
         }
@@ -130,12 +130,12 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
                                   : readResult.sourceIdentity;
     const auto existingSource = storage_.getCodexLocalSource(readResult.sourcePath, sourceIdentity);
     const bool sourceBaselineEstablished = existingSource.has_value();
-    InitialBaselineTransaction initialBaseline(storage_);
+    ImportTransaction transaction(storage_);
+    if (!storage_.getLastError().empty() || !transaction.begin()) {
+        result.error = "Could not start the Codex usage import transaction";
+        return result;
+    }
     if (!sourceBaselineEstablished) {
-        if (!storage_.getLastError().empty() || !initialBaseline.begin()) {
-            result.error = "Could not start the Codex source baseline";
-            return result;
-        }
         // Another instance can establish the baseline while this scan waits for the write lock.
         // Retry from a fresh source snapshot in that case.
         if (storage_.getCodexLocalSource(readResult.sourcePath, sourceIdentity) || !storage_.getLastError().empty()) {
@@ -230,7 +230,6 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
                 state.lastEventTime = eventTime;
                 minEventTime = minEventTime == 0 ? eventTime : std::min(minEventTime, eventTime);
                 maxEventTime = std::max(maxEventTime, eventTime);
-                ++result.deltaEventsInserted;
             } else {
                 ++result.baselinedThreads;
             }
@@ -270,7 +269,6 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
             state.lastStatus = "active";
             minEventTime = minEventTime == 0 ? eventTime : std::min(minEventTime, eventTime);
             maxEventTime = std::max(maxEventTime, eventTime);
-            ++result.deltaEventsInserted;
         } else if (row.tokensUsed < state.lastImportedTokensUsed) {
             state.baselineTokensUsed = row.tokensUsed;
             state.lastImportedTokensUsed = row.tokensUsed;
@@ -296,11 +294,12 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
         }
     }
 
-    if (!initialBaseline.commit()) {
-        result.error = storage_.getLastError();
+    if (!transaction.commit()) {
+        result.error = "Could not commit the Codex usage import";
         return result;
     }
 
+    result.deltaEventsInserted = static_cast<int>(pendingEvents.size());
     if (minEventTime > 0) {
         for (const char* providerKey : {"openai", "hicap-ai"}) {
             const auto providerId = findProviderId(storage_, providerKey);

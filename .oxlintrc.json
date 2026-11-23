@@ -85,7 +85,8 @@
     },
     {
       "files": [
-        "scripts/pullfrog-review-check.test.mjs"
+        "scripts/pullfrog-review-check.test.mjs",
+        "scripts/pullfrog-command-check.test.mjs"
       ],
       "rules": {
         "func-style": "off",
