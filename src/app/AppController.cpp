@@ -165,7 +165,8 @@ class CodexProfileLock {
         const std::wstring name =
             L"Global\\JiStats.CodexAttribution." + std::to_wstring(identity.dwVolumeSerialNumber) + L"." +
             std::to_wstring(identity.nFileIndexHigh) + L"." + std::to_wstring(identity.nFileIndexLow);
-        const HANDLE mutex = CreateMutexW(nullptr, FALSE, name.c_str());
+        // An existing mutex may allow synchronization without granting security-control rights.
+        const HANDLE mutex = CreateMutexExW(nullptr, name.c_str(), 0, SYNCHRONIZE | MUTEX_MODIFY_STATE);
         if (mutex != nullptr) {
             const DWORD status = WaitForSingleObject(mutex, waitMs);
             if (status == WAIT_OBJECT_0 || status == WAIT_ABANDONED) {

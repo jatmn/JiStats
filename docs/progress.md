@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- Codex attribution opens the shared profile mutex with the rights needed to wait and release it. The restricted-access regression reproduced a failed Off save on the starting head and passed after repair. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and all 473 Windows cases passed under Wine. Live mixed-elevation Windows testing remains open. [PR #31](https://github.com/jatmn/JiStats/pull/31)
+
 - Codex attribution now serializes profile revocation with source scans, recovers after a SQLite transaction rolls itself back, and keeps pending checkbox choices during Settings redraw. The starting revision reproduced all three defects. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and all 472 Windows cases passed under Wine after repair. Native Windows desktop smoke remains open. [PR #31](https://github.com/jatmn/JiStats/pull/31)
 
 - Codex attribution now preserves queued revocation, reports and retries failed saves, checks shared consent before scanning, and commits initial checkpoints together. The SQLite regressions reproduced all four review findings on the original PR head. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and all 471 Windows cases passed under Wine after the repair. Native Windows desktop smoke remains open. [PR #31](https://github.com/jatmn/JiStats/pull/31)

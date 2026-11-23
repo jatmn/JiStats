@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <windows.h>
+#include <sddl.h>
 
 #include "app/AppController.hpp"
 #include "app/TrayController.hpp"
@@ -5133,6 +5134,69 @@ TEST_CASE("AppController serializes a peer Codex scan with profile revocation", 
     scanning.refreshRuntimeForTesting();
     CHECK(profile.tokens() == 50);
     CHECK_FALSE(scanning.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+}
+
+TEST_CASE("AppController revokes Codex consent with restricted profile mutex access", "[app][runtime][codex]") {
+    requireSqlite();
+
+    CodexAttributionTestProfile profile;
+    REQUIRE(SettingsService(profile.storage).setInt(kCodexAttributionSetting, 1));
+    AppController app;
+    profile.startController(app);
+    REQUIRE(profile.sourceCount() == 1);
+
+    const auto path = std::filesystem::path(profile.database.path()).wstring();
+    const HANDLE database =
+        CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(database != INVALID_HANDLE_VALUE);
+    BY_HANDLE_FILE_INFORMATION identity{};
+    const bool identified = GetFileInformationByHandle(database, &identity) != FALSE;
+    CloseHandle(database);
+    REQUIRE(identified);
+    const std::wstring name = L"Global\\JiStats.CodexAttribution." + std::to_wstring(identity.dwVolumeSerialNumber) +
+                              L"." + std::to_wstring(identity.nFileIndexHigh) + L"." +
+                              std::to_wstring(identity.nFileIndexLow);
+
+    // Model a peer that can use the lock but cannot request all access.
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    REQUIRE(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(D;;SD;;;WD)(A;;0x00100001;;;WD)",
+                                                                 SDDL_REVISION_1, &descriptor, nullptr));
+    const std::unique_ptr<void, decltype(&LocalFree)> security(descriptor, LocalFree);
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), security.get(), FALSE};
+    const std::unique_ptr<void, decltype(&CloseHandle)> held(
+        CreateMutexExW(&attributes, name.c_str(), CREATE_MUTEX_INITIAL_OWNER, SYNCHRONIZE | MUTEX_MODIFY_STATE),
+        CloseHandle);
+    const DWORD creationStatus = GetLastError();
+    REQUIRE(held);
+    REQUIRE(creationStatus != ERROR_ALREADY_EXISTS);
+
+    const std::unique_ptr<void, decltype(&CloseHandle)> fullAccess(OpenMutexW(MUTEX_ALL_ACCESS, FALSE, name.c_str()),
+                                                                   CloseHandle);
+    const DWORD accessStatus = GetLastError();
+    REQUIRE_FALSE(fullAccess);
+    REQUIRE(accessStatus == ERROR_ACCESS_DENIED);
+
+    auto preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.codexModelAttributionEnabled = false;
+    std::promise<void> attemptingOff;
+    auto offStarted = attemptingOff.get_future();
+    auto off = std::async(std::launch::async, [&]() {
+        attemptingOff.set_value();
+        app.applyDashboardPreferencesForTesting(preferences);
+    });
+    CHECK(offStarted.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    CHECK_FALSE(waitForCondition([&]() { return profile.generation() == -1; }, std::chrono::milliseconds(200)));
+    REQUIRE(ReleaseMutex(held.get()));
+    off.get();
+
+    CHECK(profile.generation() == -1);
+    CHECK_FALSE(app.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+    const DWORD wait = WaitForSingleObject(held.get(), 0);
+    CHECK(wait == WAIT_OBJECT_0);
+    if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) {
+        CHECK(ReleaseMutex(held.get()));
+    }
 }
 
 TEST_CASE("AppController preserves queued Codex revocation and retries a failed save", "[app][runtime][codex]") {
