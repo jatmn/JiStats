@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
     branches: [main, 'release/**']
-  # PRs may merge with an out-of-date base. Test integrated build changes on Windows.
+  merge_group:
   push:
     branches: [main, 'release/**']
   workflow_dispatch:
@@ -14,8 +14,7 @@ on:
         default: false
 
 concurrency:
-  # A docs-only push must never cancel a pending or running build for a prior push.
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'latest' }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -26,51 +25,32 @@ jobs:
     name: Detect build changes
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: read
+    if: github.event_name == 'pull_request'
     outputs:
       build: ${{ steps.filter.outputs.build }}
     steps:
       - name: Check out the tested revision
-        if: github.event_name != 'workflow_dispatch'
-        id: tested-revision
-        continue-on-error: true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          # A push can contain multiple commits. Fetch its full history to find before.
-          fetch-depth: ${{ github.event_name == 'push' && '0' || '2' }}
+          fetch-depth: 2
           persist-credentials: false
       - name: Check whether the change can affect the build or tests
         id: filter
         env:
-          CHECKOUT_OUTCOME: ${{ steps.tested-revision.outcome }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          GH_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           build=true
-          base=
           files="$RUNNER_TEMP/jistats-changed-files"
-          if [ "$CHECKOUT_OUTCOME" = success ]; then
-            case "$GITHUB_EVENT_NAME" in
-              pull_request)
-                # Diff against the test merge commit's base parent, even on a rerun.
-                if git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null; then
-                  base="$GITHUB_SHA^1"
-                fi
-                ;;
-              push)
-                base="$PUSH_BEFORE"
-                ;;
-            esac
-          fi
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            reason="$GITHUB_EVENT_NAME run"
-          # Disable rename detection to classify both paths of a rename.
-          elif [ -n "$base" ] &&
-            git diff --no-ext-diff --no-renames --name-only -z "$base" "$GITHUB_SHA" -- > "$files"; then
+          # Selection is safe only when the target branch enforces a merge queue.
+          branch=$(jq -rn --arg branch "$GITHUB_BASE_REF" '$branch | @uri')
+          queued=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$branch" --paginate |
+            jq -s 'any(.[][]; .type == "merge_queue")')
+          if [[ "$queued" != true ]]; then
+            reason="target branch has no merge queue"
+          elif git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null &&
+            git diff --no-ext-diff --no-renames --name-only -z "$GITHUB_SHA^1" "$GITHUB_SHA" -- > "$files"; then
             build=false
             while IFS= read -r -d '' file; do
               case "$file" in
@@ -85,10 +65,7 @@ jobs:
                   continue ;;
                 # Keep the existing PR-only exemption for non-build metadata and scripts.
                 .github/* | scripts/* | LICENSE | .gitignore | .clang-format | .clang-tidy | assets/logo.png)
-                  if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-                    continue
-                  fi
-                  ;;
+                  continue ;;
               esac
               build=true
               printf -v reason '%q' "$file"
@@ -97,22 +74,8 @@ jobs:
           else
             reason="could not determine the changed files for the tested revision"
           fi
-          if [ "$build" = false ] && [ "$GITHUB_EVENT_NAME" = push ]; then
-            # The previous push must have passed on this branch. Its success
-            # either comes from Windows or carries forward an earlier pass.
-            if ! previous_run=$(gh api --method GET \
-              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
-              -f event=push -f branch="$GITHUB_REF_NAME" -f head_sha="$PUSH_BEFORE" \
-              --jq '.workflow_runs | max_by(.run_number) | select(.status == "completed" and .conclusion == "success") | .html_url') ||
-              [ -z "$previous_run" ]; then
-              build=true
-              reason="no successful CI run for the previous branch tip"
-            fi
-          fi
           if [ "$build" = true ]; then
             message="Build and tests required ($reason)."
-          elif [ "$GITHUB_EVENT_NAME" = push ]; then
-            message="Documentation-only push; reusing Windows validation from $previous_run."
           else
             message="No build or test inputs changed; skipping the Windows and Linux builds."
           fi
@@ -123,13 +86,17 @@ jobs:
   linux-cross:
     name: Linux tests and Windows cross-build
     needs: changes
-    if: needs.changes.outputs.build == 'true'
+    if: >-
+      ${{ !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.result != 'success' || needs.changes.outputs.build != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Run Pullfrog authorization tests
+        run: node --test scripts/pullfrog-review-check.test.mjs
       - name: Install MinGW-w64 and ImageMagick
         run: |
           sudo apt-get update
@@ -166,6 +133,7 @@ jobs:
   windows-runtime:
     name: Run cross-built tests on Windows
     needs: linux-cross
+    if: ${{ !cancelled() && needs.linux-cross.result == 'success' }}
     runs-on: windows-latest
     timeout-minutes: ${{ inputs.repeat_offline_notice_tests && 15 || 5 }}
     steps:
@@ -236,12 +204,20 @@ jobs:
     steps:
       - name: Check job results
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          EVENT: ${{ github.event_name }}
+          DETECT: ${{ needs.changes.result }}
+          BUILD: ${{ needs.changes.outputs.build }}
+          LINUX: ${{ needs.linux-cross.result }}
+          WINDOWS: ${{ needs.windows-runtime.result }}
         run: |
-          echo "Job results: $RESULTS"
-          for result in $RESULTS; do
-            case "$result" in
-              success | skipped) ;;
-              *) exit 1 ;;
-            esac
-          done
+          set -eu
+          echo "Event=$EVENT detection=$DETECT build=$BUILD Linux=$LINUX Windows=$WINDOWS"
+          if [[ $EVENT == pull_request ]]; then
+            [[ $DETECT == success ]]
+            if [[ $BUILD == false ]]; then
+              [[ $LINUX == skipped && $WINDOWS == skipped ]]
+              exit
+            fi
+            [[ $BUILD == true ]]
+          fi
+          [[ $LINUX == success && $WINDOWS == success ]]

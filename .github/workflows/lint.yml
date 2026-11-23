@@ -1,11 +1,12 @@
 name: Lint
 
 on:
+  merge_group:
   pull_request:
     branches: [main, 'release/**']
 
 concurrency:
-  group: lint-${{ github.event.pull_request.number }}
+  group: lint-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -16,17 +17,19 @@ jobs:
     name: C++ format and workflow lint
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      BASE: ${{ github.event.merge_group.base_sha || 'HEAD^1' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # The pull_request checkout is a merge commit. Its first parent is the base.
-          fetch-depth: 2
+          fetch-depth: ${{ github.event_name == 'merge_group' && '0' || '2' }}
       - name: Check first-party C and C++ formatting
-        run: bash scripts/check_changed_format.sh HEAD^1
+        run: bash scripts/check_changed_format.sh "$BASE"
       - name: Lint GitHub Actions workflows
         run: |
-          workflows=$(git diff --name-only HEAD^1 HEAD -- .github/workflows/)
+          workflows=$(git diff --name-only "$BASE" HEAD -- .github/workflows/)
           if [[ -z "$workflows" ]]; then
             exit 0
           fi
