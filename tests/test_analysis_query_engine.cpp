@@ -1140,6 +1140,10 @@ TEST_CASE("AnalysisQueryEngine falls back invalid custom preferences to the effe
     CHECK(window.label == "Last 7 Days");
     CHECK(analysis.scope.dateRangePreset == AnalysisDateRangePreset::Last7Days);
     CHECK(analysis.scopeLabel == "All Providers / All Accounts / Last 7 Days");
+    REQUIRE(analysis.requestedScope.has_value());
+    CHECK(analysis.requestedScope->dateRangePreset == AnalysisDateRangePreset::Custom);
+    CHECK(analysis.effectiveStartUtc == makeUtcTime(2026, 4, 13));
+    CHECK(analysis.effectiveEndUtc == now);
 }
 
 TEST_CASE("AnalysisQueryEngine falls back missing current-quota windows to the effective this-month preset", "[analysis][query_engine][analysis_query_engine]") {

@@ -5508,13 +5508,6 @@ public:
                 return 0;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
-        case WM_DRAWITEM:
-            if (analysisPresenter != nullptr &&
-                lParam != 0 &&
-                analysisPresenter->handleDrawItem(*reinterpret_cast<DRAWITEMSTRUCT*>(lParam))) {
-                return TRUE;
-            }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_JISTATS_ATTACH_ANALYSIS:
             initializeAnalysisControls(hwnd);
             return 0;
@@ -7138,6 +7131,9 @@ public:
                 if (IsDialogMessageW(hwnd, &msg)) {
                     continue;
                 }
+            } else if (analysisWindow != nullptr && (msg.hwnd == analysisWindow || IsChild(analysisWindow, msg.hwnd)) &&
+                       IsDialogMessageW(analysisWindow, &msg)) {
+                continue;
             }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);

@@ -998,8 +998,13 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
     analysis.scope.customRangeStartUtc = preferences.analysisCustomRangeStartUtc;
     analysis.scope.customRangeEndUtc = preferences.analysisCustomRangeEndUtc;
 
+    analysis.scope.dateRangePreset = preferences.analysisDateRangePreset;
+    analysis.requestedScope = analysis.scope;
+
     const ResolvedAnalysisWindow window = resolveWindow(preferences, now);
     analysis.scope.dateRangePreset = window.effectivePreset;
+    analysis.effectiveStartUtc = window.start;
+    analysis.effectiveEndUtc = window.end;
     const TrendBucketConfig trendBucketConfig = resolveTrendBucketConfig(window);
     analysis.trendBucketGranularity = trendBucketConfig.granularity;
     analysis.trendBucketLabel = trendBucketConfig.label;
