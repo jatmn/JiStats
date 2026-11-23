@@ -23,10 +23,11 @@ jobs:
           # The pull_request checkout is a merge commit. Its first parent is the base.
           fetch-depth: 2
       - name: Install actionlint
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           archive=actionlint_1.7.12_linux_amd64.tar.gz
-          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$archive" \
-            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$archive"
+          gh api -H 'Accept: application/octet-stream' repos/rhysd/actionlint/releases/assets/384924896 > "$RUNNER_TEMP/$archive"
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/$archive" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
