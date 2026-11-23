@@ -4381,7 +4381,7 @@ TEST_CASE("AppController persists and rehydrates the last selected provider scop
     const auto selectedSummary =
         findUsageSummary(app.getDashboardUsageProgressSummariesForTesting(), "MiniMax - Coding Plan");
     REQUIRE(selectedSummary.has_value());
-    CHECK(findUsageSummary(app.getDashboardUsageProgressSummariesForTesting(), "OpenAI Subscription") == std::nullopt);
+    CHECK(findUsageSummary(app.getDashboardUsageProgressSummariesForTesting(), "OpenAI Subscription").has_value());
 
     const DashboardPreferences storedPreferences = loadStartupPreferences(dbPath.path());
     CHECK(storedPreferences.lastSelectedProviderId == "minimax");
@@ -4398,9 +4398,8 @@ TEST_CASE("AppController persists and rehydrates the last selected provider scop
     const DashboardViewModel rehydratedViewModel = rehydratedApp.getDashboardViewModelForTesting();
     CHECK(rehydratedViewModel.preferences.lastSelectedProviderId == "minimax");
     CHECK(rehydratedViewModel.preferences.lastSelectedAccountId == "minimax.runtime_status");
-    CHECK(findUsageSummary(
-              rehydratedApp.getDashboardUsageProgressSummariesForTesting(),
-              "OpenAI Subscription") == std::nullopt);
+    CHECK(findUsageSummary(rehydratedApp.getDashboardUsageProgressSummariesForTesting(), "OpenAI Subscription")
+              .has_value());
 
     rehydratedApp.shutdown();
 }

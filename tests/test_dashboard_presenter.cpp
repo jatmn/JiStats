@@ -447,7 +447,12 @@ TEST_CASE("DashboardPresenter handles native close safely", "[dashboard_presente
 
     REQUIRE(waitForCondition([&presenter]() { return presenter.getUsageProgressBarWidthForTesting() > 0; }));
 
-    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    REQUIRE(dashboard != nullptr);
+    const HWND settings = FindWindowExW(dashboard, nullptr, L"BUTTON", L"&Settings...");
+    REQUIRE(settings != nullptr);
+    REQUIRE(IsWindowVisible(settings));
+    SendMessageW(settings, BM_CLICK, 0, 0);
     REQUIRE(waitForCondition([&presenter]() {
         return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences);
     }));
@@ -603,28 +608,88 @@ TEST_CASE("DashboardPresenter persists provider snapshot selection through the p
     presenter.shutdown();
 }
 
-TEST_CASE("DashboardPresenter restores the selected provider scope from persisted preferences", "[dashboard_presenter][selection]") {
+TEST_CASE("DashboardPresenter keeps all enabled quota accounts in Overview after restoring a detail selection",
+          "[dashboard_presenter][selection]") {
     DashboardPresenter presenter;
     DashboardViewModel model = makeMultiAccountQuotaViewModel();
     model.preferences.lastSelectedProviderId = "openai";
     model.preferences.lastSelectedAccountId = "acct-openai-secondary";
 
+    for (int index = 0; index < 3; ++index) {
+        auto account = model.providers.front();
+        account.accountId = "openai.extra-" + std::to_string(index);
+        model.providers.push_back(std::move(account));
+    }
+    auto& lastQuota = model.providers.back().quotas.front();
+    lastQuota.remainingPercentage = 39.0;
+    lastQuota.windowResetAt = 1776592800;
+    lastQuota.secondaryWindowType = "weekly";
+    lastQuota.secondaryRemainingPercentage = 65.0;
+    lastQuota.secondaryWindowResetAt = 1776816000;
+    model.providers.back().state = ProviderState::Stale;
+
+    auto disabled = model.providers.front();
+    disabled.accountId = "openai.disabled";
+    disabled.isEnabled = false;
+    model.providers.push_back(std::move(disabled));
+
+    auto apiQuota = model.providers.front().quotas.front();
+    apiQuota.providerSurface = "openai_api_import";
+    model.providers.front().quotas.push_back(std::move(apiQuota));
+
+    auto kimi = makeKimiLocalRuntimeViewModel();
+    model.providers.push_back(kimi.providers.front());
+    model.runtimeSummaries = std::move(kimi.runtimeSummaries);
     REQUIRE(presenter.init());
     presenter.updateViewModel(model);
 
-    REQUIRE(waitForCondition([&presenter]() {
-        return presenter.getSelectedAccountIdForTesting() == "acct-openai-secondary";
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    REQUIRE(dashboard != nullptr);
+    const HWND viewport = FindWindowExW(dashboard, nullptr, L"JiStatsDashboardViewport", nullptr);
+    REQUIRE(viewport != nullptr);
+    const HWND quotaSection = FindWindowExW(viewport, nullptr, L"STATIC", L"Subscription quota");
+    const HWND activitySection = FindWindowExW(viewport, nullptr, L"STATIC", L"Recorded activity");
+    const HWND statusSection = FindWindowExW(viewport, nullptr, L"STATIC", L"System status");
+    REQUIRE(quotaSection != nullptr);
+    REQUIRE(activitySection != nullptr);
+    REQUIRE(statusSection != nullptr);
+    REQUIRE(waitForCondition([&]() {
+        return IsWindowVisible(activitySection) &&
+               FindWindowExW(viewport, nullptr, L"STATIC", L"OpenAI Subscription / openai.extra-2") != nullptr;
     }));
 
+    RECT quotaBounds{};
+    RECT activityBounds{};
+    RECT statusBounds{};
+    REQUIRE(GetWindowRect(quotaSection, &quotaBounds));
+    REQUIRE(GetWindowRect(activitySection, &activityBounds));
+    REQUIRE(GetWindowRect(statusSection, &statusBounds));
+    CHECK(quotaBounds.top < activityBounds.top);
+    CHECK(activityBounds.top < statusBounds.top);
+
+    SendMessageW(viewport, WM_VSCROLL, SB_BOTTOM, 0);
+    CHECK(FindWindowExW(viewport, nullptr, L"STATIC", L"Quota unavailable") != nullptr);
+    CHECK(FindWindowExW(viewport, nullptr, L"STATIC", L"OpenAI Subscription / openai.disabled") == nullptr);
+
     const auto summaries = presenter.getUsageProgressSummariesForTesting();
-    REQUIRE(summaries.size() == 1);
-    CHECK(summaries.front().label == "OpenAI Subscription");
-    CHECK(summaries.front().detail.find("20% remaining") != std::string::npos);
+    REQUIRE(summaries.size() == 7);
+    const auto selected = findSummary(summaries, "OpenAI Subscription / acct-openai-secondary");
+    REQUIRE(selected.has_value());
+    CHECK(selected->percentage == 20);
+    const auto last = findSummary(summaries, "OpenAI Subscription / openai.extra-2");
+    REQUIRE(last.has_value());
+    CHECK(last->badge == "5-hour: 39% remaining");
+    CHECK(last->secondaryBadge == "7-day: 65% remaining");
+    CHECK(last->detail.find("resets ") != std::string::npos);
+    CHECK(findSummary(summaries, "MiniMax - Coding Plan").has_value());
+    CHECK(findSummary(summaries, "Last 30 Minutes").has_value());
+    CHECK(presenter.getSelectedAccountIdForTesting() == "acct-openai-secondary");
 
     presenter.shutdown();
 }
 
-TEST_CASE("DashboardPresenter prefers runtime activity summaries over fake 0 percent local-provider quota summaries", "[dashboard_presenter][local]") {
+TEST_CASE("DashboardPresenter keeps recorded activity separate when a provider has no quota",
+          "[dashboard_presenter][local]") {
     DashboardPresenter presenter;
     presenter.updateViewModel(makeKimiLocalRuntimeViewModel());
 
@@ -1112,11 +1177,13 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
     REQUIRE(waitForCondition([&]() { return TabCtrl_GetCurSel(tabs) == 1 && IsWindowVisible(providers); }));
     REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_LEFT, 0));
     REQUIRE(waitForCondition([&]() { return TabCtrl_GetCurSel(tabs) == 0 && !IsWindowVisible(providers); }));
-    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
-    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
-    REQUIRE(
-        waitForCondition([&]() { return TabCtrl_GetCurSel(tabs) == 2 && presenter.isAnalysisWindowOpenForTesting(); },
-                         std::chrono::milliseconds(4000)));
+    const HWND history = FindWindowExW(dashboard, nullptr, L"BUTTON", L"&History...");
+    REQUIRE(history != nullptr);
+    REQUIRE(IsWindowVisible(history));
+    SendMessageW(history, BM_CLICK, 0, 0);
+    REQUIRE(waitForCondition([&]() { return presenter.isAnalysisWindowOpenForTesting(); },
+                             std::chrono::milliseconds(4000)));
+    CHECK(TabCtrl_GetCurSel(tabs) == 0);
     REQUIRE(waitForCondition([&presenter]() {
         return presenter.getAnalysisScopeLabelForTesting() == "Active filters: OpenAI / openai.primary / Last 7 Days";
     }, std::chrono::milliseconds(4000)));

@@ -102,7 +102,7 @@ public:
     // Subscribe to shell exit requests from the dashboard menu
     void setExitRequestedCallback(std::function<void()> callback);
 
-    // Host an AnalysisPresenter for the Analysis tab. DashboardPresenter does not own it.
+    // Host an AnalysisPresenter for the dedicated Analysis window. DashboardPresenter does not own it.
     void setAnalysisPresenter(class AnalysisPresenter* presenter);
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS

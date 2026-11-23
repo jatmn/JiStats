@@ -381,24 +381,14 @@ std::optional<RECT> centeredRectForOwner(HWND owner, int width, int height) {
 struct UsageProgressSummary {
     std::string label;
     std::string detail;
-    int percentage = 0;
+    std::string status;
     std::string overlayText;
-    int secondaryPercentage = -1;
+    std::string resetText;
+    int percentage = -1;
     std::string secondaryOverlayText;
-    bool remainingSemantics = true;
+    std::string secondaryResetText;
+    int secondaryPercentage = -1;
 };
-
-bool quotaUsesRemainingPercentageSummary(const ProviderStatus& provider, const QuotaInfo& quota) {
-    if (quota.limit > 0) {
-        return true;
-    }
-
-    if (provider.providerKey == "claude_code" || provider.providerKey == "kimi") {
-        return false;
-    }
-
-    return quota.remainingPercentage > 0.0 || quota.usedPercentage > 0.0;
-}
 
 struct ProviderQuotaRowData {
     std::vector<std::string> columns;
@@ -482,23 +472,6 @@ std::vector<std::string> providerQuotaColumnHeaders() {
 
 std::vector<std::string> preferencesTabLabels() {
     return {"General", "OpenAI", "MiniMax", "Claude Code", "Kilo Code", "Kimi Code", "Grok / Cursor"};
-}
-
-std::string analysisDateRangeLabel(AnalysisDateRangePreset preset) {
-    switch (preset) {
-    case AnalysisDateRangePreset::Today:
-        return "Today";
-    case AnalysisDateRangePreset::Last24Hours:
-        return "Last 24 Hours";
-    case AnalysisDateRangePreset::Last7Days:
-        return "Last 7 Days";
-    case AnalysisDateRangePreset::ThisMonth:
-        return "This Month";
-    case AnalysisDateRangePreset::Custom:
-        return "Custom";
-    default:
-        return "Last 7 Days";
-    }
 }
 
 bool isExternalSubscriptionQuota(const QuotaInfo& quota) {
@@ -687,34 +660,6 @@ std::string providerQuotaDisplayLabel(
         return provider.displayName + " / " + provider.accountId;
     }
     return provider.displayName;
-}
-
-bool providerMatchesSelection(
-    const DashboardPreferences& preferences,
-    const ProviderStatus& provider) {
-    if (preferences.lastSelectedProviderId.empty()) {
-        return true;
-    }
-    if (provider.providerKey != preferences.lastSelectedProviderId) {
-        return false;
-    }
-    if (preferences.lastSelectedAccountId.empty()) {
-        return true;
-    }
-    return provider.accountId == preferences.lastSelectedAccountId;
-}
-
-bool hasMatchingSelectedProvider(const DashboardViewModel& model) {
-    if (model.preferences.lastSelectedProviderId.empty()) {
-        return false;
-    }
-
-    return std::any_of(
-        model.providers.begin(),
-        model.providers.end(),
-        [&model](const ProviderStatus& provider) {
-            return providerMatchesSelection(model.preferences, provider);
-        });
 }
 
 std::vector<ProviderQuotaRowData> buildProviderQuotaRows(const DashboardViewModel& model) {
@@ -1014,96 +959,118 @@ void setListViewItemText(HWND listView, int rowIndex, int columnIndex, const std
     SendMessageW(listView, LVM_SETITEMTEXTW, static_cast<WPARAM>(rowIndex), reinterpret_cast<LPARAM>(&item));
 }
 
+bool isSubscriptionProvider(const ProviderStatus& provider) {
+    const auto& key = provider.providerKey;
+    return key == "openai" || key == "minimax" || key == "kimi" || key == "grok" || key == "cursor";
+}
+
+bool isSubscriptionQuota(const ProviderStatus& provider, const QuotaInfo& quota) {
+    return isOpenAISubscriptionQuota(provider, quota) || isKimiSubscriptionQuota(provider, quota) ||
+           isMiniMaxCodingPlanQuota(provider, quota) || isMiniMaxTokenPlanQuota(provider, quota) ||
+           isExternalSubscriptionQuota(quota) || quota.providerSurface.empty();
+}
+
+std::string quotaWindowLabel(const ProviderStatus& provider, const QuotaInfo& quota, const std::string& window) {
+    if (window == "interval" &&
+        (isOpenAISubscriptionQuota(provider, quota) || isKimiSubscriptionQuota(provider, quota))) {
+        return "5-hour";
+    }
+    if (window == "weekly") {
+        return "7-day";
+    }
+    if (window == "daily") {
+        return "Daily";
+    }
+    if (window == "monthly") {
+        return "Monthly";
+    }
+    return "Plan";
+}
+
+std::string quotaResetLabel(std::time_t reset) {
+    return reset > 0 ? "Resets " + formatResetTimeLabel(reset) : "Reset time unknown";
+}
+
+std::string quotaStatusLabel(const ProviderStatus& provider) {
+    const auto sync = parseRuntimeTimestamp(provider.lastSyncTime);
+    if (sync <= 0) {
+        return provider.state == ProviderState::Live ? "Update time unknown"
+                                                     : providerStateLabel(provider.state) + " / Update time unknown";
+    }
+    const std::string state = provider.state == ProviderState::Live ? "Updated" : providerStateLabel(provider.state);
+    return state + " / " + formatSystemDateTime(sync, TIME_NOSECONDS);
+}
+
 std::vector<UsageProgressSummary> buildUsageProgressSummaries(const DashboardViewModel& model) {
     std::vector<UsageProgressSummary> summaries;
-    const bool selectionAvailable = hasMatchingSelectedProvider(model);
+    std::map<std::string, int> providerCounts;
     for (const auto& provider : model.providers) {
-        if (selectionAvailable && !providerMatchesSelection(model.preferences, provider)) {
+        if (provider.isEnabled) {
+            ++providerCounts[provider.providerKey];
+        }
+    }
+
+    for (const auto& provider : model.providers) {
+        if (!provider.isEnabled || !isSubscriptionProvider(provider)) {
             continue;
         }
+        const std::string providerLabel = providerQuotaDisplayLabel(provider, providerCounts);
+        const std::string accountSuffix = providerLabel.substr(provider.displayName.size());
+        const size_t start = summaries.size();
         for (const auto& quota : provider.quotas) {
-            if (!quotaUsesRemainingPercentageSummary(provider, quota)) {
-                continue;
-            }
-            if (isStandaloneSecondaryQuotaRow(provider, quota, provider.quotas)) {
+            if (!isSubscriptionQuota(provider, quota) || quota.limit <= 0 ||
+                isStandaloneSecondaryQuotaRow(provider, quota, provider.quotas)) {
                 continue;
             }
 
             UsageProgressSummary summary;
-            summary.label = normalizedUsageSummaryLabel(provider, quota);
-
-            long long remaining = quota.remaining;
-            if (quota.limit > 0 && remaining == 0 && quota.used < quota.limit) {
-                remaining = quota.limit - quota.used;
-            }
+            summary.label = normalizedUsageSummaryLabel(provider, quota) + accountSuffix;
+            summary.status = quotaStatusLabel(provider);
+            summary.percentage = static_cast<int>(std::clamp(quota.remainingPercentage, 0.0, 100.0) + 0.5);
+            summary.overlayText = quotaWindowLabel(provider, quota, quota.windowType) + ": " +
+                                  formatPercentageLabel(summary.percentage) + " remaining";
+            summary.resetText = quotaResetLabel(quota.windowResetAt);
 
             std::ostringstream detail;
-            const double remainingPercentage = quota.limit > 0
-                ? quota.remainingPercentage
-                : 0.0;
-            detail << formatPercentageLabel(remainingPercentage) << " remaining";
-            if (isOpenAISubscriptionQuota(provider, quota) ||
-                isKimiSubscriptionQuota(provider, quota)) {
-                if (quota.windowResetAt > 0) {
-                    detail << " (resets " << formatResetTimeLabel(quota.windowResetAt) << ")";
-                }
-                if (quota.secondaryRemainingPercentage >= 0.0) {
-                    detail << " | Weekly "
-                           << formatPercentageLabel(quota.secondaryRemainingPercentage)
-                           << " remaining";
-                    if (quota.secondaryWindowResetAt > 0) {
-                        detail << " (resets " << formatResetTimeLabel(quota.secondaryWindowResetAt) << ")";
-                    }
-                }
-            } else if (isExternalSubscriptionQuota(quota)) {
-                if (quota.windowResetAt > 0) {
-                    detail << " (resets " << formatResetTimeLabel(quota.windowResetAt) << ")";
-                }
-            } else if (quota.limit > 0) {
-                const char* unitLabel = isMiniMaxCodingPlanQuota(provider, quota)
-                    ? "prompts"
-                    : (isMiniMaxTokenPlanQuota(provider, quota) ? "tokens" : "units");
-                detail << " (" << formatNumber(remaining) << " of " << formatNumber(quota.limit)
-                       << " " << unitLabel << " left";
-                if (quota.windowResetAt > 0) {
-                    detail << "; resets " << formatResetTimeLabel(quota.windowResetAt);
-                }
-                detail << ")";
+            detail << formatPercentageLabel(quota.remainingPercentage) << " remaining";
+            if (isMiniMaxCodingPlanQuota(provider, quota) || isMiniMaxTokenPlanQuota(provider, quota)) {
+                const char* units = isMiniMaxCodingPlanQuota(provider, quota) ? "prompts" : "tokens";
+                detail << " (" << formatNumber(quota.remaining) << " of " << formatNumber(quota.limit) << " " << units
+                       << " left)";
             }
-            summary.detail = detail.str();
-
-            double percentage = quota.limit > 0 ? quota.remainingPercentage : 0.0;
-            summary.percentage = static_cast<int>(percentage + 0.5);
-            summary.overlayText = isPairedSubscriptionQuotaSummary(provider, quota)
-                ? ("5h " + formatPercentageLabel(static_cast<double>(summary.percentage)))
-                : (formatPercentageLabel(static_cast<double>(summary.percentage)) + " remaining");
+            if (quota.windowResetAt > 0) {
+                detail << " (resets " << formatResetTimeLabel(quota.windowResetAt) << ")";
+            }
             if (isPairedSubscriptionQuotaSummary(provider, quota)) {
                 summary.secondaryPercentage =
                     static_cast<int>(std::clamp(quota.secondaryRemainingPercentage, 0.0, 100.0) + 0.5);
-                summary.secondaryOverlayText =
-                    "7d " + formatPercentageLabel(static_cast<double>(summary.secondaryPercentage));
+                summary.secondaryOverlayText = quotaWindowLabel(provider, quota, quota.secondaryWindowType) + ": " +
+                                               formatPercentageLabel(summary.secondaryPercentage) + " remaining";
+                summary.secondaryResetText = quotaResetLabel(quota.secondaryWindowResetAt);
+                detail << " | Weekly " << formatPercentageLabel(quota.secondaryRemainingPercentage) << " remaining";
+                if (quota.secondaryWindowResetAt > 0) {
+                    detail << " (resets " << formatResetTimeLabel(quota.secondaryWindowResetAt) << ")";
+                }
             }
-            summaries.push_back(summary);
+            detail << "\r\nSource: " << quotaSourceLabel(quota);
+            if (!quota.confidenceTier.empty()) {
+                detail << " | Confidence: " << quota.confidenceTier;
+            }
+            summary.detail = detail.str();
+            if (quota.isBackfilled || quota.hasUnknownGaps) {
+                summary.status += " / " + quotaSourceLabel(quota);
+            }
+            summaries.push_back(std::move(summary));
         }
-    }
-
-    if (!summaries.empty()) {
-        return summaries;
-    }
-
-    if (!model.runtimeSummaries.empty()) {
-        summaries.reserve(model.runtimeSummaries.size());
-        for (const auto& runtimeSummary : model.runtimeSummaries) {
+        if (start == summaries.size()) {
             UsageProgressSummary summary;
-            summary.label = runtimeSummary.label;
-            summary.detail = runtimeSummary.detail;
-            summary.percentage = runtimeSummary.percentage;
-            summary.overlayText = runtimeSummary.badge.empty() ? "Local" : runtimeSummary.badge;
-            summary.remainingSemantics = false;
-            summaries.push_back(summary);
+            summary.label = providerLabel;
+            summary.status = provider.state == ProviderState::Sample ? "" : providerStateLabel(provider.state);
+            summary.overlayText = "Quota unavailable";
+            summary.detail = provider.detectionMessage;
+            summaries.push_back(std::move(summary));
         }
     }
-
     return summaries;
 }
 #endif
@@ -1183,7 +1150,8 @@ public:
     HWND dashboardViewport = nullptr;
     HWND appGroup = nullptr;
     HWND mainTab = nullptr;
-    HWND versionValue = nullptr;
+    HWND historyButton = nullptr;
+    HWND dashboardSettingsButton = nullptr;
     HWND connectionLabel = nullptr;
     HWND connectionValue = nullptr;
     HWND offlineRetryButton = nullptr;
@@ -1200,6 +1168,8 @@ public:
     HWND updatedValue = nullptr;
     HWND usageGroup = nullptr;
     HWND quotaEmptyText = nullptr;
+    HWND activityGroup = nullptr;
+    HWND activityText = nullptr;
     HWND codexThroughputGroup = nullptr;
     HWND codexThroughputText = nullptr;
     HWND codexThroughputAveragesText = nullptr;
@@ -1221,9 +1191,6 @@ public:
     HWND chartCountdownHoverWindow = nullptr;
     HWND providersGroup = nullptr;
     HWND providerList = nullptr;
-    HWND analysisLaunchTitle = nullptr;
-    HWND analysisLaunchInfo = nullptr;
-    HWND analysisLaunchButton = nullptr;
     HWND statusBar = nullptr;
     AnalysisPresenter* analysisPresenter = nullptr;
     HWND preferencesTab = nullptr;
@@ -1289,18 +1256,27 @@ public:
     HFONT dashboardLabelFont = nullptr;
     HFONT dashboardSectionFont = nullptr;
     HFONT dashboardTitleFont = nullptr;
-    std::array<RECT, 5> overviewCards{};
+    std::array<RECT, 6> overviewCards{};
     RECT noticeRect{};
     RECT otherPageCard{};
     int overviewScroll = 0;
     int wheelDelta = 0;
     size_t quotaRowCount = 0;
+    bool mainControlsLaidOut = false;
     struct OverviewLayout {
         std::wstring offlineNoticeMessage;
         bool offlineNoticeVisible = false;
         bool offlineRetryAvailable = false;
         int openAiModelRows = 0;
         int hicapModelRows = 0;
+        int activityRows = 0;
+
+        bool operator==(const OverviewLayout& other) const {
+            return offlineNoticeMessage == other.offlineNoticeMessage &&
+                   offlineNoticeVisible == other.offlineNoticeVisible &&
+                   offlineRetryAvailable == other.offlineRetryAvailable && openAiModelRows == other.openAiModelRows &&
+                   hicapModelRows == other.hicapModelRows && activityRows == other.activityRows;
+        }
     };
     OverviewLayout overviewLayout;
     HICON appIconLarge = nullptr;
@@ -1314,16 +1290,18 @@ public:
     std::string htmlExportPathForTesting;
     std::uint64_t viewModelSyncCountForTesting = 0;
 #endif
-    static constexpr size_t kMaxUsageRows = 4;
     struct UsageProgressRow {
         HWND label = nullptr;
+        HWND status = nullptr;
         HWND bar = nullptr;
-        int percentage = 0;
+        int percentage = -1;
         int secondaryPercentage = -1;
         COLORREF barColor = RGB(46, 139, 87);
         COLORREF secondaryBarColor = RGB(46, 139, 87);
         std::wstring overlayText;
         std::wstring secondaryOverlayText;
+        std::wstring resetText;
+        std::wstring secondaryResetText;
         std::wstring detailTooltipText;
     };
     struct ShellDialogState {
@@ -1334,7 +1312,7 @@ public:
         HWND bodyLabel = nullptr;
         HWND closeButton = nullptr;
     };
-    UsageProgressRow usageRows[kMaxUsageRows];
+    std::vector<UsageProgressRow> usageRows;
     std::vector<ProviderQuotaRowData> providerQuotaRows;
     ShellDialogState helpDialog;
     ShellDialogState aboutDialog;
@@ -1731,25 +1709,32 @@ public:
             font.lfHeight = -scaledPixels(pixels);
             font.lfWeight = weight;
             font.lfQuality = CLEARTYPE_QUALITY;
-            wcscpy_s(font.lfFaceName, L"Segoe UI");
+            wcscpy_s(font.lfFaceName, L"Tahoma");
             return CreateFontIndirectW(&font);
         };
         const HFONT oldFonts[] = {dashboardBodyFont, dashboardLabelFont, dashboardSectionFont, dashboardTitleFont};
         dashboardBodyFont = makeFont(13, FW_NORMAL);
         dashboardLabelFont = makeFont(13, FW_SEMIBOLD);
-        dashboardSectionFont = makeFont(17, FW_SEMIBOLD);
-        dashboardTitleFont = makeFont(29, FW_SEMIBOLD);
+        dashboardSectionFont = makeFont(14, FW_BOLD);
+        dashboardTitleFont = makeFont(22, FW_BOLD);
 
         const auto setFont = [](HWND control, HFONT font) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
         };
-        const HWND bodyControls[] = {versionValue,       mainTab,
-                                     recoveryValue,      scheduledExportValue,
-                                     updatedValue,       offlineNoticeMessage,
-                                     offlineRetryButton, offlineDismissButton,
-                                     quotaEmptyText,     openAiUsageText,
-                                     hicapUsageText,     providerList,
-                                     analysisLaunchInfo, analysisLaunchButton,
+        const HWND bodyControls[] = {historyButton,
+                                     dashboardSettingsButton,
+                                     mainTab,
+                                     recoveryValue,
+                                     scheduledExportValue,
+                                     updatedValue,
+                                     offlineNoticeMessage,
+                                     offlineRetryButton,
+                                     offlineDismissButton,
+                                     quotaEmptyText,
+                                     activityText,
+                                     openAiUsageText,
+                                     hicapUsageText,
+                                     providerList,
                                      statusBar};
         for (HWND control : bodyControls) {
             setFont(control, dashboardBodyFont);
@@ -1759,16 +1744,18 @@ public:
         for (HWND control : labels) {
             setFont(control, dashboardLabelFont);
         }
-        const HWND sections[] = {appGroup,        usageGroup,     codexThroughputGroup, openAiUsageGroup,
-                                 hicapUsageGroup, providersGroup, analysisLaunchTitle};
+        const HWND sections[] = {appGroup,         usageGroup,      activityGroup, codexThroughputGroup,
+                                 openAiUsageGroup, hicapUsageGroup, providersGroup};
         for (HWND control : sections) {
             setFont(control, dashboardSectionFont);
         }
         for (const auto& row : usageRows) {
             setFont(row.label, dashboardLabelFont);
+            setFont(row.status, dashboardBodyFont);
+            setFont(row.bar, dashboardBodyFont);
         }
         setFont(titleLabel, dashboardTitleFont);
-        SendMessageW(mainTab, TCM_SETITEMSIZE, 0, MAKELPARAM(scaledPixels(144), scaledPixels(31)));
+        SendMessageW(mainTab, TCM_SETITEMSIZE, 0, MAKELPARAM(scaledPixels(134), scaledPixels(26)));
         if (HWND header = ListView_GetHeader(providerList)) {
             setFont(header, dashboardLabelFont);
         }
@@ -1948,10 +1935,6 @@ public:
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         SendMessageW(usageTooltip, TTM_ACTIVATE, TRUE, 0);
-        for (size_t index = 0; index < kMaxUsageRows; ++index) {
-            configureUsageTooltipTool(usageRows[index].label);
-            configureUsageTooltipTool(usageRows[index].bar);
-        }
     }
 
     void dismissUsageTooltip() {
@@ -2017,9 +2000,9 @@ public:
             return &updatedTooltipBody;
         }
 
-        for (size_t index = 0; index < kMaxUsageRows; ++index) {
-            if (target == usageRows[index].label || target == usageRows[index].bar) {
-                return &usageRows[index].detailTooltipText;
+        for (const auto& row : usageRows) {
+            if (target == row.label || target == row.status || target == row.bar) {
+                return &row.detailTooltipText;
             }
         }
 
@@ -2044,47 +2027,6 @@ public:
             if (target != nullptr && IsWindow(target)) {
                 DestroyWindow(target);
             }
-        }
-    }
-
-    std::wstring analysisLauncherTitleText() const {
-        return analysisWindow != nullptr ? L"Analysis workspace is open" : L"Usage analysis";
-    }
-
-    std::wstring analysisLauncherInfoText(const DashboardViewModel& model) const {
-        std::ostringstream stream;
-        stream << "Explore usage history, trends, breakdowns, and data sources in the Analysis window.";
-        if (!model.analysis.scopeLabel.empty()) {
-            stream << "\r\n\r\nCurrent scope: " << model.analysis.scopeLabel << ".";
-        }
-        if (model.analysis.codexThroughput.hasData) {
-            stream << "\r\n\r\nCodex throughput: "
-                   << formatRate(model.analysis.codexThroughput.tokensPerMinute5m)
-                   << " tokens/min and "
-                   << formatRate(model.analysis.codexThroughput.promptsPerMinute5m)
-                   << " prompts/min over 5m"
-                   << " (" << model.analysis.codexThroughput.confidenceLabel << ").";
-        }
-        if (!model.analysis.dataQualityNote.empty()) {
-            stream << "\r\n\r\n" << model.analysis.dataQualityNote;
-        } else if (!model.recoveryStatusSummary.empty() || !model.scheduledExportStatusSummary.empty()) {
-            stream << "\r\n\r\nRecovery: "
-                   << (model.recoveryStatusSummary.empty() ? "No recent recovery activity." : model.recoveryStatusSummary)
-                   << " Scheduled export: "
-                   << (model.scheduledExportStatusSummary.empty() ? "Disabled." : model.scheduledExportStatusSummary) << ".";
-        }
-        return utf8ToWide(stream.str());
-    }
-
-    void syncAnalysisLauncherState(const DashboardViewModel& model) {
-        if (analysisLaunchTitle != nullptr) {
-            setWindowText(analysisLaunchTitle, analysisLauncherTitleText());
-        }
-        if (analysisLaunchInfo != nullptr) {
-            setWindowText(analysisLaunchInfo, analysisLauncherInfoText(model));
-        }
-        if (analysisLaunchButton != nullptr) {
-            setWindowText(analysisLaunchButton, analysisWindow != nullptr ? L"Bring Analysis Forward" : L"Open Analysis Window");
         }
     }
 
@@ -2132,7 +2074,6 @@ public:
             if (bringToFront) {
                 SetForegroundWindow(existing);
             }
-            syncAnalysisLauncherState(copyViewModel());
             return;
         }
 
@@ -2193,15 +2134,11 @@ public:
         if (bringToFront) {
             SetForegroundWindow(hwnd);
         }
-        syncAnalysisLauncherState(copyViewModel());
     }
 
     void activateMainPage(int index) {
         selectedMainTab = index;
         layoutMainControls();
-        if (selectedMainTab == 2) {
-            openAnalysisWindow(true);
-        }
     }
 
     void syncMainTabVisibility() {
@@ -2234,17 +2171,18 @@ public:
         for (HWND control : {offlineNoticeTitle, offlineNoticeMessage, offlineDismissButton}) {
             ShowWindow(control, overview && overviewLayout.offlineNoticeVisible ? SW_SHOWNA : SW_HIDE);
         }
-        for (size_t index = 0; index < kMaxUsageRows; ++index) {
+        for (size_t index = 0; index < usageRows.size(); ++index) {
             const int flag = overview && index < quotaRowCount ? SW_SHOWNA : SW_HIDE;
             ShowWindow(usageRows[index].label, flag);
+            ShowWindow(usageRows[index].status, flag);
             ShowWindow(usageRows[index].bar, flag);
         }
         ShowWindow(quotaEmptyText, overview && quotaRowCount == 0 ? SW_SHOWNA : SW_HIDE);
-        for (HWND control : {providersGroup, providerList}) {
-            ShowWindow(control, selectedMainTab == 1 ? SW_SHOWNA : SW_HIDE);
+        for (HWND control : {activityGroup, activityText}) {
+            ShowWindow(control, overview && overviewLayout.activityRows > 0 ? SW_SHOWNA : SW_HIDE);
         }
-        for (HWND control : {analysisLaunchTitle, analysisLaunchInfo, analysisLaunchButton}) {
-            ShowWindow(control, selectedMainTab == 2 ? SW_SHOWNA : SW_HIDE);
+        for (HWND control : {providersGroup, providerList}) {
+            ShowWindow(control, overview ? SW_HIDE : SW_SHOWNA);
         }
     }
 
@@ -3081,11 +3019,13 @@ public:
         };
 
         titleLabel = add(hwnd, L"STATIC", L"JiStats", WS_VISIBLE);
-        versionValue = add(hwnd, L"STATIC", L"", WS_VISIBLE | SS_RIGHT);
+        historyButton =
+            add(hwnd, L"BUTTON", L"&History...", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, kOpenAnalysisWindowButtonId);
+        dashboardSettingsButton =
+            add(hwnd, L"BUTTON", L"&Settings...", WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, kMenuFileSettingsId);
         mainTab = add(hwnd, WC_TABCONTROLW, L"",
-                      WS_VISIBLE | WS_TABSTOP | TCS_BUTTONS | TCS_FLATBUTTONS | TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED,
-                      kMainTabId);
-        const wchar_t* pageLabels[] = {L"Overview", L"Provider Snapshot", L"Analysis"};
+                      WS_VISIBLE | WS_TABSTOP | TCS_BUTTONS | TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED, kMainTabId);
+        const wchar_t* pageLabels[] = {L"Overview", L"Provider Details"};
         for (int index = 0; index < static_cast<int>(std::size(pageLabels)); ++index) {
             TCITEMW item{};
             item.mask = TCIF_TEXT;
@@ -3113,13 +3053,11 @@ public:
             add(page, L"BUTTON", L"Retry Now", WS_TABSTOP | BS_PUSHBUTTON | BS_NOTIFY, kOfflineRetryButtonId);
         offlineDismissButton =
             add(page, L"BUTTON", L"Dismiss", WS_TABSTOP | BS_PUSHBUTTON | BS_NOTIFY, kOfflineDismissButtonId);
-        usageGroup = add(page, L"STATIC", L"Provider quota");
-        quotaEmptyText = add(page, L"STATIC", L"No provider quota available.");
-        for (size_t index = 0; index < kMaxUsageRows; ++index) {
-            usageRows[index].label = add(page, L"STATIC", L"", SS_NOTIFY | SS_NOPREFIX | SS_ENDELLIPSIS);
-            usageRows[index].bar =
-                add(page, L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, kUsageBarBaseId + static_cast<int>(index));
-        }
+        usageGroup = add(page, L"STATIC", L"Subscription quota");
+        quotaEmptyText =
+            add(page, L"STATIC", L"No subscription quota reported yet. Manage provider tracking in Settings.");
+        activityGroup = add(page, L"STATIC", L"Recorded activity");
+        activityText = add(page, L"STATIC", L"", SS_NOPREFIX);
 
         codexThroughputGroup = add(page, L"STATIC", L"Codex throughput");
         codexThroughputText = add(page, L"STATIC", L"", SS_OWNERDRAW);
@@ -3138,13 +3076,11 @@ public:
         openAiUsageChart = addChart();
         hicapUsageChart = addChart();
 
-        providersGroup = add(page, L"STATIC", L"Provider quota snapshot");
-        providerList = add(page, WC_LISTVIEWW, L"", WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS);
+        providersGroup = add(page, L"STATIC", L"Provider details");
+        providerList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                                       WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 0, 0, 0,
+                                       0, page, nullptr, instance, nullptr);
         ListView_SetExtendedListViewStyle(providerList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
-        analysisLaunchTitle = add(page, L"STATIC", L"");
-        analysisLaunchInfo = add(page, L"STATIC", L"", SS_NOPREFIX);
-        analysisLaunchButton =
-            add(page, L"BUTTON", L"Open Analysis Window", WS_TABSTOP | BS_PUSHBUTTON, kOpenAnalysisWindowButtonId);
         statusBar = add(hwnd, STATUSCLASSNAMEW, L"", WS_VISIBLE);
         applyDashboardFonts();
 
@@ -3178,57 +3114,54 @@ public:
         RECT client{};
         GetClientRect(window, &client);
         const int width = client.right;
-        const int margin = px(24);
+        const int margin = px(12);
         const int navTop = px(54);
-        const int viewportTop = px(94);
+        const int viewportTop = px(90);
+        const int actionWidth = std::min(px(98), std::max(0, (width - 4 * margin) / 3));
+        const int settingsLeft = width - margin - actionWidth;
+        const int historyLeft = settingsLeft - margin - actionWidth;
 
         SendMessageW(statusBar, WM_SIZE, 0, 0);
         RECT status{};
         GetClientRect(statusBar, &status);
         const int viewportHeight = std::max(0, static_cast<int>(client.bottom - status.bottom) - viewportTop);
-        MoveWindow(titleLabel, margin, px(12), width - margin * 2 - px(100), px(39), FALSE);
-        MoveWindow(versionValue, width - margin - px(100), px(25), px(100), px(19), FALSE);
-        MoveWindow(mainTab, margin, navTop, px(500), px(36), FALSE);
+        MoveWindow(titleLabel, margin, px(12), std::max(0, historyLeft - margin * 2), px(28), FALSE);
+        MoveWindow(historyButton, historyLeft, px(13), actionWidth, px(26), FALSE);
+        MoveWindow(dashboardSettingsButton, settingsLeft, px(13), actionWidth, px(26), FALSE);
+        MoveWindow(mainTab, margin, navTop, std::min(px(282), std::max(0, width - margin * 2)), px(30), FALSE);
         MoveWindow(dashboardViewport, 0, viewportTop, width, viewportHeight, FALSE);
 
         if (selectedMainTab == 0) {
             layoutOverview(width, viewportHeight);
         } else {
             ShowScrollBar(dashboardViewport, SB_VERT, FALSE);
-            const int cardWidth = width - margin * 2;
-            const int inset = px(16);
-            const int innerWidth = cardWidth - inset * 2;
-            const int left = margin + inset;
-            const int analysisCardHeight = std::clamp(viewportHeight - px(8), 0, px(286));
-            const int cardHeight = selectedMainTab == 1 ? std::max(0, viewportHeight - px(18)) : analysisCardHeight;
-            otherPageCard = {margin, px(4), margin + cardWidth, px(4) + cardHeight};
-            MoveWindow(providersGroup, left, px(18), innerWidth, px(24), FALSE);
-            MoveWindow(providerList, left, px(52), innerWidth, std::max(0, cardHeight - px(62)), FALSE);
-            configureProviderListColumns();
-            MoveWindow(analysisLaunchTitle, left, px(19), innerWidth, px(28), FALSE);
-            const int buttonTop = std::max(px(52), analysisCardHeight - px(48));
-            MoveWindow(analysisLaunchInfo, left, px(57), innerWidth, std::max(0, buttonTop - px(68)), FALSE);
-            MoveWindow(analysisLaunchButton, left, buttonTop, px(200), px(32), FALSE);
+            const int panelWidth = std::max(0, width - margin * 2);
+            const int inset = px(10);
+            const int innerWidth = std::max(0, panelWidth - inset * 2);
+            const int panelHeight = std::max(0, viewportHeight - px(12));
+            otherPageCard = {margin, px(2), margin + panelWidth, px(2) + panelHeight};
+            MoveWindow(providersGroup, margin + inset, px(12), innerWidth, px(18), FALSE);
+            MoveWindow(providerList, margin + inset, px(34), innerWidth, std::max(0, panelHeight - px(44)), FALSE);
         }
         syncMainTabVisibility();
+        mainControlsLaidOut = true;
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
     void layoutOverview(int width, int height) {
         const auto px = [this](int value) { return scaledPixels(value); };
-        const int left = px(24);
-        const int gap = px(14);
-        const int inset = px(16);
-        const int cardWidth = width - left * 2 - GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(window));
-        const int innerWidth = cardWidth - inset * 2;
+        const int left = px(12);
+        const int gap = px(10);
+        const int inset = px(12);
+        const int cardWidth =
+            std::max(0, width - left * 2 - GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(window)));
+        const int innerWidth = std::max(0, cardWidth - inset * 2);
         const int innerLeft = left + inset;
-        const int statusColumns = innerWidth >= px(720) ? 4 : 2;
-        const int statusHeight = (4 / statusColumns) * px(48);
         const bool notice = overviewLayout.offlineNoticeVisible;
         const bool retry = overviewLayout.offlineRetryAvailable;
-        const int actionWidth = notice && retry ? px(204) : px(102);
-        const int noticeTextWidth = innerWidth - actionWidth - px(24);
-        int noticeHeight = px(40);
+        const int buttonWidth = px(86);
+        const int noticeTextWidth = std::max(0, innerWidth - (retry ? 2 : 1) * (buttonWidth + gap) - px(24));
+        int noticeHeight = 0;
         if (notice) {
             HDC dc = GetDC(dashboardViewport);
             HGDIOBJ oldFont = SelectObject(dc, dashboardBodyFont);
@@ -3237,14 +3170,25 @@ public:
                       DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
             SelectObject(dc, oldFont);
             ReleaseDC(dashboardViewport, dc);
-            noticeHeight = std::max(px(62), px(34) + static_cast<int>(measured.bottom));
+            noticeHeight = std::max(px(56), px(33) + static_cast<int>(measured.bottom));
         }
-        const int statusCardHeight = px(44) + statusHeight + ((notice || retry) ? noticeHeight + px(8) : 0);
-        const int quotaHeight = px(47) + std::max(1, static_cast<int>(quotaRowCount)) * px(43);
+
+        const bool stackQuota = innerWidth < px(540);
+        const int quotaRowHeight = px(stackQuota ? 83 : 56);
+        const int quotaTop = px(3) + (notice ? noticeHeight + gap : 0);
+        const int quotaHeight = px(45) + static_cast<int>(quotaRowCount) * quotaRowHeight;
+        const int activityTop = quotaTop + quotaHeight + gap;
+        const bool showActivity = overviewLayout.activityRows > 0;
+        const int activityHeight = px(34 + 17 * overviewLayout.activityRows);
+        const int statusTop = activityTop + (showActivity ? activityHeight + gap : 0);
+        const int statusColumns = innerWidth >= px(720) ? 4 : 2;
+        const int statusRowsHeight = (4 / statusColumns) * px(40);
+        const int statusHeight = px(39) + statusRowsHeight + (!notice && retry ? px(30) : 0);
+        const int throughputTop = statusTop + statusHeight + gap;
         const int summaryColumns = innerWidth >= px(680) ? 3 : 2;
         const int summaryHeight = px(96);
         const int summaryBlockHeight = summaryColumns == 3 ? summaryHeight : 2 * summaryHeight + gap;
-        const int throughputHeight = px(194) + summaryBlockHeight;
+        const int throughputHeight = px(181) + summaryBlockHeight;
         const bool twoColumns = cardWidth >= px(830);
         const auto summaryTextHeight = [&](int rows) { return px(std::max(34, (rows + 1) * 16 + 4)); };
         int openAiSummaryHeight = summaryTextHeight(overviewLayout.openAiModelRows);
@@ -3252,15 +3196,12 @@ public:
         if (twoColumns) {
             openAiSummaryHeight = hicapSummaryHeight = std::max(openAiSummaryHeight, hicapSummaryHeight);
         }
-        const int openAiModelHeight = px(198) + openAiSummaryHeight;
-        const int hicapModelHeight = px(198) + hicapSummaryHeight;
+        const int openAiModelHeight = px(190) + openAiSummaryHeight;
+        const int hicapModelHeight = px(190) + hicapSummaryHeight;
         const int modelWidth = twoColumns ? (cardWidth - gap) / 2 : cardWidth;
-        const int statusTop = px(4);
-        const int quotaTop = statusTop + statusCardHeight + gap;
-        const int throughputTop = quotaTop + quotaHeight + gap;
         const int modelTop = throughputTop + throughputHeight + gap;
         const int secondModelTop = twoColumns ? modelTop : modelTop + openAiModelHeight + gap;
-        const int contentHeight = secondModelTop + hicapModelHeight + px(20);
+        const int contentHeight = secondModelTop + hicapModelHeight + px(14);
 
         overviewScroll = std::clamp(overviewScroll, 0, std::max(0, contentHeight - height));
         SCROLLINFO scroll{};
@@ -3277,64 +3218,76 @@ public:
         };
         const auto card = [&](size_t index, HWND title, int x, int y, int w, int h) {
             overviewCards[index] = {x, y - overviewScroll, x + w, y + h - overviewScroll};
-            move(title, x + inset, y + px(12), w - inset * 2, px(25));
+            move(title, x + inset, y + px(8), std::max(0, w - inset * 2), px(20));
         };
 
-        card(0, appGroup, left, statusTop, cardWidth, statusCardHeight);
+        noticeRect = {};
+        const int buttonX = innerLeft + innerWidth - buttonWidth;
+        if (notice) {
+            const int noticeTop = px(3);
+            const int buttonY = noticeTop + (noticeHeight - px(26)) / 2;
+            noticeRect = {left, noticeTop - overviewScroll, left + cardWidth,
+                          noticeTop + noticeHeight - overviewScroll};
+            move(offlineNoticeTitle, innerLeft, noticeTop + px(7), noticeTextWidth, px(18));
+            move(offlineNoticeMessage, innerLeft, noticeTop + px(26), noticeTextWidth, noticeHeight - px(27));
+            move(offlineDismissButton, buttonX, buttonY, buttonWidth, px(26));
+            if (retry) {
+                move(offlineRetryButton, buttonX - gap - buttonWidth, buttonY, buttonWidth, px(26));
+            }
+        } else if (retry) {
+            move(offlineRetryButton, buttonX, statusTop + px(26) + statusRowsHeight, buttonWidth, px(26));
+        }
+
+        card(0, usageGroup, left, quotaTop, cardWidth, quotaHeight);
+        move(quotaEmptyText, innerLeft, quotaTop + px(25), innerWidth, px(16));
+        const int quotaLabelWidth = stackQuota ? innerWidth : std::clamp(innerWidth / 3, px(177), px(310));
+        const int barOffset = stackQuota ? 0 : quotaLabelWidth + gap;
+        for (size_t index = 0; index < quotaRowCount; ++index) {
+            const auto& row = usageRows[index];
+            const int y = quotaTop + px(32) + static_cast<int>(index) * quotaRowHeight;
+            move(row.label, innerLeft, y, quotaLabelWidth, px(17));
+            move(row.status, innerLeft, y + px(18), quotaLabelWidth, px(16));
+            move(row.bar, innerLeft + barOffset, y + (stackQuota ? px(35) : 0), innerWidth - barOffset, px(45));
+        }
+
+        overviewCards[1] = {};
+        if (showActivity) {
+            card(1, activityGroup, left, activityTop, cardWidth, activityHeight);
+            move(activityText, innerLeft, activityTop + px(27), innerWidth, activityHeight - px(30));
+        }
+
+        card(2, appGroup, left, statusTop, cardWidth, statusHeight);
         const HWND labels[] = {connectionLabel, recoveryLabel, scheduledExportLabel, updatedLabel};
         const HWND values[] = {connectionValue, recoveryValue, scheduledExportValue, updatedValue};
         const int columnWidth = innerWidth / statusColumns;
         for (int index = 0; index < 4; ++index) {
             const int x = innerLeft + (index % statusColumns) * columnWidth;
-            const int y = statusTop + px(45) + (index / statusColumns) * px(48);
-            move(labels[index], x, y, columnWidth - px(8), px(18));
-            move(values[index], x, y + px(19), columnWidth - px(8), px(19));
-        }
-        noticeRect = {};
-        const int noticeTop = statusTop + px(40) + statusHeight;
-        const int buttonX = innerLeft + innerWidth - px(12) - px(90);
-        const int buttonY = noticeTop + (noticeHeight - px(30)) / 2;
-        if (notice) {
-            noticeRect = {innerLeft, noticeTop - overviewScroll, innerLeft + innerWidth,
-                          noticeTop + noticeHeight - overviewScroll};
-            move(offlineNoticeTitle, innerLeft + px(12), noticeTop + px(9), noticeTextWidth, px(19));
-            move(offlineNoticeMessage, innerLeft + px(12), noticeTop + px(29), noticeTextWidth, noticeHeight - px(32));
-            move(offlineDismissButton, buttonX, buttonY, px(90), px(30));
-        }
-        if (retry) {
-            move(offlineRetryButton, notice ? buttonX - px(102) : buttonX, buttonY, px(90), px(30));
+            const int y = statusTop + px(33) + (index / statusColumns) * px(40);
+            move(labels[index], x, y, std::max(0, columnWidth - px(8)), px(18));
+            move(values[index], x, y + px(18), std::max(0, columnWidth - px(8)), px(18));
         }
 
-        card(1, usageGroup, left, quotaTop, cardWidth, quotaHeight);
-        move(quotaEmptyText, innerLeft, quotaTop + px(47), innerWidth, px(24));
-        const int quotaLabelWidth = std::min(px(244), innerWidth / 3);
-        for (size_t index = 0; index < quotaRowCount; ++index) {
-            const int y = quotaTop + px(42) + static_cast<int>(index) * px(43);
-            move(usageRows[index].label, innerLeft, y + px(9), quotaLabelWidth - gap, px(23));
-            move(usageRows[index].bar, innerLeft + quotaLabelWidth, y, innerWidth - quotaLabelWidth, px(34));
-        }
-
-        card(2, codexThroughputGroup, left, throughputTop, cardWidth, throughputHeight);
+        card(3, codexThroughputGroup, left, throughputTop, cardWidth, throughputHeight);
         const HWND summaries[] = {codexThroughputText, codexThroughputAveragesText, codexThroughputTotalsText};
-        const int summaryWidth = (innerWidth - (summaryColumns - 1) * gap) / summaryColumns;
+        const int summaryWidth = std::max(0, (innerWidth - (summaryColumns - 1) * gap) / summaryColumns);
         for (int index = 0; index < 3; ++index) {
             const int x = innerLeft + (index % summaryColumns) * (summaryWidth + gap);
-            const int y = throughputTop + px(43) + (index / summaryColumns) * (summaryHeight + gap);
+            const int y = throughputTop + px(31) + (index / summaryColumns) * (summaryHeight + gap);
             const int w = (index == 2 || index == summaryColumns - 1) ? innerLeft + innerWidth - x : summaryWidth;
-            move(summaries[index], x, y, w, summaryHeight);
+            move(summaries[index], x, y, std::max(0, w), summaryHeight);
         }
-        move(codexThroughputChart, innerLeft, throughputTop + px(49) + summaryBlockHeight, innerWidth, px(132));
+        move(codexThroughputChart, innerLeft, throughputTop + px(38) + summaryBlockHeight, innerWidth, px(132));
 
         const int secondX = twoColumns ? left + cardWidth - modelWidth : left;
         const auto modelCard = [&](size_t index, HWND title, HWND text, HWND chart, int x, int y, int summarySize,
                                    int cardHeight) {
             card(index, title, x, y, modelWidth, cardHeight);
-            move(text, x + inset, y + px(40), modelWidth - inset * 2, summarySize);
-            move(chart, x + inset, y + px(40) + summarySize, modelWidth - inset * 2, px(144));
+            move(text, x + inset, y + px(31), innerWidth - (cardWidth - modelWidth), summarySize);
+            move(chart, x + inset, y + px(31) + summarySize, innerWidth - (cardWidth - modelWidth), px(144));
         };
-        modelCard(3, openAiUsageGroup, openAiUsageText, openAiUsageChart, left, modelTop, openAiSummaryHeight,
+        modelCard(4, openAiUsageGroup, openAiUsageText, openAiUsageChart, left, modelTop, openAiSummaryHeight,
                   openAiModelHeight);
-        modelCard(4, hicapUsageGroup, hicapUsageText, hicapUsageChart, secondX, secondModelTop, hicapSummaryHeight,
+        modelCard(5, hicapUsageGroup, hicapUsageText, hicapUsageChart, secondX, secondModelTop, hicapSummaryHeight,
                   hicapModelHeight);
     }
 
@@ -3461,23 +3414,31 @@ public:
             return;
         }
 
-        ListView_DeleteAllItems(providerList);
-        providerQuotaRows = buildProviderQuotaRows(model);
-        for (int rowIndex = 0; rowIndex < static_cast<int>(providerQuotaRows.size()); ++rowIndex) {
-            const auto& row = providerQuotaRows[static_cast<size_t>(rowIndex)];
-            if (row.columns.empty()) {
-                continue;
+        auto rows = buildProviderQuotaRows(model);
+        const bool sameRows =
+            rows.size() == providerQuotaRows.size() &&
+            std::equal(rows.begin(), rows.end(), providerQuotaRows.begin(),
+                       [](const ProviderQuotaRowData& left, const ProviderQuotaRowData& right) {
+                           return left.providerKey == right.providerKey && left.accountId == right.accountId;
+                       });
+        if (!sameRows) {
+            ListView_DeleteAllItems(providerList);
+        }
+        for (int rowIndex = 0; rowIndex < static_cast<int>(rows.size()); ++rowIndex) {
+            const auto& row = rows[static_cast<size_t>(rowIndex)];
+            int columnIndex = 0;
+            if (!sameRows) {
+                insertListViewItem(providerList, rowIndex, utf8ToWide(row.columns[0]));
+                ++columnIndex;
             }
 
-            insertListViewItem(providerList, rowIndex, utf8ToWide(row.columns[0]));
-            for (int columnIndex = 1; columnIndex < static_cast<int>(row.columns.size()); ++columnIndex) {
-                setListViewItemText(
-                    providerList,
-                    rowIndex,
-                    columnIndex,
-                    utf8ToWide(row.columns[static_cast<size_t>(columnIndex)]));
+            for (; columnIndex < static_cast<int>(row.columns.size()); ++columnIndex) {
+                if (!sameRows || row.columns[columnIndex] != providerQuotaRows[rowIndex].columns[columnIndex]) {
+                    setListViewItemText(providerList, rowIndex, columnIndex, utf8ToWide(row.columns[columnIndex]));
+                }
             }
         }
+        providerQuotaRows = std::move(rows);
 
         restoreProviderListSelection(model.preferences);
     }
@@ -3508,7 +3469,11 @@ public:
         }
 
         const int matchIndex = findProviderQuotaRowIndex(preferences);
-        if (matchIndex < 0) {
+        const int selected = ListView_GetNextItem(providerList, -1, LVNI_SELECTED);
+        if (selected == matchIndex ||
+            (selected >= 0 && matchIndex >= 0 &&
+             providerQuotaRows[selected].providerKey == providerQuotaRows[matchIndex].providerKey &&
+             providerQuotaRows[selected].accountId == providerQuotaRows[matchIndex].accountId)) {
             return;
         }
 
@@ -3518,12 +3483,10 @@ public:
             -1,
             0,
             LVIS_SELECTED | LVIS_FOCUSED);
-        ListView_SetItemState(
-            providerList,
-            matchIndex,
-            LVIS_SELECTED | LVIS_FOCUSED,
-            LVIS_SELECTED | LVIS_FOCUSED);
-        ListView_EnsureVisible(providerList, matchIndex, FALSE);
+        if (matchIndex >= 0) {
+            ListView_SetItemState(providerList, matchIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_EnsureVisible(providerList, matchIndex, FALSE);
+        }
         suppressProviderSelectionNotification = false;
     }
 
@@ -3970,49 +3933,91 @@ public:
         }
     }
 
-    void syncUsageProgress(const DashboardViewModel& model) {
-        const std::vector<UsageProgressSummary> summaries = buildUsageProgressSummaries(model);
-        const auto colorForPercentage = [](int percentage, bool remainingSemantics) {
-            if (!remainingSemantics) {
-                return RGB(41, 105, 213);
+    void ensureUsageRows(size_t count) {
+        const auto create = [this](DWORD style, int id = 0) {
+            return CreateWindowExW(0, L"STATIC", L"", WS_CHILD | style, 0, 0, 0, 0, dashboardViewport,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr),
+                                   nullptr);
+        };
+        while (usageRows.size() < count) {
+            UsageProgressRow row;
+            row.label = create(SS_NOTIFY | SS_NOPREFIX | SS_ENDELLIPSIS);
+            row.status = create(SS_NOTIFY | SS_NOPREFIX | SS_ENDELLIPSIS);
+            row.bar = create(SS_OWNERDRAW | SS_NOTIFY, kUsageBarBaseId + static_cast<int>(usageRows.size()));
+            if (row.label == nullptr || row.status == nullptr || row.bar == nullptr) {
+                for (HWND control : {row.label, row.status, row.bar}) {
+                    if (control != nullptr) {
+                        DestroyWindow(control);
+                    }
+                }
+                return;
             }
+            SendMessageW(row.label, WM_SETFONT, reinterpret_cast<WPARAM>(dashboardLabelFont), FALSE);
+            SendMessageW(row.status, WM_SETFONT, reinterpret_cast<WPARAM>(dashboardBodyFont), FALSE);
+            SendMessageW(row.bar, WM_SETFONT, reinterpret_cast<WPARAM>(dashboardBodyFont), FALSE);
+            usageRows.push_back(std::move(row));
+            for (HWND control : {usageRows.back().label, usageRows.back().status, usageRows.back().bar}) {
+                configureUsageTooltipTool(control);
+            }
+        }
+    }
+
+    bool syncUsageProgress(const DashboardViewModel& model) {
+        const auto summaries = buildUsageProgressSummaries(model);
+        ensureUsageRows(summaries.size());
+        const size_t previousCount = quotaRowCount;
+        quotaRowCount = std::min(summaries.size(), usageRows.size());
+
+        const auto colorForPercentage = [](int percentage) {
             if (percentage >= 50) {
-                return RGB(24, 130, 96);
+                return RGB(54, 128, 28);
             }
             if (percentage >= 20) {
-                return RGB(177, 107, 20);
+                return RGB(173, 105, 14);
             }
-            return RGB(197, 55, 76);
+            return RGB(181, 49, 33);
         };
-        quotaRowCount = std::min(summaries.size(), kMaxUsageRows);
-        const bool localActivity = !summaries.empty() && !summaries.front().remainingSemantics;
-        setWindowText(usageGroup, localActivity ? L"Recent local activity" : L"Provider quota");
-        for (size_t index = 0; index < kMaxUsageRows; ++index) {
-            if (index >= quotaRowCount) {
-                usageRows[index].overlayText.clear();
-                usageRows[index].secondaryOverlayText.clear();
-                usageRows[index].detailTooltipText.clear();
-                usageRows[index].secondaryPercentage = -1;
-                continue;
-            }
+        for (size_t index = 0; index < quotaRowCount; ++index) {
+            auto& row = usageRows[index];
+            const auto& summary = summaries[index];
+            setWindowText(row.label, summary.label);
+            setWindowText(row.status, summary.status);
+            row.overlayText = utf8ToWide(summary.overlayText);
+            row.secondaryOverlayText = utf8ToWide(summary.secondaryOverlayText);
+            row.resetText = utf8ToWide(summary.resetText);
+            row.secondaryResetText = utf8ToWide(summary.secondaryResetText);
+            row.detailTooltipText = utf8ToWide(summary.detail);
+            row.percentage = summary.percentage;
+            row.secondaryPercentage = summary.secondaryPercentage;
+            row.barColor = colorForPercentage(row.percentage);
+            row.secondaryBarColor = colorForPercentage(row.secondaryPercentage);
 
-            setWindowText(usageRows[index].label, summaries[index].label);
-            usageRows[index].overlayText = utf8ToWide(
-                summaries[index].overlayText.empty()
-                    ? formatPercentageLabel(static_cast<double>(summaries[index].percentage))
-                    : summaries[index].overlayText);
-            usageRows[index].secondaryOverlayText = utf8ToWide(summaries[index].secondaryOverlayText);
-            usageRows[index].detailTooltipText = utf8ToWide(summaries[index].detail);
-            
-            const int percentage = summaries[index].percentage;
-            usageRows[index].percentage = percentage;
-            usageRows[index].secondaryPercentage = summaries[index].secondaryPercentage;
-            usageRows[index].barColor = colorForPercentage(percentage, summaries[index].remainingSemantics);
-            usageRows[index].secondaryBarColor = colorForPercentage(
-                summaries[index].secondaryPercentage,
-                summaries[index].remainingSemantics);
-            InvalidateRect(usageRows[index].bar, nullptr, TRUE);
+            std::wstring caption = row.overlayText;
+            if (!row.resetText.empty()) {
+                caption += L" / " + row.resetText;
+            }
+            if (row.secondaryPercentage >= 0) {
+                caption += L" | " + row.secondaryOverlayText + L" / " + row.secondaryResetText;
+            }
+            setWindowText(row.bar, caption);
+            InvalidateRect(row.bar, nullptr, FALSE);
         }
+        return quotaRowCount != previousCount;
+    }
+
+    void syncRecordedActivity(const DashboardViewModel& model) {
+        std::ostringstream activity;
+        for (const auto& summary : model.runtimeSummaries) {
+            if (activity.tellp() > 0) {
+                activity << "\r\n";
+            }
+            activity << summary.label;
+            if (summary.label == "Today") {
+                activity << " (UTC)";
+            }
+            activity << "   " << summary.detail;
+        }
+        setWindowText(activityText, activity.str());
     }
 
     void syncViewModelToControls() {
@@ -4025,7 +4030,6 @@ public:
         }
 #endif
 
-        setWindowText(versionValue, model.appVersion.empty() ? "" : ("v" + model.appVersion));
         {
             const std::string title = model.appVersion.empty()
                 ? "JiStats"
@@ -4041,9 +4045,14 @@ public:
         const auto modelRows = [](const AnalysisProviderModelUsageChart& chart) {
             return chart.hasData ? static_cast<int>(std::min<size_t>(chart.series.size(), 6)) : 0;
         };
-        overviewLayout = {utf8ToWide(model.offlineNoticeMessage), model.offlineNoticeVisible,
-                          model.offlineRetryAvailable, modelRows(model.analysis.openAiCodexModelUsage),
-                          modelRows(model.analysis.hicapCodexModelUsage)};
+        OverviewLayout layout{utf8ToWide(model.offlineNoticeMessage),
+                              model.offlineNoticeVisible,
+                              model.offlineRetryAvailable,
+                              modelRows(model.analysis.openAiCodexModelUsage),
+                              modelRows(model.analysis.hicapCodexModelUsage),
+                              static_cast<int>(model.runtimeSummaries.size())};
+        const bool layoutChanged = !(overviewLayout == layout);
+        overviewLayout = std::move(layout);
         setWindowText(offlineNoticeMessage, overviewLayout.offlineNoticeMessage);
         setWindowText(
             recoveryValue,
@@ -4058,7 +4067,6 @@ public:
         syncConnectionTooltip(model.runtimeState);
         syncRecoveryTooltip(model);
         syncScheduledExportTooltip(model);
-        syncAnalysisLauncherState(model);
         const CodexThroughputOverviewColumns codexThroughputColumns =
             codexThroughputOverviewColumns(model.analysis.codexThroughput);
         setWindowText(codexThroughputText, utf8ToWide(codexThroughputColumns.recent));
@@ -4072,8 +4080,13 @@ public:
         updatedTooltipBody = utf8ToWide(model.lastUpdateTime.empty() ? "Waiting for first update"
                                                                      : localizeDisplayTimestamp(model.lastUpdateTime));
         setWindowText(updatedValue, updatedTooltipBody);
-        syncUsageProgress(model);
-        layoutMainControls();
+        const bool quotaRowsChanged = syncUsageProgress(model);
+        syncRecordedActivity(model);
+        if (!mainControlsLaidOut || layoutChanged || quotaRowsChanged) {
+            layoutMainControls();
+        } else {
+            invalidateDashboardChartCanvases();
+        }
         populateProviderList(model);
         if (analysisPresenter != nullptr && analysisWindow != nullptr) {
             analysisPresenter->updateViewModel(model.analysis);
@@ -4093,15 +4106,18 @@ public:
         syncShellDialogContent(DashboardShellDialog::About);
     }
 
-    void invalidateDashboardChartCanvases(BOOL erase) {
-        if (codexThroughputChart != nullptr) {
-            InvalidateRect(codexThroughputChart, nullptr, erase);
+    void invalidateDashboardChartCanvases() {
+        if (selectedMainTab != 0 || !IsWindowVisible(dashboardViewport)) {
+            return;
         }
-        if (openAiUsageChart != nullptr) {
-            InvalidateRect(openAiUsageChart, nullptr, erase);
-        }
-        if (hicapUsageChart != nullptr) {
-            InvalidateRect(hicapUsageChart, nullptr, erase);
+        RECT viewport{};
+        GetWindowRect(dashboardViewport, &viewport);
+        for (HWND chart : {codexThroughputChart, openAiUsageChart, hicapUsageChart}) {
+            RECT bounds{};
+            RECT intersection{};
+            if (GetWindowRect(chart, &bounds) && IntersectRect(&intersection, &bounds, &viewport)) {
+                InvalidateRect(chart, nullptr, FALSE);
+            }
         }
     }
 
@@ -5533,7 +5549,6 @@ public:
                 std::lock_guard<std::mutex> lock(mutex);
                 analysisWindow = nullptr;
             }
-            syncAnalysisLauncherState(copyViewModel());
             return 0;
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -5664,6 +5679,7 @@ public:
         }
         case WM_DPICHANGED: {
             applyDashboardFonts();
+            configureProviderListColumns();
             const auto& bounds = *reinterpret_cast<const RECT*>(lParam);
             SetWindowPos(hwnd, nullptr, bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -5672,13 +5688,19 @@ public:
         }
         case WM_SETTINGCHANGE:
         case WM_SYSCOLORCHANGE:
+        case WM_THEMECHANGED:
             refreshDashboardColors();
             RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_ERASEBKGND: {
             RECT rect{};
             GetClientRect(hwnd, &rect);
-            fillDashboardRect(reinterpret_cast<HDC>(wParam), rect, dashboardColor(RGB(245, 247, 251), COLOR_WINDOW));
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            fillDashboardRect(dc, rect, dashboardPanelColor());
+            RECT banner{0, 0, rect.right, scaledPixels(46)};
+            fillDashboardRect(dc, banner, dashboardTitleColor());
+            RECT bevel{0, banner.bottom, rect.right, banner.bottom + scaledPixels(3)};
+            fillDashboardRect(dc, bevel, dashboardColor(RGB(108, 160, 226), COLOR_3DSHADOW));
             return 1;
         }
         case WM_MOUSEWHEEL:
@@ -5763,7 +5785,7 @@ public:
                         callback();
                     }
                 }
-                invalidateDashboardChartCanvases(false);
+                invalidateDashboardChartCanvases();
                 return 0;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -5820,24 +5842,28 @@ public:
                     drawModelUsageSummary(*draw);
                     return TRUE;
                 }
-                if (draw->CtlID >= kUsageBarBaseId && draw->CtlID < kUsageBarBaseId + kMaxUsageRows) {
-                    drawQuotaBar(*draw, usageRows[draw->CtlID - kUsageBarBaseId]);
-                    return TRUE;
+                if (draw->CtlID >= kUsageBarBaseId && draw->CtlID - kUsageBarBaseId < usageRows.size()) {
+                    const auto& row = usageRows[draw->CtlID - kUsageBarBaseId];
+                    if (draw->hwndItem == row.bar) {
+                        drawQuotaBar(*draw, row);
+                        return TRUE;
+                    }
                 }
                 return DefWindowProcW(hwnd, msg, wParam, lParam);
             }
         case WM_CTLCOLORSTATIC: {
             HDC dc = reinterpret_cast<HDC>(wParam);
             HWND control = reinterpret_cast<HWND>(lParam);
-            const bool header = control == titleLabel || control == versionValue;
+            const bool header = control == titleLabel;
             const bool notice = control == offlineNoticeTitle || control == offlineNoticeMessage;
-            const COLORREF background = notice   ? dashboardColor(RGB(255, 246, 232), COLOR_WINDOW)
-                                        : header ? dashboardColor(RGB(245, 247, 251), COLOR_WINDOW)
+            const COLORREF background = notice   ? dashboardColor(RGB(255, 248, 216), COLOR_WINDOW)
+                                        : header ? dashboardTitleColor()
                                                  : GetSysColor(COLOR_WINDOW);
-            COLORREF foreground = dashboardColor(RGB(29, 42, 65), COLOR_WINDOWTEXT);
-            if (control == versionValue || control == connectionLabel || control == recoveryLabel ||
-                control == scheduledExportLabel || control == updatedLabel || control == quotaEmptyText ||
-                control == openAiUsageText || control == hicapUsageText) {
+            COLORREF foreground =
+                header ? dashboardColor(RGB(255, 255, 255), COLOR_HIGHLIGHTTEXT) : GetSysColor(COLOR_WINDOWTEXT);
+            if (control == connectionLabel || control == recoveryLabel || control == scheduledExportLabel ||
+                control == updatedLabel || control == quotaEmptyText || control == openAiUsageText ||
+                control == hicapUsageText) {
                 foreground = dashboardColor(RGB(71, 88, 113), COLOR_WINDOWTEXT);
             }
             if (control == connectionValue) {
@@ -6000,9 +6026,11 @@ public:
                 hicapUsageText = nullptr;
                 hicapUsageChart = nullptr;
                 providerList = nullptr;
-                analysisLaunchTitle = nullptr;
-                analysisLaunchInfo = nullptr;
-                analysisLaunchButton = nullptr;
+                historyButton = nullptr;
+                dashboardSettingsButton = nullptr;
+                usageRows.clear();
+                quotaRowCount = 0;
+                mainControlsLaidOut = false;
                 providerQuotaRows.clear();
                 offlineRetryButton = nullptr;
                 offlineNoticeTitle = nullptr;
@@ -6035,6 +6063,14 @@ public:
         return dashboardHighContrast ? GetSysColor(systemColor) : color;
     }
 
+    COLORREF dashboardPanelColor() const {
+        return dashboardColor(RGB(236, 233, 216), COLOR_3DFACE);
+    }
+
+    COLORREF dashboardTitleColor() const {
+        return dashboardColor(RGB(20, 68, 154), COLOR_HIGHLIGHT);
+    }
+
     static void fillDashboardRect(HDC dc, const RECT& rect, COLORREF color) {
         const COLORREF oldColor = SetDCBrushColor(dc, color);
         FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
@@ -6047,11 +6083,11 @@ public:
         RECT rect = draw.rcItem;
         const int saved = SaveDC(dc);
         fillDashboardRect(dc, rect,
-                          selected ? dashboardColor(RGB(226, 235, 253), COLOR_HIGHLIGHT)
-                                   : dashboardColor(RGB(245, 247, 251), COLOR_WINDOW));
-        if (selected) {
-            RECT underline{rect.left, rect.bottom - scaledPixels(2), rect.right, rect.bottom};
-            fillDashboardRect(dc, underline, dashboardColor(RGB(43, 91, 190), COLOR_HIGHLIGHTTEXT));
+                          selected ? dashboardColor(RGB(255, 255, 255), COLOR_HIGHLIGHT) : dashboardPanelColor());
+        DrawEdge(dc, &rect, EDGE_RAISED, BF_RECT | BF_ADJUST);
+        if (selected && !dashboardHighContrast) {
+            RECT accent{rect.left, rect.top, rect.right, rect.top + scaledPixels(2)};
+            fillDashboardRect(dc, accent, RGB(232, 157, 43));
         }
         wchar_t label[64]{};
         TCITEMW item{};
@@ -6061,11 +6097,10 @@ public:
         SendMessageW(mainTab, TCM_GETITEMW, draw.itemID, reinterpret_cast<LPARAM>(&item));
         SelectObject(dc, dashboardLabelFont);
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, selected ? dashboardColor(RGB(32, 75, 163), COLOR_HIGHLIGHTTEXT)
-                                  : dashboardColor(RGB(62, 78, 104), COLOR_WINDOWTEXT));
+        SetTextColor(dc, GetSysColor(selected && dashboardHighContrast ? COLOR_HIGHLIGHTTEXT : COLOR_BTNTEXT));
         DrawTextW(dc, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         if (draw.itemState & ODS_FOCUS) {
-            InflateRect(&rect, -scaledPixels(3), -scaledPixels(3));
+            InflateRect(&rect, -scaledPixels(2), -scaledPixels(2));
             DrawFocusRect(dc, &rect);
         }
         RestoreDC(dc, saved);
@@ -6075,31 +6110,43 @@ public:
         HDC dc = draw.hDC;
         const int saved = SaveDC(dc);
         const RECT rect = draw.rcItem;
-        const bool paired = row.secondaryPercentage >= 0;
-        const int gap = scaledPixels(16);
-        const int middle = (rect.left + rect.right) / 2;
-
         fillDashboardRect(dc, rect, GetSysColor(COLOR_WINDOW));
-        SelectObject(dc, dashboardLabelFont);
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, dashboardColor(RGB(27, 40, 61), COLOR_WINDOWTEXT));
-        const auto segment = [&](LONG left, LONG right, int percentage, COLORREF color, const std::wstring& text) {
-            RECT label{left, rect.top, right, rect.bottom};
-            DrawTextW(dc, text.c_str(), -1, &label, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
 
-            RECT track{left, rect.top + scaledPixels(21), right, rect.top + scaledPixels(28)};
-            fillDashboardRect(dc, track, dashboardColor(RGB(229, 235, 244), COLOR_WINDOW));
+        const auto segment = [&](LONG left, LONG right, int percentage, COLORREF color, const std::wstring& text,
+                                 const std::wstring& reset) {
+            RECT label{left, rect.top, right, rect.top + scaledPixels(16)};
+            SelectObject(dc, dashboardLabelFont);
+            DrawTextW(dc, text.c_str(), -1, &label, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            if (percentage < 0 || right <= left) {
+                return;
+            }
+
+            RECT track{left, rect.top + scaledPixels(17), right, rect.top + scaledPixels(28)};
+            fillDashboardRect(dc, track, dashboardColor(RGB(239, 241, 246), COLOR_WINDOW));
             if (dashboardHighContrast) {
                 FrameRect(dc, &track, GetSysColorBrush(COLOR_WINDOWTEXT));
+                InflateRect(&track, -1, -1);
+            } else {
+                DrawEdge(dc, &track, EDGE_SUNKEN, BF_RECT | BF_ADJUST);
             }
-            track.right = left + MulDiv(std::clamp(percentage, 0, 100), right - left, 100);
+            track.right = track.left + MulDiv(percentage, track.right - track.left, 100);
             fillDashboardRect(dc, track, dashboardColor(color, COLOR_HIGHLIGHT));
+
+            RECT resetBounds{left, rect.top + scaledPixels(30), right, rect.bottom};
+            SelectObject(dc, dashboardBodyFont);
+            DrawTextW(dc, reset.c_str(), -1, &resetBounds, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         };
-        segment(rect.left, paired ? middle - gap / 2 : rect.right, row.percentage, row.barColor,
-                paired ? row.overlayText + L" remaining" : row.overlayText);
+
+        const bool paired = row.secondaryPercentage >= 0;
+        const int gap = scaledPixels(10);
+        const int middle = (rect.left + rect.right) / 2;
+        segment(rect.left, paired ? middle - gap / 2 : rect.right, row.percentage, row.barColor, row.overlayText,
+                row.resetText);
         if (paired) {
             segment(middle + gap / 2, rect.right, row.secondaryPercentage, row.secondaryBarColor,
-                    row.secondaryOverlayText + L" remaining");
+                    row.secondaryOverlayText, row.secondaryResetText);
         }
         RestoreDC(dc, saved);
     }
@@ -6107,23 +6154,26 @@ public:
     void paintDashboardViewport(HWND hwnd) {
         PAINTSTRUCT paint{};
         HDC dc = BeginPaint(hwnd, &paint);
-        fillDashboardRect(dc, paint.rcPaint, dashboardColor(RGB(245, 247, 251), COLOR_WINDOW));
+        fillDashboardRect(dc, paint.rcPaint, dashboardPanelColor());
         const auto drawCard = [&](const RECT& card) {
             RECT visible{};
             if (!IntersectRect(&visible, &card, &paint.rcPaint)) {
                 return;
             }
             fillDashboardRect(dc, card, GetSysColor(COLOR_WINDOW));
-            const auto oldColor = SetDCBrushColor(dc, dashboardColor(RGB(216, 225, 238), COLOR_WINDOWTEXT));
-            FrameRect(dc, &card, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
-            SetDCBrushColor(dc, oldColor);
+            if (dashboardHighContrast) {
+                FrameRect(dc, &card, GetSysColorBrush(COLOR_WINDOWTEXT));
+            } else {
+                RECT edge = card;
+                DrawEdge(dc, &edge, EDGE_ETCHED, BF_RECT);
+            }
         };
         if (selectedMainTab == 0) {
             for (const auto& card : overviewCards) {
                 drawCard(card);
             }
             if (!IsRectEmpty(&noticeRect)) {
-                fillDashboardRect(dc, noticeRect, dashboardColor(RGB(255, 246, 232), COLOR_WINDOW));
+                fillDashboardRect(dc, noticeRect, dashboardColor(RGB(255, 248, 216), COLOR_WINDOW));
                 RECT accent{noticeRect.left, noticeRect.top, noticeRect.left + scaledPixels(3), noticeRect.bottom};
                 fillDashboardRect(dc, accent, dashboardColor(RGB(186, 114, 31), COLOR_WINDOWTEXT));
             }
@@ -7597,8 +7647,11 @@ std::vector<DashboardSummaryItem> DashboardPresenter::getUsageProgressSummariesF
     const DashboardViewModel model = getViewModel();
     const std::vector<UsageProgressSummary> summaries = buildUsageProgressSummaries(model);
     std::vector<DashboardSummaryItem> items;
-    items.reserve(summaries.size());
+    items.reserve(summaries.size() + model.runtimeSummaries.size());
     for (const auto& summary : summaries) {
+        if (summary.percentage < 0) {
+            continue;
+        }
         DashboardSummaryItem item;
         item.label = summary.label;
         item.detail = summary.detail;
@@ -7608,6 +7661,7 @@ std::vector<DashboardSummaryItem> DashboardPresenter::getUsageProgressSummariesF
         item.secondaryBadge = summary.secondaryOverlayText;
         items.push_back(item);
     }
+    items.insert(items.end(), model.runtimeSummaries.begin(), model.runtimeSummaries.end());
     return items;
 }
 
@@ -8023,7 +8077,9 @@ int DashboardPresenter::getUsageProgressBarWidthForTesting() const {
     HWND bar = nullptr;
     {
         std::lock_guard<std::mutex> lock(pImpl->mutex);
-        bar = pImpl->usageRows[0].bar;
+        if (pImpl->dashboardViewport != nullptr) {
+            bar = GetDlgItem(pImpl->dashboardViewport, Impl::kUsageBarBaseId);
+        }
     }
     if (bar == nullptr) {
         return 0;

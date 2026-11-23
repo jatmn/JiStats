@@ -21,11 +21,11 @@ If JiStats warns that it rejected a development database, exit JiStats. Move the
 
 ## Enable providers
 
-Open **File → Settings**. All provider tracking toggles start off. See the [provider matrix](capability-matrix.md) for setup.
+Choose **Settings** in the dashboard. All provider tracking toggles start off. **Overview** shows remaining quota, reset times, and freshness for enabled subscriptions. See the [provider matrix](capability-matrix.md) for setup.
 
 ## View and export history
 
-Open the dedicated workspace from the dashboard's **Analysis** tab to choose a provider, account, and date range. **File → Export HTML Report…** uses that scope. Set up recurring export in Settings.
+Choose **History** in the dashboard to open Analysis and select a provider, account, and date range. **File → Export HTML Report…** uses that scope. Set up recurring export in Settings.
 
 For older ChatGPT activity, extract an official export and select its `conversations.json` with **File → Import OpenAI Export…**. Keep the companion files from the export alongside it. See the [OpenAI import guide](providers/openai.md#import-chatgpt-history).
 
