@@ -5,6 +5,7 @@
 #include <commctrl.h>
 #include <uxtheme.h>
 
+#include <algorithm>
 #include <iterator>
 #include <optional>
 
@@ -96,9 +97,14 @@ class DesktopTheme {
             return;
         }
         fill(dc, rect, selected ? color(RGB(255, 255, 255), COLOR_HIGHLIGHT) : panelColor());
-        const int inset = MulDiv(2, GetDpiForWindow(draw.hwndItem), 96);
+        const UINT dpi = GetDpiForWindow(draw.hwndItem);
+        const int inset = MulDiv(2, dpi, 96);
+        LONG accentBottom = rect.top;
         if (selected && !highContrast) {
-            const RECT accent{rect.left, rect.top, rect.right, rect.top + inset};
+            // Native tabs can clip the outer edge of rcItem from the owner-draw DC.
+            const LONG accentTop = rect.top + GetSystemMetricsForDpi(SM_CYEDGE, dpi);
+            accentBottom = std::min(rect.bottom, accentTop + inset);
+            const RECT accent{rect.left, accentTop, rect.right, accentBottom};
             fill(dc, accent, RGB(232, 157, 43));
         }
         wchar_t label[64]{};
@@ -115,6 +121,7 @@ class DesktopTheme {
         DrawTextW(dc, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         if (GetFocus() == draw.hwndItem && (draw.itemState & (ODS_FOCUS | ODS_NOFOCUSRECT)) == ODS_FOCUS) {
             InflateRect(&rect, -inset, -inset);
+            rect.top = std::max(rect.top, accentBottom);
             DrawFocusRect(dc, &rect);
         }
         RestoreDC(dc, saved);

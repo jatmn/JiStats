@@ -454,10 +454,12 @@ TEST_CASE("Dashboard, Settings and Analysis share panel and label backgrounds", 
     REQUIRE(dashboard != nullptr);
     REQUIRE(settings != nullptr);
     const HWND checkbox = FindWindowExW(settings, nullptr, L"BUTTON", L"Enable taskbar overlay");
+    const HWND dashboardTab = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
     const HWND settingsTab = FindWindowExW(settings, nullptr, WC_TABCONTROLW, nullptr);
     const HWND intervalField = FindWindowExW(settings, nullptr, L"EDIT", nullptr);
     const HWND history = FindWindowExW(dashboard, nullptr, L"BUTTON", L"&History...");
     REQUIRE(checkbox != nullptr);
+    REQUIRE(dashboardTab != nullptr);
     REQUIRE(settingsTab != nullptr);
     REQUIRE(intervalField != nullptr);
     REQUIRE_FALSE(IsWindowEnabled(intervalField));
@@ -472,7 +474,9 @@ TEST_CASE("Dashboard, Settings and Analysis share panel and label backgrounds", 
         },
         std::chrono::milliseconds(4000)));
     const HWND label = FindWindowExW(analysis, nullptr, L"STATIC", L"Provider");
+    const HWND analysisTab = FindWindowExW(analysis, nullptr, WC_TABCONTROLW, nullptr);
     REQUIRE(label != nullptr);
+    REQUIRE(analysisTab != nullptr);
 
     RECT pane{};
     GetClientRect(settingsTab, &pane);
@@ -507,14 +511,50 @@ TEST_CASE("Dashboard, Settings and Analysis share panel and label backgrounds", 
     const auto field = reinterpret_cast<LPARAM>(intervalField);
     const COLORREF fieldPanel = paintPixel(settings, WM_CTLCOLORSTATIC, field, {0, 0});
     const COLORREF nativeFieldPanel = paintPixel(settings, WM_CTLCOLORSTATIC, field, {0, 0}, true);
-    SelectObject(dc, previous);
-    DeleteObject(bitmap);
-    DeleteDC(dc);
-
     HIGHCONTRASTW contrast{};
     contrast.cbSize = sizeof(contrast);
     const bool highContrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) &&
                               (contrast.dwFlags & HCF_HIGHCONTRASTON);
+    if (!highContrast) {
+        constexpr COLORREF amber = RGB(232, 157, 43);
+        for (HWND tab : {dashboardTab, settingsTab, analysisTab}) {
+            RECT item{};
+            bool visibleAccent = false;
+            if (TabCtrl_GetItemRect(tab, TabCtrl_GetCurSel(tab), &item)) {
+                const LONG x = item.left + (item.right - item.left) / 8;
+                for (LONG y = item.top; y < item.top + (item.bottom - item.top) / 2 && !visibleAccent; ++y) {
+                    visibleAccent = paintPixel(tab, WM_PRINTCLIENT, PRF_CLIENT, {x, y}) == amber;
+                }
+            }
+            CHECK(visibleAccent);
+        }
+
+        const int dpi = GetDpiForWindow(settingsTab);
+        const LONG protectedRows = MulDiv(2, dpi, 96);
+        DRAWITEMSTRUCT draw{};
+        draw.CtlType = ODT_TAB;
+        draw.CtlID = GetDlgCtrlID(settingsTab);
+        draw.itemID = TabCtrl_GetCurSel(settingsTab);
+        draw.itemAction = ODA_DRAWENTIRE;
+        draw.itemState = ODS_SELECTED;
+        draw.hwndItem = settingsTab;
+        draw.hDC = dc;
+        draw.rcItem = {0, 0, MulDiv(80, dpi, 96), MulDiv(24, dpi, 96)};
+        const POINT face{draw.rcItem.right / 8, protectedRows + 1};
+        const int saved = SaveDC(dc);
+        SetWindowOrgEx(dc, face.x, face.y, nullptr);
+        // Some native tab controls pass the full item rectangle with its edge clipped from the DC.
+        IntersectClipRect(dc, draw.rcItem.left, protectedRows, draw.rcItem.right, draw.rcItem.bottom);
+        SetPixel(dc, face.x, face.y, RGB(255, 0, 255));
+        SendMessageW(settings, WM_DRAWITEM, draw.CtlID, reinterpret_cast<LPARAM>(&draw));
+        const auto clippedAccent = GetPixel(dc, face.x, face.y);
+        RestoreDC(dc, saved);
+        CHECK(clippedAccent == amber);
+    }
+    SelectObject(dc, previous);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+
     CHECK(dashboardPanel == (highContrast ? GetSysColor(COLOR_BTNFACE) : RGB(246, 248, 251)));
     CHECK(settingsPanel == dashboardPanel);
     CHECK(tabPane == settingsPanel);
