@@ -140,6 +140,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix imagemagick ninja-build ccache
+          # GCC invokes separate assembler and compiler backends. Include their
+          # installed package versions even when the driver binary is unchanged.
+          dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' 'mingw-w64*' > "$RUNNER_TEMP/compiler-packages"
+          echo "CCACHE_EXTRAFILES=$RUNNER_TEMP/compiler-packages" >> "$GITHUB_ENV"
       - name: Restore compiler results
         id: compiler-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
