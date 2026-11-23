@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import timers from 'node:timers/promises';
 import { isAuthorizedReview } from './pullfrog-review-check.mjs';
 
 const owner = { id: 12479882, login: 'jatmn' };
@@ -66,24 +67,38 @@ test('requires both author identifiers, even when the owner pushes', async (t) =
 });
 
 test('retries a timed-out response body and an upstream failure', async (t) => {
+  const sequence = [];
+  const delay = t.mock.method(timers, 'setTimeout', async () => {
+    await Promise.resolve();
+    sequence.push('delay completed');
+  });
   const timeout = t.mock.method(AbortSignal, 'timeout', () => AbortSignal.abort(new DOMException('timed out', 'TimeoutError')));
   const responses = [
     async (signal) => ({ ok: true, json: async () => signal.throwIfAborted() }),
     async () => new Response(null, { status: 503 }),
     async () => Response.json({ user: owner }),
   ];
-  const fetch = t.mock.method(globalThis, 'fetch', async (_url, { signal }) => responses.shift()(signal));
+  const fetch = t.mock.method(globalThis, 'fetch', async (_url, { signal }) => {
+    sequence.push('fetch started');
+    return responses.shift()(signal);
+  });
   assert.equal(await isAuthorizedReview(review(), api), true);
   assert.equal(fetch.mock.callCount(), 3);
+  assert.deepEqual(sequence, [
+    'fetch started', 'delay completed', 'fetch started', 'delay completed', 'fetch started',
+  ]);
   assert.deepEqual(timeout.mock.calls.map((call) => call.arguments), [[10_000], [10_000], [10_000]]);
+  assert.deepEqual(delay.mock.calls.map((call) => call.arguments), [[250], [750]]);
 });
 
 test('fails after three transient errors', async (t) => {
+  const delay = t.mock.method(timers, 'setTimeout', async () => {});
   const fetch = t.mock.method(globalThis, 'fetch', async () => {
     throw new TypeError('fetch failed');
   });
   await assert.rejects(isAuthorizedReview(review(), api), /Could not verify PR #7 author/);
   assert.equal(fetch.mock.callCount(), 3);
+  assert.deepEqual(delay.mock.calls.map((call) => call.arguments), [[250], [750]]);
 });
 
 test('fails immediately for access errors and rate limits', async (t) => {
