@@ -27,7 +27,7 @@ def job_checks:
     if .conclusion == "skipped" then
         {line: "- \(.name): skipped in source workflow"}
     elif .status != "completed" then
-        {error: "Job \(.id) is still running\n"}
+        "Job \(.id) is still running\n" | halt_error(1)
     else
         (if .conclusion != "success" then
             {line: "- \(.name): source conclusion \(.conclusion)"}
@@ -39,9 +39,13 @@ def job_checks:
            | timing("Windows suite step"; elapsed; 30)))
     end;
 
-[.[] | .jobs[]] as $jobs
-| if $jobs == [] then "No jobs returned for this attempt\n" | halt_error(1) else
-    [$jobs[] | job_checks] as $checks
-    | ($checks[] | if .error then .error | halt_error(1) else .line end),
-      (if any($checks[]; .failed) then "" | halt_error(1) else empty end)
-  end
+# Emit each check before evaluating the next one. The final null marks the end
+# of the check stream and lets the audit return its aggregate budget status.
+foreach ((.[] | .jobs[] | job_checks), null) as $check (
+    {seen: false, failed: false};
+    {seen: (.seen or ($check != null)), failed: (.failed or $check.failed)};
+    if $check != null then $check.line
+    elif .seen == false then "No jobs returned for this attempt\n" | halt_error(1)
+    elif .failed then "" | halt_error(1)
+    else empty end
+)
