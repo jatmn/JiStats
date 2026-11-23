@@ -25,6 +25,8 @@ For build-affecting pull requests to `main` or `release/**`, Linux runs the port
 
 Merge groups and protected-branch pushes always build and run both native suites and the Pullfrog authorization tests. The required check accepts skipped builds only on a pull request with a successful change detector and an explicit no-build decision. GitHub requires organization ownership to enable a merge queue on a public repository. Dispatch [CI](../../.github/workflows/ci.yml) to run both jobs on a selected branch regardless of the diff. Enable **Run eight additional offline notice passes to diagnose restart stalls** when investigating offline restart timing. CI retains the cross-built test executable for 30 days so a Windows job retry can reuse it.
 
+The Linux build restores compiler results seeded by pushes to the default branch. Both native and MinGW compilers use ccache in preprocessor mode. Each run reports compiler hits and misses and still links the binaries and executes the suites.
+
 ## Pull request lint
 
 The [Lint workflow](../../.github/workflows/lint.yml) checks changed first-party C and C++ lines under `src/`, `include/`, and `tests/` with LLVM 18 and `.clang-format`. It runs `actionlint` when workflows change.
