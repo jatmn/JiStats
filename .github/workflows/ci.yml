@@ -120,8 +120,24 @@ jobs:
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           echo "build=$build" >> "$GITHUB_OUTPUT"
 
+  portable:
+    name: Portable tests with bundled SQLite
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run portable tests with bundled SQLite
+        run: |
+          cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
+          cmake --build build-linux --parallel "$(nproc)"
+          ctest --test-dir build-linux --output-on-failure
+
   linux-cross:
-    name: Linux tests and Windows cross-build
+    name: Windows cross-build
     needs: changes
     if: needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
@@ -151,12 +167,6 @@ jobs:
           path: .ccache
           key: jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           restore-keys: jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
-      - name: Run portable tests with bundled SQLite
-        run: |
-          ccache --zero-stats
-          cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
-          cmake --build build-linux --parallel
-          ctest --test-dir build-linux --output-on-failure
       - name: Check the default build and enable the MiniMax CLI and tests
         shell: bash
         run: |
@@ -170,7 +180,7 @@ jobs:
           fi
           cmake -S . -B build-mingw -DJISTATS_BUILD_TESTS=ON -DJISTATS_BUILD_MINIMAX_CLI=ON
       - name: Build the app, MiniMax CLI, and tests
-        run: cmake --build build-mingw --parallel --target JiStats JiStatsMiniMaxCli JiStatsTests
+        run: cmake --build build-mingw --parallel "$(nproc)" --target JiStats JiStatsMiniMaxCli JiStatsTests
       - name: Report compiler cache hits and misses
         run: ccache --show-stats --verbose
       - name: Seed compiler results for pull requests
@@ -270,7 +280,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: always()
-    needs: [changes, linux-cross, windows-runtime]
+    needs: [changes, portable, linux-cross, windows-runtime]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
