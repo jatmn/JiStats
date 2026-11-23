@@ -440,6 +440,130 @@ TEST_CASE("DashboardPresenter runs MiniMax credential actions asynchronously", "
     presenter.shutdown();
 }
 
+TEST_CASE("Dashboard, Settings and Analysis share panel and label backgrounds", "[dashboard_presenter][theme]") {
+    AnalysisPresenter analysisPresenter;
+    DashboardPresenter presenter;
+    REQUIRE(presenter.init());
+    presenter.setAnalysisPresenter(&analysisPresenter);
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(
+        waitForCondition([&]() { return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    REQUIRE(dashboard != nullptr);
+    REQUIRE(settings != nullptr);
+    const HWND checkbox = FindWindowExW(settings, nullptr, L"BUTTON", L"Enable taskbar overlay");
+    const HWND dashboardTab = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
+    const HWND settingsTab = FindWindowExW(settings, nullptr, WC_TABCONTROLW, nullptr);
+    const HWND intervalField = FindWindowExW(settings, nullptr, L"EDIT", nullptr);
+    const HWND history = FindWindowExW(dashboard, nullptr, L"BUTTON", L"&History...");
+    REQUIRE(checkbox != nullptr);
+    REQUIRE(dashboardTab != nullptr);
+    REQUIRE(settingsTab != nullptr);
+    REQUIRE(intervalField != nullptr);
+    REQUIRE_FALSE(IsWindowEnabled(intervalField));
+    REQUIRE(history != nullptr);
+
+    SendMessageW(history, BM_CLICK, 0, 0);
+    HWND analysis = nullptr;
+    REQUIRE(waitForCondition(
+        [&]() {
+            analysis = FindWindowW(L"JiStatsAnalysisWindow", nullptr);
+            return analysis != nullptr && IsWindowVisible(analysis);
+        },
+        std::chrono::milliseconds(4000)));
+    const HWND label = FindWindowExW(analysis, nullptr, L"STATIC", L"Provider");
+    const HWND analysisTab = FindWindowExW(analysis, nullptr, WC_TABCONTROLW, nullptr);
+    REQUIRE(label != nullptr);
+    REQUIRE(analysisTab != nullptr);
+
+    RECT pane{};
+    GetClientRect(settingsTab, &pane);
+    TabCtrl_AdjustRect(settingsTab, FALSE, &pane);
+    const HDC screen = GetDC(nullptr);
+    const HDC dc = CreateCompatibleDC(screen);
+    const HBITMAP bitmap = CreateCompatibleBitmap(screen, 1, 1);
+    ReleaseDC(nullptr, screen);
+    REQUIRE(dc != nullptr);
+    REQUIRE(bitmap != nullptr);
+    const HGDIOBJ previous = SelectObject(dc, bitmap);
+
+    auto paintPixel = [&](HWND window, UINT message, LPARAM argument, POINT position, bool native = false) {
+        SetWindowOrgEx(dc, position.x, position.y, nullptr);
+        SetPixel(dc, position.x, position.y, RGB(255, 0, 255));
+        const auto wParam = reinterpret_cast<WPARAM>(dc);
+        const auto result = native ? DefWindowProcW(window, message, wParam, argument)
+                                   : SendMessageW(window, message, wParam, argument);
+        if (message == WM_CTLCOLORSTATIC || message == WM_CTLCOLORBTN) {
+            const RECT pixel{position.x, position.y, position.x + 1, position.y + 1};
+            FillRect(dc, &pixel, reinterpret_cast<HBRUSH>(result));
+        }
+        return GetPixel(dc, position.x, position.y);
+    };
+
+    const COLORREF dashboardPanel = paintPixel(dashboard, WM_ERASEBKGND, 0, {0, 100});
+    const COLORREF settingsPanel = paintPixel(settings, WM_ERASEBKGND, 0, {0, 0});
+    const COLORREF tabPane = paintPixel(settingsTab, WM_PRINTCLIENT, PRF_CLIENT, {pane.left + 12, pane.bottom - 12});
+    const COLORREF checkboxPanel = paintPixel(settings, WM_CTLCOLORBTN, reinterpret_cast<LPARAM>(checkbox), {0, 0});
+    const COLORREF analysisPanel = paintPixel(analysis, WM_ERASEBKGND, 0, {0, 0});
+    const COLORREF labelPanel = paintPixel(analysis, WM_CTLCOLORSTATIC, reinterpret_cast<LPARAM>(label), {0, 0});
+    const auto field = reinterpret_cast<LPARAM>(intervalField);
+    const COLORREF fieldPanel = paintPixel(settings, WM_CTLCOLORSTATIC, field, {0, 0});
+    const COLORREF nativeFieldPanel = paintPixel(settings, WM_CTLCOLORSTATIC, field, {0, 0}, true);
+    HIGHCONTRASTW contrast{};
+    contrast.cbSize = sizeof(contrast);
+    const bool highContrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) &&
+                              (contrast.dwFlags & HCF_HIGHCONTRASTON);
+    if (!highContrast) {
+        constexpr COLORREF amber = RGB(232, 157, 43);
+        for (HWND tab : {dashboardTab, settingsTab, analysisTab}) {
+            RECT item{};
+            bool visibleAccent = false;
+            if (TabCtrl_GetItemRect(tab, TabCtrl_GetCurSel(tab), &item)) {
+                const LONG x = item.left + (item.right - item.left) / 8;
+                for (LONG y = item.top; y < item.top + (item.bottom - item.top) / 2 && !visibleAccent; ++y) {
+                    visibleAccent = paintPixel(tab, WM_PRINTCLIENT, PRF_CLIENT, {x, y}) == amber;
+                }
+            }
+            CHECK(visibleAccent);
+        }
+
+        const int dpi = GetDpiForWindow(settingsTab);
+        const LONG protectedRows = MulDiv(2, dpi, 96);
+        DRAWITEMSTRUCT draw{};
+        draw.CtlType = ODT_TAB;
+        draw.CtlID = GetDlgCtrlID(settingsTab);
+        draw.itemID = TabCtrl_GetCurSel(settingsTab);
+        draw.itemAction = ODA_DRAWENTIRE;
+        draw.itemState = ODS_SELECTED;
+        draw.hwndItem = settingsTab;
+        draw.hDC = dc;
+        draw.rcItem = {0, 0, MulDiv(80, dpi, 96), MulDiv(24, dpi, 96)};
+        const POINT face{draw.rcItem.right / 8, protectedRows + 1};
+        const int saved = SaveDC(dc);
+        SetWindowOrgEx(dc, face.x, face.y, nullptr);
+        // Some native tab controls pass the full item rectangle with its edge clipped from the DC.
+        IntersectClipRect(dc, draw.rcItem.left, protectedRows, draw.rcItem.right, draw.rcItem.bottom);
+        SetPixel(dc, face.x, face.y, RGB(255, 0, 255));
+        SendMessageW(settings, WM_DRAWITEM, draw.CtlID, reinterpret_cast<LPARAM>(&draw));
+        const auto clippedAccent = GetPixel(dc, face.x, face.y);
+        RestoreDC(dc, saved);
+        CHECK(clippedAccent == amber);
+    }
+    SelectObject(dc, previous);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+
+    CHECK(dashboardPanel == (highContrast ? GetSysColor(COLOR_BTNFACE) : RGB(246, 248, 251)));
+    CHECK(settingsPanel == dashboardPanel);
+    CHECK(tabPane == settingsPanel);
+    CHECK(checkboxPanel == settingsPanel);
+    CHECK(fieldPanel == nativeFieldPanel);
+    CHECK(analysisPanel == dashboardPanel);
+    CHECK(labelPanel == analysisPanel);
+}
+
 TEST_CASE("DashboardPresenter handles native close safely", "[dashboard_presenter]") {
     DashboardPresenter presenter;
     REQUIRE(presenter.init());
@@ -1156,6 +1280,7 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
     const HWND tabs = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
     const HWND viewport = FindWindowExW(dashboard, nullptr, L"JiStatsDashboardViewport", nullptr);
     REQUIRE(tabs != nullptr);
+    CHECK_FALSE(GetWindowLongPtrW(tabs, GWL_STYLE) & TCS_BUTTONS);
     REQUIRE(viewport != nullptr);
     const HWND providers = FindWindowExW(viewport, nullptr, WC_LISTVIEWW, nullptr);
     REQUIRE(providers != nullptr);

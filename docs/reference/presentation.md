@@ -10,6 +10,8 @@ Recorded activity, recovery and scheduled export status, and the Codex charts ar
 
 **File** contains Settings, **Import OpenAI Export…**, **Export HTML Report…**, and Exit. **Help** contains View Help and About JiStats.
 
+The Dashboard, Settings, and Analysis share a light neutral panel. Each tab uses its native outline, with a white face and amber accent for the selected tab. Editable fields, tables, and chart canvases use the Windows data-surface colors. When a Windows contrast theme is active, the panels and tabs use system colors.
+
 ## Quota, freshness, and confidence
 
 Summary bars fill as remaining quota increases. The provider table's **Used** column shows normalized usage percentages for quota rows. Keep supporting counts labeled with their own units. Preserve individual quota windows, with 5-hour and 7-day windows shown together where supported. Include source and freshness and identify stale, backfilled, and unknown periods where applicable.
