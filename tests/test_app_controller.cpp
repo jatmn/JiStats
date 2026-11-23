@@ -1466,6 +1466,78 @@ TEST_CASE("AppController reports and retries a rejected Settings save while keep
     app.shutdown();
 }
 
+TEST_CASE("AppController schedules exports only after an accepted Settings save", "[app][shell][preferences]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDirectory("jistats-rejected-schedule");
+    seedStartupPreferences(dbPath.path(), false, false, false, false, false, false, false, 1440,
+                           exportDirectory.path().string());
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    std::promise<void> firstEditDequeued;
+    auto dequeued = firstEditDequeued.get_future();
+    std::promise<void> releaseFirstEdit;
+    auto released = releaseFirstEdit.get_future().share();
+    std::atomic<bool> firstEdit{true};
+    AppController app;
+    app.setAfterSettingsDequeueForTesting([&]() {
+        if (firstEdit.exchange(false)) {
+            firstEditDequeued.set_value();
+            released.wait_for(std::chrono::seconds(6));
+        }
+    });
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    REQUIRE(app.init());
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    SettingsService settings(storage);
+    REQUIRE(storage
+                .execute("CREATE TRIGGER reject_schedule BEFORE INSERT ON settings "
+                         "WHEN new.key='reporting.scheduled_export_enabled' AND new.value='true' "
+                         "BEGIN SELECT RAISE(FAIL, 'schedule write rejected'); END;")
+                .success());
+    const auto attempts = [&]() {
+        const auto result = storage.execute("SELECT COUNT(*) FROM export_runs WHERE run_kind = 'scheduled_html'");
+        REQUIRE(result.success());
+        return result.getInt(0, 0);
+    };
+
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(waitForCondition(
+        [&]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+    const HWND window = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    const HWND overlay = GetDlgItem(window, 1101);
+    const HWND schedule = GetDlgItem(window, 1108);
+    const HWND saveStatus = GetDlgItem(window, 1122);
+    const HWND retry = GetDlgItem(window, 1123);
+    REQUIRE(overlay != nullptr);
+    REQUIRE(schedule != nullptr);
+    REQUIRE(saveStatus != nullptr);
+    REQUIRE(retry != nullptr);
+
+    SendMessageW(overlay, BM_CLICK, 0, 0);
+    const bool paused = dequeued.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    SendMessageW(schedule, BM_CLICK, 0, 0);
+    releaseFirstEdit.set_value();
+
+    CHECK(paused);
+    REQUIRE(waitForCondition([&]() { return readControlText(saveStatus) == L"Could not save changes."; },
+                             std::chrono::seconds(5)));
+    CHECK(settings.getBool("reporting.scheduled_export_enabled") == false);
+    CHECK(attempts() == 0);
+    CHECK(std::filesystem::is_empty(exportDirectory.path()));
+
+    REQUIRE(storage.execute("DROP TRIGGER reject_schedule;").success());
+    SendMessageW(retry, BM_CLICK, 0, 0);
+    REQUIRE(waitForCondition([&]() { return attempts() > 0; }, std::chrono::seconds(5)));
+    CHECK(settings.getBool("reporting.scheduled_export_enabled") == true);
+    CHECK_FALSE(std::filesystem::is_empty(exportDirectory.path()));
+    app.shutdown();
+}
+
 TEST_CASE("AppController restores quota after queued provider tracking is turned off and back on",
           "[app][shell][preferences]") {
     requireSqlite();

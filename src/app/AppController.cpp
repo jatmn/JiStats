@@ -3911,7 +3911,13 @@ public:
     std::mutex refreshWatcherMutex;
     mutable std::mutex interactionWorkMutex;
     mutable std::mutex persistedMetricMutex;
-    std::mutex scheduledExportMutex;
+    struct ExportSchedule {
+        bool enabled = false;
+        int intervalMinutes = 1440;
+        std::string path;
+    };
+    mutable std::mutex scheduledExportMutex;
+    ExportSchedule appliedExportSchedule;
     std::condition_variable refreshWatcherCv;
     std::atomic<unsigned> subscriptionWatchMask{0};
     std::condition_variable interactionWorkCv;
@@ -5297,6 +5303,21 @@ public:
         applyScheduledExportStatus(viewModel);
     }
 
+    void applyExportSchedule(const DashboardPreferences& preferences) {
+        std::lock_guard<std::mutex> exportLock(scheduledExportMutex);
+        appliedExportSchedule = {preferences.scheduledExportEnabled, preferences.scheduledExportIntervalMinutes,
+                                 preferences.scheduledExportPath};
+    }
+
+    DashboardPreferences appliedScheduledExportPreferences() const {
+        auto preferences = currentDashboardPreferences();
+        std::lock_guard<std::mutex> exportLock(scheduledExportMutex);
+        preferences.scheduledExportEnabled = appliedExportSchedule.enabled;
+        preferences.scheduledExportIntervalMinutes = appliedExportSchedule.intervalMinutes;
+        preferences.scheduledExportPath = appliedExportSchedule.path;
+        return preferences;
+    }
+
     bool shouldRunScheduledExport(const DashboardPreferences& preferences) const {
         return preferences.scheduledExportEnabled && preferences.scheduledExportIntervalMinutes > 0;
     }
@@ -5316,7 +5337,7 @@ public:
     }
 
     std::chrono::milliseconds scheduledExportWaitInterval(std::time_t now) const {
-        const DashboardPreferences preferences = currentDashboardPreferences();
+        const DashboardPreferences preferences = appliedScheduledExportPreferences();
         if (!shouldRunScheduledExport(preferences)) {
             return scheduledExportDormantPollInterval;
         }
@@ -5414,7 +5435,7 @@ public:
     }
 
     void runScheduledExportIfDue(std::time_t now) {
-        const DashboardPreferences preferences = currentDashboardPreferences();
+        const DashboardPreferences preferences = appliedScheduledExportPreferences();
         if (!shouldRunScheduledExport(preferences)) {
             return;
         }
@@ -7043,6 +7064,7 @@ public:
             settingsSaved = !storageAvailable || savePreferences(requested);
             if (settingsSaved) {
                 preferences = std::move(requested);
+                applyExportSchedule(preferences);
                 {
                     std::lock_guard<std::mutex> lock(interactionWorkMutex);
                     failedInteractionPreferences.reset();
@@ -7463,6 +7485,7 @@ bool AppController::init(bool launchInBackground) {
         DashboardPreferences loadedPreferences = pImpl->loadPreferences();
         loadedPreferences = pImpl->applyStartupPreferences(loadedPreferences);
         pImpl->savePreferences(loadedPreferences);
+        pImpl->applyExportSchedule(loadedPreferences);
         pImpl->saveAnalysisScope(Impl::analysisScopeFromPreferences(loadedPreferences));
 
         pImpl->dashboardPresenter.setMiniMaxCredentialActionCallback(
@@ -7935,6 +7958,7 @@ void AppController::applyDashboardPreferencesForTesting(const DashboardPreferenc
     pImpl->savePreferences(effectivePreferences);
     pImpl->saveAnalysisScope(Impl::analysisScopeFromPreferences(effectivePreferences));
     pImpl->syncPresentedPreferences(effectivePreferences);
+    pImpl->applyExportSchedule(effectivePreferences);
     pImpl->runScheduledExportIfDue(std::time(nullptr));
     pImpl->refreshWatcherCv.notify_all();
 #ifdef JISTATS_ENABLE_TEST_HOOKS
