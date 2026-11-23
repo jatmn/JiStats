@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- The Windows and Linux source build instructions now build the desktop app with tests disabled and give the executable path for manual launch. The verification guide has separate portable, MinGW, and UCRT64 test builds. The app-only MinGW Release build produced `JiStats.exe` with no Catch2 download or CTest registrations. Portable CTest passed 126 cases, and the MinGW developer build produced the app, CLI, and test executables. Native UCRT64 and Visual Studio commands were checked against CMake and still need a run on Windows. [Source build](../README.md#build-and-packaging) · [Verification guide](validation/testing.md)
+
 - The CI timing audit now evaluates paginated GitHub job data directly with jq. Replaying two hosted attempts and synthetic cases produced the same summaries and exit status, including strict budget boundaries, report-only runs, and empty or unfinished job data. The review follow-up verified that a missing setup or Windows suite timestamp preserves earlier timing lines and that the first error stops the audit. [Timing audit verification](validation/testing.md#ci-timing-audit)
 
 - Codex attribution opens the shared profile mutex with the rights needed to wait and release it. The restricted-access regression reproduced a failed Off save on the starting head and passed after repair. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and all 473 Windows cases passed under Wine. Live mixed-elevation Windows testing remains open. [PR #31](https://github.com/jatmn/JiStats/pull/31)
@@ -44,7 +46,7 @@ Record completed work, the revision and evidence, and any remaining verification
 
 - Codex throughput now uses recorded requests and keeps existing cumulative history readable. Claude honors its configured home and uses dated totals for recovery. Kimi task metadata stays in local activity. Grok and Cursor subscription quota can be enabled independently in Settings. Linux CTest passed with bundled SQLite, and MinGW Debug built the app, CLI, and Windows test executable. Live subscription verification remains open. [Provider matrix](capability-matrix.md) · [Verification guide](validation/testing.md)
 
-- Refreshed the SHA-256-verified SQLite, spdlog (including bundled fmt), and Catch2 versions in [CMake](../CMakeLists.txt) and synced the [third-party notices](../THIRD_PARTY_NOTICES.md). Updated both Pullfrog action references and the owner command payload to 0.1.141. The [Linux CMake/Ninja build](../README.md#building-on-linux) passed CTest with bundled SQLite (125 cases, 920 assertions). The MinGW Release build produced the app, opt-in CLI and test executables, and UPX 5.3.0 verified the packed app. The workflow lint and seven Pullfrog authorization tests passed locally. CI covers the full Windows test run.
+- Refreshed the SHA-256-verified SQLite, spdlog (including bundled fmt), and Catch2 versions in [CMake](../CMakeLists.txt) and synced the [third-party notices](../THIRD_PARTY_NOTICES.md). Updated both Pullfrog action references and the owner command payload to 0.1.141. The [Linux CMake/Ninja build](validation/testing.md#linux-commands) passed CTest with bundled SQLite (125 cases, 920 assertions). The MinGW Release build produced the app, opt-in CLI and test executables, and UPX 5.3.0 verified the packed app. The workflow lint and seven Pullfrog authorization tests passed locally. CI covers the full Windows test run.
 
 ### Test failure observation
 

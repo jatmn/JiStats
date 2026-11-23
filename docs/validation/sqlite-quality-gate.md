@@ -60,11 +60,11 @@ Bad evidence examples:
 
 ## Linux validation
 
-The [portable test build](../../README.md#building-on-linux) enables bundled SQLite and runs the required schema, storage and rollup cases directly on Linux. The suite also covers both historical version 12 layouts and overlapping opens during repair. For build-affecting PRs, CI runs the remaining controller and provider integration cases on Windows using the cross-built executable.
+The [portable test build](testing.md#linux-commands) enables bundled SQLite and runs the required schema, storage and rollup cases directly on Linux. The suite also covers both historical version 12 layouts and overlapping opens during repair. For build-affecting PRs, CI runs the remaining controller and provider integration cases on Windows using the cross-built executable.
 
 ## Windows validation
 
-Follow the [UCRT64 commands](../../README.md#building-on-windows) locally, or dispatch [CI](../../.github/workflows/ci.yml) to build on Linux and run the full test executable on Windows. Both use bundled SQLite. An initialized Windows developer shell can also run [the SQLite quality gate script](../../scripts/run_sqlite_quality_gate.ps1), which configures a bundled-SQLite test build and runs CTest. Record the commands and outcome in the handoff.
+Follow the [Windows verification commands](testing.md#windows-commands) locally, or dispatch [CI](../../.github/workflows/ci.yml) to build on Linux and run the full test executable on Windows. Both use bundled SQLite. An initialized Windows developer shell can also run [the SQLite quality gate script](../../scripts/run_sqlite_quality_gate.ps1), which configures a bundled-SQLite test build and runs CTest. Record the commands and outcome in the handoff.
 
 ## Exit Rule
 
