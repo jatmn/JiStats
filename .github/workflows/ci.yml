@@ -46,8 +46,8 @@ jobs:
           files="$RUNNER_TEMP/jistats-changed-files"
           # Selection is safe only when the target branch enforces a merge queue.
           branch=$(jq -rn --arg branch "$GITHUB_BASE_REF" '$branch | @uri')
-          queued=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$branch" --paginate --slurp \
-            --jq 'any(.[][]; .type == "merge_queue")')
+          queued=$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$branch" --paginate |
+            jq -s 'any(.[][]; .type == "merge_queue")')
           if [[ "$queued" != true ]]; then
             reason="target branch has no merge queue"
           elif git rev-parse --verify --quiet "$GITHUB_SHA^2" >/dev/null &&
