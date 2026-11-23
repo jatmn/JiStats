@@ -97,6 +97,7 @@ public:
     std::string getDashboardStatusTextForTesting() const;
     DashboardHtmlExportResult exportHtmlReportForTesting(const std::string& outputPath);
     void refreshRuntimeForTesting();
+    void setAfterSettingsDequeueForTesting(std::function<void()> callback);
     void setBeforeRuntimePublicationForTesting(std::function<void()> callback);
     void applyDashboardPreferencesForTesting(const DashboardPreferences& preferences);
     void setMiniMaxCredentialStoreForTesting(std::shared_ptr<WindowsCredentialStore> store);

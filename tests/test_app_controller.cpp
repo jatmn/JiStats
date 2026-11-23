@@ -38,6 +38,9 @@
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
 
+#include <windows.h>
+#include <commctrl.h>
+
 using namespace JiStats;
 using namespace JiStats::TestSupport;
 
@@ -1518,6 +1521,206 @@ TEST_CASE("AppController tray show dashboard action does not toggle visibility o
     CHECK(app.isDashboardVisibleForTesting());
 
     app.shutdown();
+}
+
+TEST_CASE("AppController tray navigation stays responsive during a runtime refresh", "[app][tray][navigation]") {
+    auto providerManager = std::make_shared<ProviderManager>();
+    ScopedTrayTestHandler handler([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                     std::string&) -> std::optional<bool> { return true; });
+
+    TempTestDatabase dbPath;
+    AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setDisableTaskbarForTesting(true);
+    app.setProviderManagerForTesting(providerManager);
+    REQUIRE(app.init(true));
+
+    std::promise<void> reachedPublication;
+    auto publicationReached = reachedPublication.get_future();
+    std::promise<void> releasePublication;
+    auto publicationReleased = releasePublication.get_future().share();
+    app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
+        reachedPublication.set_value();
+        publicationReleased.wait();
+    });
+
+    auto refresh = std::async(std::launch::async, [&app]() { app.refreshRuntimeForTesting(); });
+    const bool refreshBlocked = publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    auto openDashboard = std::async(std::launch::async, [&app]() {
+        return app.dispatchTrayEventForTesting(TrayController::TestEvent::MenuShowDashboard);
+    });
+    const bool trayResponsive = openDashboard.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    const bool helpOpenedDuringRefresh =
+        app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::HelpViewHelp) &&
+        waitForCondition([&app]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Help); });
+
+    releasePublication.set_value();
+    refresh.get();
+    CHECK(openDashboard.get());
+    CHECK(refreshBlocked);
+    CHECK(trayResponsive);
+    CHECK(helpOpenedDuringRefresh);
+    CHECK(app.isDashboardVisibleForTesting());
+    app.shutdown();
+}
+
+TEST_CASE("AppController applies a custom Analysis edit alongside a Settings change after an older provider refresh",
+          "[app][analysis][navigation]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    const auto editedStart = parseUtcIsoForTest("2026-04-01T00:00:00Z");
+    REQUIRE(editedStart.has_value());
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        SettingsService settings(storage);
+        REQUIRE(settings.setBool("ui.taskbar_overlay_enabled", true));
+        REQUIRE(settings.setString("ui.analysis_date_range_preset", "custom"));
+        REQUIRE(settings.setString("ui.analysis_custom_range_start_utc", "2026-04-02T00:00:00Z"));
+        REQUIRE(settings.setString("ui.analysis_custom_range_end_utc", "2026-04-05T00:00:00Z"));
+    }
+
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    REQUIRE(app.init());
+
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    REQUIRE(dashboard != nullptr);
+    const HWND tabs = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
+    REQUIRE(tabs != nullptr);
+    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
+    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
+    HWND startDate = nullptr;
+    REQUIRE(waitForCondition(
+        [&]() {
+            startDate = GetDlgItem(FindWindowW(L"JiStatsAnalysisWindow", nullptr), 2104);
+            return startDate != nullptr && IsWindowVisible(startDate) && IsWindowEnabled(startDate);
+        },
+        std::chrono::seconds(5)));
+
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+    HWND overlay = nullptr;
+    REQUIRE(waitForCondition([&]() {
+        overlay = GetDlgItem(FindWindowW(L"JiStatsPreferencesWindow", nullptr), 1101);
+        return overlay != nullptr;
+    }));
+
+    std::promise<void> reachedPublication;
+    auto publicationReached = reachedPublication.get_future();
+    std::promise<void> releasePublication;
+    auto publicationReleased = releasePublication.get_future().share();
+    app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
+        if (publicationReleased.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            reachedPublication.set_value();
+            publicationReleased.wait();
+        }
+    });
+
+    auto refresh = std::async(std::launch::async, [&app]() { app.refreshRuntimeForTesting(); });
+    const bool refreshPaused = publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    const bool editQueued = SetWindowTextW(startDate, L"2026-04-01") != FALSE &&
+                            waitForCondition([&]() { return !IsWindowEnabled(startDate); });
+
+    SendMessageW(overlay, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(GetParent(overlay), WM_COMMAND, MAKEWPARAM(1101, BN_CLICKED), reinterpret_cast<LPARAM>(overlay));
+    releasePublication.set_value();
+    refresh.get();
+
+    CHECK(refreshPaused);
+    CHECK(editQueued);
+    REQUIRE(waitForCondition(
+        [&]() {
+            const auto model = app.getDashboardViewModelForTesting();
+            return !model.preferences.taskbarOverlayEnabled &&
+                   model.analysis.scope.customRangeStartUtc == *editedStart && IsWindowEnabled(startDate);
+        },
+        std::chrono::seconds(3)));
+    CHECK(app.getDashboardViewModelForTesting().analysis.scope.dateRangePreset == AnalysisDateRangePreset::Custom);
+    app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    SettingsService settings(storage);
+    CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
+    CHECK(settings.getString("ui.analysis_custom_range_start_utc") == "2026-04-01T00:00:00Z");
+}
+
+TEST_CASE("AppController skips new quota requests after Settings dequeues an opt-out", "[app][runtime][polling]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, false, true);
+    TempTestDirectory emptyProviderHome("jistats-opt-out-provider-home");
+    ScopedEnvironmentVariable codexHome("CODEX_HOME", emptyProviderHome.path().string());
+    ScopedEnvironmentVariable claudeHome("CLAUDE_CONFIG_DIR", emptyProviderHome.path().string());
+
+    const auto now = std::time(nullptr);
+    std::promise<void> releaseFirst;
+    auto first = std::make_shared<ControlledQuotaProviderAdapter>(
+        "claude_code", "Claude Code", makeQuotaResponse(now, 0, 100, "local", "claude_code_local"),
+        releaseFirst.get_future().share(), 2);
+    auto openai = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 20, 100, "interval", "openai_subscription_codex_local"));
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(first);
+    providers->addProvider(openai);
+
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    std::promise<void> settingsDequeued;
+    auto dequeued = settingsDequeued.get_future();
+    std::promise<void> releaseSettings;
+    auto settingsReleased = releaseSettings.get_future();
+    AppController app;
+    app.setAfterSettingsDequeueForTesting([&]() {
+        settingsDequeued.set_value();
+        settingsReleased.wait_for(std::chrono::seconds(15));
+    });
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+
+    HWND checkbox = nullptr;
+    REQUIRE(waitForCondition([&]() {
+        checkbox = GetDlgItem(FindWindowW(L"JiStatsPreferencesWindow", nullptr), 1102);
+        return checkbox != nullptr && SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }));
+    const int fetchedBeforeOptOut = openai->getQuotaFetchCount();
+    REQUIRE(fetchedBeforeOptOut > 0);
+
+    auto underway = std::async(std::launch::async, [&]() { app.refreshRuntimeForTesting(); });
+    const bool heldBeforeOpenAI =
+        waitForCondition([&]() { return first->getQuotaFetchCount() > first->getCompletedQuotaFetchCount(); });
+
+    SendMessageW(checkbox, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(GetParent(checkbox), WM_COMMAND, MAKEWPARAM(1102, BN_CLICKED), reinterpret_cast<LPARAM>(checkbox));
+    const bool optOutDequeued = dequeued.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    auto competing = std::async(std::launch::async, [&]() { app.refreshRuntimeForTesting(); });
+    releaseFirst.set_value();
+    underway.get();
+    competing.get();
+
+    // Both refreshes finished while the opt-out was active and the old setting was still persisted.
+    const int fetchedBeforeSettingsSave = openai->getQuotaFetchCount();
+    StorageService storage;
+    const bool opened = storage.init(dbPath.path());
+    SettingsService settings(storage);
+    const auto optedInBeforeSettingsSave =
+        opened ? settings.getBool("runtime.openai_subscription_tracking_enabled") : std::nullopt;
+    releaseSettings.set_value();
+    app.shutdown();
+
+    CHECK(heldBeforeOpenAI);
+    CHECK(optOutDequeued);
+    CHECK(fetchedBeforeSettingsSave == fetchedBeforeOptOut);
+    CHECK(optedInBeforeSettingsSave == true);
+    REQUIRE(opened);
+    CHECK(settings.getBool("runtime.openai_subscription_tracking_enabled") == false);
 }
 
 TEST_CASE("AppController dashboard shell menu opens settings help and about windows", "[app][shell]") {

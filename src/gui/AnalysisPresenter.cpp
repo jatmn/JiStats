@@ -99,6 +99,14 @@ void setWindowTextUtf8(HWND hwnd, const std::string& value) {
     }
 }
 
+bool updateLayoutText(HWND hwnd, const std::string& text) {
+    if (getWindowTextUtf8(hwnd) == text) {
+        return false;
+    }
+    setWindowTextUtf8(hwnd, text);
+    return true;
+}
+
 std::string formatUtcDateOnly(std::time_t time) {
     if (time <= 0) {
         return "";
@@ -1105,6 +1113,7 @@ public:
     int selectedQuotaPointIndex = -1;
     std::function<void(const AnalysisScopeState&)> scopeChangedCallback;
     bool interactionPending = false;
+    bool customDateEditPending = false;
 
     bool suppressNotification = false;
     RECT lastLayoutBounds{};
@@ -1412,8 +1421,8 @@ public:
     }
 
     void shutdown() {
+        cancelCustomDateEdit();
         if (parent != nullptr) {
-            KillTimer(parent, kCustomDateDebounceTimerId);
             SCROLLINFO info{};
             info.cbSize = sizeof(info);
             info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
@@ -1563,7 +1572,7 @@ public:
 
         SendMessageW(quotaSeriesCombo, CB_SETCURSEL, static_cast<WPARAM>(selectedIndex), 0);
         EnableWindow(quotaSeriesCombo, viewModel.quotaTrendSeries.size() > 1 ? TRUE : FALSE);
-        ShowWindow(quotaSeriesCombo, viewModel.quotaTrendSeries.empty() ? SW_HIDE : SW_SHOW);
+        ShowWindow(quotaSeriesCombo, viewModel.quotaTrendSeries.size() > 1 ? SW_SHOW : SW_HIDE);
         if (quotaSeriesLabel != nullptr) {
             ShowWindow(quotaSeriesLabel, viewModel.quotaTrendSeries.size() > 1 ? SW_SHOW : SW_HIDE);
         }
@@ -1621,7 +1630,9 @@ public:
         }
         selectedActivityPointIndex = index;
         selectedQuotaPointIndex = -1;
-        setWindowTextUtf8(trendDetail, currentTrendDetailText());
+        if (updateLayoutText(trendDetail, currentTrendDetailText()) && hasLastLayoutBounds) {
+            layout(lastLayoutBounds);
+        }
         if (trendChart != nullptr) {
             InvalidateRect(trendChart, nullptr, TRUE);
             UpdateWindow(trendChart);
@@ -1636,7 +1647,9 @@ public:
         }
         selectedQuotaPointIndex = index;
         selectedActivityPointIndex = -1;
-        setWindowTextUtf8(trendDetail, currentTrendDetailText());
+        if (updateLayoutText(trendDetail, currentTrendDetailText()) && hasLastLayoutBounds) {
+            layout(lastLayoutBounds);
+        }
         if (trendChart != nullptr) {
             InvalidateRect(trendChart, nullptr, TRUE);
             UpdateWindow(trendChart);
@@ -1865,9 +1878,19 @@ public:
     }
 
     void updateViewModel(const AnalysisViewModel& model) {
+        const bool hadCustomDateInputs = showsCustomDates();
+        bool layoutChanged = (viewModel.quotaTrendSeries.size() > 1) != (model.quotaTrendSeries.size() > 1);
+        // The query can fall back to another preset. Its dates still identify the requested range.
+        const bool awaitingDateRange = interactionPending &&
+                                       currentScope.dateRangePreset == AnalysisDateRangePreset::Custom &&
+                                       (model.scope.customRangeStartUtc != currentScope.customRangeStartUtc ||
+                                        model.scope.customRangeEndUtc != currentScope.customRangeEndUtc);
         viewModel = model;
-        currentScope = normalizeScope(model.scope);
-        interactionPending = false;
+        if (!awaitingDateRange) {
+            currentScope = normalizeScope(model.scope);
+            interactionPending = false;
+        }
+        layoutChanged |= hadCustomDateInputs != showsCustomDates();
         if (!selectedQuotaSeriesKey.empty()) {
             bool foundSelectedSeries = false;
             for (const auto& series : viewModel.quotaTrendSeries) {
@@ -1880,16 +1903,14 @@ public:
                 selectedQuotaSeriesKey.clear();
             }
         }
-        if (parent != nullptr) {
-            KillTimer(parent, kCustomDateDebounceTimerId);
-        }
-
         suppressNotification = true;
         populateCombo(providerCombo, model.availableProviders, currentScope.selectedProviderId);
         populateCombo(accountCombo, model.availableAccounts, currentScope.selectedAccountId);
 
         if (rangeCombo != nullptr) {
-            const std::string key = presetKeyFromEnum(currentScope.dateRangePreset);
+            const auto rangePreset =
+                showsCustomDates() ? AnalysisDateRangePreset::Custom : currentScope.dateRangePreset;
+            const std::string key = presetKeyFromEnum(rangePreset);
             int rangeIndex = 2;
             for (int i = 0; i < static_cast<int>(std::size(presetKeys)); ++i) {
                 if (presetKeys[i] == key) {
@@ -1900,31 +1921,30 @@ public:
             SendMessageW(rangeCombo, CB_SETCURSEL, static_cast<WPARAM>(rangeIndex), 0);
         }
 
-        setWindowTextUtf8(customStartEdit, formatUtcDateOnly(currentScope.customRangeStartUtc));
-        setWindowTextUtf8(customEndEdit, formatUtcDateOnly(currentScope.customRangeEndUtc));
-        applyCustomDateEnabledState(currentScope.dateRangePreset == AnalysisDateRangePreset::Custom);
+        if (!customDateEditPending && !awaitingDateRange) {
+            setWindowTextUtf8(customStartEdit, formatUtcDateOnly(currentScope.customRangeStartUtc));
+            setWindowTextUtf8(customEndEdit, formatUtcDateOnly(currentScope.customRangeEndUtc));
+        }
 
-        setWindowTextUtf8(
-            scopeSummary,
-            buildScopeSummaryText(model.scopeLabel));
+        layoutChanged |= updateLayoutText(scopeSummary, buildScopeSummaryText(model.scopeLabel));
         populateQuotaSeriesCombo();
         syncDefaultTrendSelection();
-        setWindowTextUtf8(summaryHeadline, buildOverviewHeadline(model));
+        layoutChanged |= updateLayoutText(summaryHeadline, buildOverviewHeadline(model));
         setWindowTextUtf8(summaryStats, buildOverviewStats(model));
         const AnalysisOverviewCells overviewCells = buildOverviewCells(model);
         setWindowTextUtf8(summaryCoverageCell, overviewCells.coverage);
         setWindowTextUtf8(summaryBreakdownsCell, overviewCells.breakdowns);
         setWindowTextUtf8(summaryThroughputCell, overviewCells.throughput);
-        setWindowTextUtf8(trendSummary, currentTrendSummaryText());
-        setWindowTextUtf8(trendComparison, currentTrendComparisonText());
-        setWindowTextUtf8(trendDetail, currentTrendDetailText());
+        layoutChanged |= updateLayoutText(trendSummary, currentTrendSummaryText());
+        layoutChanged |= updateLayoutText(trendComparison, currentTrendComparisonText());
+        layoutChanged |= updateLayoutText(trendDetail, currentTrendDetailText());
         if (trendChart != nullptr) {
             InvalidateRect(trendChart, nullptr, TRUE);
         }
-        setWindowTextUtf8(statusHeadline, currentStatusHeadline());
-        setWindowTextUtf8(statusDetail, currentStatusDetail());
-        setWindowTextUtf8(dataQuality, buildDataQualityText(model));
-        setWindowTextUtf8(gapSummary, buildGapSummaryText(model));
+        layoutChanged |= updateLayoutText(statusHeadline, currentStatusHeadline());
+        layoutChanged |= updateLayoutText(statusDetail, currentStatusDetail());
+        layoutChanged |= updateLayoutText(dataQuality, buildDataQualityText(model));
+        layoutChanged |= updateLayoutText(gapSummary, buildGapSummaryText(model));
         applyScopeInputEnabledState();
 
         populateBreakdownList(providerList, model.providerBreakdown, "No provider breakdown is available for this scope yet.");
@@ -1932,6 +1952,9 @@ public:
         populateDailyList(model.dailySummaries);
 
         suppressNotification = false;
+        if (layoutChanged && hasLastLayoutBounds) {
+            layout(lastLayoutBounds);
+        }
     }
 
     void setVisible(bool visible) {
@@ -1954,7 +1977,10 @@ public:
                 ShowWindow(hwnd, flag);
             }
         }
-        applyCustomDateEnabledState(visible && currentScope.dateRangePreset == AnalysisDateRangePreset::Custom);
+        const int quotaFlag = visible && viewModel.quotaTrendSeries.size() > 1 ? SW_SHOW : SW_HIDE;
+        ShowWindow(quotaSeriesLabel, quotaFlag);
+        ShowWindow(quotaSeriesCombo, quotaFlag);
+        applyCustomDateEnabledState(visible && showsCustomDates());
     }
 
     void layout(const RECT& bounds) {
@@ -1970,7 +1996,7 @@ public:
         const int compactComboHeight = scaledPixels(220);
         const int editWidth = scaledPixels(110);
         const int singleLineHeight = scaledPixels(20);
-        const bool showCustomDateInputs = currentScope.dateRangePreset == AnalysisDateRangePreset::Custom;
+        const bool showCustomDateInputs = showsCustomDates();
         const bool showQuotaSeriesSelector = viewModel.quotaTrendSeries.size() > 1;
         const int customDateHintHeight = showCustomDateInputs ? scaledPixels(26) : 0;
 
@@ -2396,7 +2422,7 @@ public:
                 workspaceGuideHeight,
                 TRUE);
             updateVerticalScroll(totalHeight, static_cast<int>(provenanceRect.bottom - bounds.top) + padding);
-            applyCurrentScrollOffset();
+            offsetControls(-scrollOffset);
             return;
         }
 
@@ -2711,7 +2737,7 @@ public:
             workspaceGuideHeight,
             TRUE);
         updateVerticalScroll(totalHeight, static_cast<int>(provenanceRect.bottom - bounds.top) + padding);
-        applyCurrentScrollOffset();
+        offsetControls(-scrollOffset);
     }
 
     bool isStyledTextCell(HWND control) const {
@@ -2949,10 +2975,7 @@ public:
         if (timerId != kCustomDateDebounceTimerId) {
             return false;
         }
-        if (parent != nullptr) {
-            KillTimer(parent, kCustomDateDebounceTimerId);
-        }
-        commitCustomDateChange();
+        commitCustomDateEdit();
         return true;
     }
 
@@ -3049,6 +3072,7 @@ public:
                 state.customRangeEndUtc = *endOpt;
             }
         }
+        cancelCustomDateEdit();
         applyCustomDateEnabledState(state.dateRangePreset == AnalysisDateRangePreset::Custom);
         fireScopeChanged(normalizeScope(state));
     }
@@ -3068,11 +3092,8 @@ public:
         setWindowTextUtf8(trendSummary, currentTrendSummaryText());
         setWindowTextUtf8(trendComparison, currentTrendComparisonText());
         setWindowTextUtf8(trendDetail, currentTrendDetailText());
-        if (parent != nullptr) {
-            RECT bounds{};
-            if (GetClientRect(parent, &bounds) != 0) {
-                layout(bounds);
-            }
+        if (hasLastLayoutBounds) {
+            layout(lastLayoutBounds);
         }
         if (trendChart != nullptr) {
             InvalidateRect(trendChart, nullptr, TRUE);
@@ -3080,21 +3101,37 @@ public:
     }
 
     void onCustomDateChanged(WORD notifyCode) {
-        if (suppressNotification) return;
-        applyCustomDateEditingState();
-        if (notifyCode == EN_CHANGE) {
-            if (parent != nullptr) {
-                SetTimer(parent, kCustomDateDebounceTimerId, 350, nullptr);
-            }
+        if (suppressNotification) {
             return;
         }
-        if (notifyCode == EN_KILLFOCUS && parent != nullptr) {
-            KillTimer(parent, kCustomDateDebounceTimerId);
+        if (notifyCode == EN_CHANGE) {
+            const bool hadCustomDateInputs = showsCustomDates();
+            customDateEditPending = true;
+            applyCustomDateEditingState();
+            if (!hadCustomDateInputs && hasLastLayoutBounds) {
+                layout(lastLayoutBounds);
+            }
+            if (parent != nullptr && SetTimer(parent, kCustomDateDebounceTimerId, 350, nullptr) == 0) {
+                commitCustomDateEdit();
+            }
+        } else if (notifyCode == EN_KILLFOCUS) {
+            commitCustomDateEdit();
         }
-        commitCustomDateChange();
     }
 
-    void commitCustomDateChange() {
+    void cancelCustomDateEdit() {
+        customDateEditPending = false;
+        if (parent != nullptr) {
+            KillTimer(parent, kCustomDateDebounceTimerId);
+        }
+    }
+
+    void commitCustomDateEdit() {
+        if (!customDateEditPending) {
+            return;
+        }
+
+        cancelCustomDateEdit();
         AnalysisScopeState state = currentScope;
         state.dateRangePreset = AnalysisDateRangePreset::Custom;
         const auto startOpt = parseReportDay(getWindowTextUtf8(customStartEdit));
@@ -3138,12 +3175,13 @@ public:
         setWindowTextUtf8(statusHeadline, currentStatusHeadline());
         setWindowTextUtf8(statusDetail, currentStatusDetail());
         applyScopeInputEnabledState();
-        if (parent != nullptr) {
-            RECT bounds{};
-            if (GetClientRect(parent, &bounds) != 0) {
-                layout(bounds);
-            }
+        if (hasLastLayoutBounds) {
+            layout(lastLayoutBounds);
         }
+    }
+
+    bool showsCustomDates() const {
+        return customDateEditPending || currentScope.dateRangePreset == AnalysisDateRangePreset::Custom;
     }
 
     std::string currentStatusHeadline() const {
@@ -3484,21 +3522,23 @@ private:
         }
 
         const int clamped = std::clamp(newOffset, 0, maxScrollOffset());
-        if (clamped == scrollOffset) {
+        const int offset = scrollOffset - clamped;
+        if (offset == 0) {
             return false;
         }
 
         scrollOffset = clamped;
-        layout(lastLayoutBounds);
-        if (parent != nullptr) {
-            InvalidateRect(parent, nullptr, TRUE);
-            UpdateWindow(parent);
-        }
+        offsetControls(offset);
+        SCROLLINFO info{};
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_POS;
+        info.nPos = scrollOffset;
+        SetScrollInfo(parent, SB_VERT, &info, TRUE);
         return true;
     }
 
-    void applyCurrentScrollOffset() const {
-        if (parent == nullptr || scrollOffset == 0) {
+    void offsetControls(int offset) const {
+        if (parent == nullptr || offset == 0) {
             return;
         }
 
@@ -3521,15 +3561,10 @@ private:
                 continue;
             }
             RECT rect = windowRectRelativeToParent(parent, hwnd);
-            SetWindowPos(
-                hwnd,
-                nullptr,
-                rect.left,
-                rect.top - scrollOffset,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowPos(hwnd, nullptr, rect.left, rect.top + offset, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
         }
+        RedrawWindow(parent, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
     AnalysisScopeState normalizeScope(const AnalysisScopeState& state) const {

@@ -355,6 +355,40 @@ TEST_CASE("AnalysisPresenter lets the user switch between scoped quota trend ser
     presenter.shutdown();
 }
 
+TEST_CASE("AnalysisPresenter lays out the quota selector when an open view gains series",
+          "[analysis][presenter][analysis_presenter]") {
+    ScopedParentWindow parent;
+    REQUIRE(parent.get() != nullptr);
+    ShowWindow(parent.get(), SW_SHOWNA);
+
+    AnalysisPresenter presenter;
+    REQUIRE(presenter.init(parent.get()));
+    presenter.updateViewModel(makeViewModel());
+    presenter.layout(RECT{0, 0, 760, 520});
+
+    const HWND selector = GetDlgItem(parent.get(), 2107);
+    REQUIRE(selector != nullptr);
+    CHECK_FALSE(IsWindowVisible(selector));
+
+    presenter.updateViewModel(makeMultiQuotaTrendViewModel());
+    REQUIRE(presenter.jumpToSectionForTesting("trend"));
+    REQUIRE(IsWindowVisible(selector));
+    REQUIRE(IsWindowEnabled(selector));
+    const RECT trend = presenter.getSectionBoundsForTesting("trend");
+    RECT bounds{};
+    REQUIRE(GetWindowRect(selector, &bounds));
+    MapWindowPoints(HWND_DESKTOP, parent.get(), reinterpret_cast<POINT*>(&bounds), 2);
+    CHECK(bounds.left > trend.left);
+    CHECK(bounds.right <= trend.right);
+    CHECK(bounds.top > trend.top);
+    CHECK(bounds.bottom < trend.bottom);
+    REQUIRE(presenter.selectQuotaSeriesForTesting("minimax-plan|tokens|1d"));
+
+    presenter.updateViewModel(makeQuotaTrendViewModel());
+    CHECK_FALSE(IsWindowVisible(selector));
+    CHECK(presenter.getTrendSummaryForTesting().find("OpenAI 5h") != std::string::npos);
+}
+
 TEST_CASE("AnalysisPresenter exposes trend comparison and drill-down detail text", "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;
     REQUIRE(parent.get() != nullptr);
@@ -440,7 +474,15 @@ TEST_CASE("AnalysisPresenter uses vertical scrolling instead of over-compressing
     CHECK(presenter.getScrollOffsetForTesting() > 0);
 
     const RECT provenanceAfter = presenter.getSectionBoundsForTesting("provenance");
-    CHECK(provenanceAfter.top < provenanceBefore.top);
+    CHECK(provenanceBefore.top - provenanceAfter.top == presenter.getScrollOffsetForTesting());
+    CHECK(provenanceBefore.bottom - provenanceAfter.bottom == presenter.getScrollOffsetForTesting());
+
+    REQUIRE(presenter.handleVScroll(SB_BOTTOM));
+    CHECK(presenter.getScrollOffsetForTesting() ==
+          presenter.getContentHeightForTesting() - presenter.getViewportHeightForTesting());
+    REQUIRE(presenter.handleVScroll(SB_TOP));
+    const RECT provenanceRestored = presenter.getSectionBoundsForTesting("provenance");
+    CHECK(EqualRect(&provenanceRestored, &provenanceBefore));
 
     presenter.shutdown();
 }
@@ -492,4 +534,45 @@ TEST_CASE("AnalysisPresenter debounces custom date edits until commit notificati
     CHECK(scopes.front().customRangeEndUtc == makeUtcTime(2026, 4, 5));
 
     presenter.shutdown();
+}
+
+TEST_CASE("AnalysisPresenter keeps custom date input through a refresh and its debounce",
+          "[analysis][presenter][analysis_presenter]") {
+    ScopedParentWindow parent;
+    REQUIRE(parent.get() != nullptr);
+
+    AnalysisPresenter presenter;
+    REQUIRE(presenter.init(parent.get()));
+    AnalysisViewModel model = makeViewModel();
+    model.scope.dateRangePreset = AnalysisDateRangePreset::Custom;
+    presenter.updateViewModel(model);
+
+    std::vector<AnalysisScopeState> scopes;
+    presenter.setScopeChangedCallback([&](const AnalysisScopeState& state) {
+        scopes.push_back(state);
+        presenter.setInteractionPending(true);
+    });
+
+    presenter.setCustomRangeTextForTesting("2026-04-01", "2026-04-05");
+    REQUIRE(presenter.handleCommand(2104, EN_CHANGE));
+    presenter.updateViewModel(model);
+    CHECK(scopes.empty());
+
+    MSG timer{};
+    const ULONGLONG deadline = GetTickCount64() + 2000;
+    while (!PeekMessageW(&timer, parent.get(), WM_TIMER, WM_TIMER, PM_REMOVE) && GetTickCount64() < deadline) {
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 50, QS_TIMER);
+    }
+    REQUIRE(timer.message == WM_TIMER);
+    REQUIRE(presenter.handleTimer(timer.wParam));
+    REQUIRE(scopes.size() == 1);
+    CHECK(scopes.front().dateRangePreset == AnalysisDateRangePreset::Custom);
+    CHECK(scopes.front().customRangeStartUtc == makeUtcTime(2026, 4, 1));
+    CHECK(scopes.front().customRangeEndUtc == makeUtcTime(2026, 4, 5));
+
+    presenter.updateViewModel(model);
+    CHECK_FALSE(presenter.areScopeInputsEnabledForTesting());
+    model.scope = scopes.front();
+    presenter.updateViewModel(model);
+    CHECK(presenter.areScopeInputsEnabledForTesting());
 }

@@ -1262,6 +1262,7 @@ public:
     HWND preferencesCloseButton = nullptr;
     std::string miniMaxFeedbackMessage;
     bool threadReady = false;
+    bool viewModelSyncPending = false;
     bool dashboardHighContrast = false;
     HFONT titleFont = nullptr;
     HFONT bodyFont = nullptr;
@@ -1275,6 +1276,14 @@ public:
     int overviewScroll = 0;
     int wheelDelta = 0;
     size_t quotaRowCount = 0;
+    struct OverviewLayout {
+        std::wstring offlineNoticeMessage;
+        bool offlineNoticeVisible = false;
+        bool offlineRetryAvailable = false;
+        int openAiModelRows = 0;
+        int hicapModelRows = 0;
+    };
+    OverviewLayout overviewLayout;
     HICON appIconLarge = nullptr;
     HICON appIconSmall = nullptr;
     HMENU mainMenu = nullptr;
@@ -1315,6 +1324,14 @@ public:
     std::wstring scheduledExportTooltipBody;
     std::wstring updatedTooltipBody;
     StorageService placementStorage;
+    std::optional<RECT> savedAnalysisWindowRect;
+    std::optional<RECT> initialAnalysisFallbackRect;
+    std::thread placementWriter;
+    std::mutex placementMutex;
+    std::condition_variable placementCv;
+    bool stopPlacementWriter = false;
+    std::optional<RECT> pendingMainPlacement;
+    std::optional<RECT> pendingAnalysisPlacement;
 
     static constexpr UINT WM_JISTATS_SYNC_VIEWMODEL = WM_APP + 32;
     static constexpr UINT WM_JISTATS_SYNC_PREFERENCES = WM_APP + 33;
@@ -1425,10 +1442,6 @@ public:
     }
 
     std::optional<RECT> loadSavedMainWindowRect() {
-        if (!ensurePlacementStorage()) {
-            return std::nullopt;
-        }
-
         SettingsService settings(placementStorage);
         const auto x = settings.getInt(kWindowPosXKey);
         const auto y = settings.getInt(kWindowPosYKey);
@@ -1480,34 +1493,28 @@ public:
     }
 
     std::optional<RECT> loadSavedAnalysisWindowRect() {
-        if (!ensurePlacementStorage()) {
-            return std::nullopt;
-        }
-
         SettingsService settings(placementStorage);
         const auto x = settings.getInt(kAnalysisWindowPosXKey);
+        if (!x) {
+            return std::nullopt;
+        }
         const auto y = settings.getInt(kAnalysisWindowPosYKey);
+        if (!y) {
+            return std::nullopt;
+        }
         const auto width = settings.getInt(kAnalysisWindowWidthKey);
+        if (!width || *width < kAnalysisMinWidth) {
+            return std::nullopt;
+        }
         const auto height = settings.getInt(kAnalysisWindowHeightKey);
-        if (!x.has_value() || !y.has_value() || !width.has_value() || !height.has_value()) {
+        if (!height || *height < kAnalysisMinHeight) {
             return std::nullopt;
         }
-        if (*width < kAnalysisMinWidth || *height < kAnalysisMinHeight) {
-            return std::nullopt;
-        }
-
-        RECT rect{*x, *y, *x + *width, *y + *height};
-#ifdef _WIN32
-        RECT workArea{};
-        if (tryGetMonitorWorkArea(rect, workArea)) {
-            clampRectToWorkArea(rect, workArea);
-        }
-#endif
-        return rect;
+        return RECT{*x, *y, *x + *width, *y + *height};
     }
 
     void persistMainWindowPlacement(HWND hwnd) {
-        if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd) || !ensurePlacementStorage()) {
+        if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd)) {
             return;
         }
 
@@ -1526,16 +1533,16 @@ public:
             return;
         }
 
-        SettingsService settings(placementStorage);
-        settings.setInt(kWindowPosXKey, rect.left);
-        settings.setInt(kWindowPosYKey, rect.top);
-        settings.setInt(kWindowWidthKey, rect.right - rect.left);
-        settings.setInt(kWindowHeightKey, rect.bottom - rect.top);
+        {
+            std::lock_guard<std::mutex> lock(placementMutex);
+            pendingMainPlacement = rect;
+        }
+        placementCv.notify_one();
     }
 
-    void persistAnalysisWindowPlacement(HWND hwnd) {
-        if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd) || !ensurePlacementStorage()) {
-            return;
+    static std::optional<RECT> analysisWindowPlacement(HWND hwnd) {
+        if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd)) {
+            return std::nullopt;
         }
 
         WINDOWPLACEMENT placement{};
@@ -1545,14 +1552,77 @@ public:
             !IsRectEmpty(&placement.rcNormalPosition)) {
             rect = placement.rcNormalPosition;
         } else if (GetWindowRect(hwnd, &rect) == 0 || IsRectEmpty(&rect)) {
+            return std::nullopt;
+        }
+
+        return rect;
+    }
+
+    void persistAnalysisWindowPlacement(HWND hwnd) {
+        const auto rect = analysisWindowPlacement(hwnd);
+        if (!rect || (initialAnalysisFallbackRect && EqualRect(&*rect, &*initialAnalysisFallbackRect))) {
             return;
         }
 
+        initialAnalysisFallbackRect.reset();
+        {
+            std::lock_guard<std::mutex> lock(placementMutex);
+            savedAnalysisWindowRect = rect;
+            pendingAnalysisPlacement = rect;
+        }
+        placementCv.notify_one();
+    }
+
+    void savePlacement(const std::optional<RECT>& rect, const char* xKey, const char* yKey, const char* widthKey,
+                       const char* heightKey) {
+        if (!rect || !ensurePlacementStorage() ||
+            !placementStorage.beginTransaction(StorageService::TransactionMode::Immediate)) {
+            return;
+        }
         SettingsService settings(placementStorage);
-        settings.setInt(kAnalysisWindowPosXKey, rect.left);
-        settings.setInt(kAnalysisWindowPosYKey, rect.top);
-        settings.setInt(kAnalysisWindowWidthKey, rect.right - rect.left);
-        settings.setInt(kAnalysisWindowHeightKey, rect.bottom - rect.top);
+        if (!(settings.setInt(xKey, rect->left) && settings.setInt(yKey, rect->top) &&
+              settings.setInt(widthKey, rect->right - rect->left) &&
+              settings.setInt(heightKey, rect->bottom - rect->top) && placementStorage.commitTransaction())) {
+            placementStorage.rollbackTransaction();
+        }
+    }
+
+    void runPlacementWriter() {
+        if (placementStorage.isOpen()) {
+            const auto storedRect = loadSavedAnalysisWindowRect();
+            std::lock_guard<std::mutex> lock(placementMutex);
+            if (!savedAnalysisWindowRect) {
+                savedAnalysisWindowRect = storedRect;
+            }
+        }
+        for (;;) {
+            std::optional<RECT> mainPlacement;
+            std::optional<RECT> analysisPlacement;
+            {
+                std::unique_lock<std::mutex> lock(placementMutex);
+                placementCv.wait(
+                    lock, [this]() { return stopPlacementWriter || pendingMainPlacement || pendingAnalysisPlacement; });
+                if (!pendingMainPlacement && !pendingAnalysisPlacement) {
+                    return;
+                }
+                mainPlacement = pendingMainPlacement;
+                analysisPlacement = pendingAnalysisPlacement;
+                pendingMainPlacement.reset();
+                pendingAnalysisPlacement.reset();
+            }
+            savePlacement(mainPlacement, kWindowPosXKey, kWindowPosYKey, kWindowWidthKey, kWindowHeightKey);
+            savePlacement(analysisPlacement, kAnalysisWindowPosXKey, kAnalysisWindowPosYKey, kAnalysisWindowWidthKey,
+                          kAnalysisWindowHeightKey);
+        }
+    }
+
+    void joinPlacementWriter() {
+        {
+            std::lock_guard<std::mutex> lock(placementMutex);
+            stopPlacementWriter = true;
+        }
+        placementCv.notify_one();
+        placementWriter.join();
     }
 
     void centerWindowOnOwner(HWND hwnd, HWND owner) {
@@ -2014,6 +2084,22 @@ public:
         analysisPresenter->layout(bounds);
     }
 
+    void initializeAnalysisControls(HWND hwnd) {
+        if (analysisPresenter == nullptr) {
+            return;
+        }
+
+        AnalysisViewModel model;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            model = viewModel.analysis;
+        }
+        analysisPresenter->init(hwnd);
+        analysisPresenter->setVisible(true);
+        analysisPresenter->updateViewModel(model);
+        layoutAnalysisWindowControls(hwnd);
+    }
+
     void openAnalysisWindow(bool bringToFront = true) {
         HWND existing = nullptr;
         {
@@ -2030,9 +2116,18 @@ public:
             return;
         }
 
+        std::optional<RECT> savedRect;
+        {
+            std::lock_guard<std::mutex> lock(placementMutex);
+            savedRect = savedAnalysisWindowRect;
+        }
         RECT rect{};
-        if (const auto savedRect = loadSavedAnalysisWindowRect()) {
+        if (savedRect) {
             rect = *savedRect;
+            RECT workArea{};
+            if (tryGetMonitorWorkArea(rect, workArea)) {
+                clampRectToWorkArea(rect, workArea);
+            }
         } else {
             rect.left = CW_USEDEFAULT;
             rect.top = CW_USEDEFAULT;
@@ -2072,6 +2167,7 @@ public:
             analysisWindow = hwnd;
         }
 
+        initialAnalysisFallbackRect = savedRect ? std::nullopt : analysisWindowPlacement(hwnd);
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
         if (bringToFront) {
@@ -2082,13 +2178,13 @@ public:
 
     void activateMainPage(int index) {
         selectedMainTab = index;
+        layoutMainControls();
         if (selectedMainTab == 2) {
             openAnalysisWindow(true);
         }
-        syncViewModelToControls();
     }
 
-    void syncMainTabVisibility(const DashboardViewModel& model) {
+    void syncMainTabVisibility() {
         const bool overview = selectedMainTab == 0;
         const HWND overviewControls[] = {appGroup,
                                          connectionLabel,
@@ -2114,9 +2210,9 @@ public:
         for (HWND control : overviewControls) {
             ShowWindow(control, overview ? SW_SHOWNA : SW_HIDE);
         }
-        ShowWindow(offlineRetryButton, overview && model.offlineRetryAvailable ? SW_SHOWNA : SW_HIDE);
+        ShowWindow(offlineRetryButton, overview && overviewLayout.offlineRetryAvailable ? SW_SHOWNA : SW_HIDE);
         for (HWND control : {offlineNoticeTitle, offlineNoticeMessage, offlineDismissButton}) {
-            ShowWindow(control, overview && model.offlineNoticeVisible ? SW_SHOWNA : SW_HIDE);
+            ShowWindow(control, overview && overviewLayout.offlineNoticeVisible ? SW_SHOWNA : SW_HIDE);
         }
         for (size_t index = 0; index < kMaxUsageRows; ++index) {
             const int flag = overview && index < quotaRowCount ? SW_SHOWNA : SW_HIDE;
@@ -2129,10 +2225,6 @@ public:
         }
         for (HWND control : {analysisLaunchTitle, analysisLaunchInfo, analysisLaunchButton}) {
             ShowWindow(control, selectedMainTab == 2 ? SW_SHOWNA : SW_HIDE);
-        }
-
-        if (analysisPresenter != nullptr) {
-            analysisPresenter->setVisible(analysisWindow != nullptr);
         }
     }
 
@@ -3057,7 +3149,7 @@ public:
         ensureUsageTooltip();
     }
 
-    void layoutMainControls(const DashboardViewModel& model) {
+    void layoutMainControls() {
         if (dashboardViewport == nullptr) {
             return;
         }
@@ -3080,7 +3172,7 @@ public:
         MoveWindow(dashboardViewport, 0, viewportTop, width, viewportHeight, FALSE);
 
         if (selectedMainTab == 0) {
-            layoutOverview(model, width, viewportHeight);
+            layoutOverview(width, viewportHeight);
         } else {
             ShowScrollBar(dashboardViewport, SB_VERT, FALSE);
             const int cardWidth = width - margin * 2;
@@ -3098,11 +3190,11 @@ public:
             MoveWindow(analysisLaunchInfo, left, px(57), innerWidth, std::max(0, buttonTop - px(68)), FALSE);
             MoveWindow(analysisLaunchButton, left, buttonTop, px(200), px(32), FALSE);
         }
-        syncMainTabVisibility(model);
+        syncMainTabVisibility();
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
-    void layoutOverview(const DashboardViewModel& model, int width, int height) {
+    void layoutOverview(int width, int height) {
         const auto px = [this](int value) { return scaledPixels(value); };
         const int left = px(24);
         const int gap = px(14);
@@ -3112,8 +3204,8 @@ public:
         const int innerLeft = left + inset;
         const int statusColumns = innerWidth >= px(720) ? 4 : 2;
         const int statusHeight = (4 / statusColumns) * px(48);
-        const bool notice = model.offlineNoticeVisible;
-        const bool retry = model.offlineRetryAvailable;
+        const bool notice = overviewLayout.offlineNoticeVisible;
+        const bool retry = overviewLayout.offlineRetryAvailable;
         const int actionWidth = notice && retry ? px(204) : px(102);
         const int noticeTextWidth = innerWidth - actionWidth - px(24);
         int noticeHeight = px(40);
@@ -3121,8 +3213,8 @@ public:
             HDC dc = GetDC(dashboardViewport);
             HGDIOBJ oldFont = SelectObject(dc, dashboardBodyFont);
             RECT measured{0, 0, noticeTextWidth, 0};
-            const auto text = utf8ToWide(model.offlineNoticeMessage);
-            DrawTextW(dc, text.c_str(), -1, &measured, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+            DrawTextW(dc, overviewLayout.offlineNoticeMessage.c_str(), -1, &measured,
+                      DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
             SelectObject(dc, oldFont);
             ReleaseDC(dashboardViewport, dc);
             noticeHeight = std::max(px(62), px(34) + static_cast<int>(measured.bottom));
@@ -3134,12 +3226,9 @@ public:
         const int summaryBlockHeight = summaryColumns == 3 ? summaryHeight : 2 * summaryHeight + gap;
         const int throughputHeight = px(194) + summaryBlockHeight;
         const bool twoColumns = cardWidth >= px(830);
-        const auto summaryTextHeight = [&](const AnalysisProviderModelUsageChart& chart) {
-            const int count = chart.hasData ? static_cast<int>(std::min<size_t>(chart.series.size(), 6)) : 0;
-            return px(std::max(34, (count + 1) * 16 + 4));
-        };
-        int openAiSummaryHeight = summaryTextHeight(model.analysis.openAiCodexModelUsage);
-        int hicapSummaryHeight = summaryTextHeight(model.analysis.hicapCodexModelUsage);
+        const auto summaryTextHeight = [&](int rows) { return px(std::max(34, (rows + 1) * 16 + 4)); };
+        int openAiSummaryHeight = summaryTextHeight(overviewLayout.openAiModelRows);
+        int hicapSummaryHeight = summaryTextHeight(overviewLayout.hicapModelRows);
         if (twoColumns) {
             openAiSummaryHeight = hicapSummaryHeight = std::max(openAiSummaryHeight, hicapSummaryHeight);
         }
@@ -3304,7 +3393,7 @@ public:
                                        SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
         }
         if (positions == nullptr || !EndDeferWindowPos(positions)) {
-            layoutMainControls(copyViewModel());
+            layoutMainControls();
             return;
         }
 
@@ -3915,7 +4004,13 @@ public:
             utf8ToWide(model.offlineNoticeTitle.empty()
                 ? "Connection Lost"
                 : model.offlineNoticeTitle));
-        setWindowText(offlineNoticeMessage, utf8ToWide(model.offlineNoticeMessage));
+        const auto modelRows = [](const AnalysisProviderModelUsageChart& chart) {
+            return chart.hasData ? static_cast<int>(std::min<size_t>(chart.series.size(), 6)) : 0;
+        };
+        overviewLayout = {utf8ToWide(model.offlineNoticeMessage), model.offlineNoticeVisible,
+                          model.offlineRetryAvailable, modelRows(model.analysis.openAiCodexModelUsage),
+                          modelRows(model.analysis.hicapCodexModelUsage)};
+        setWindowText(offlineNoticeMessage, overviewLayout.offlineNoticeMessage);
         setWindowText(
             recoveryValue,
             utf8ToWide(model.recoveryStatusSummary.empty()
@@ -3941,7 +4036,7 @@ public:
                                                                      : localizeDisplayTimestamp(model.lastUpdateTime));
         setWindowText(updatedValue, updatedTooltipBody);
         syncUsageProgress(model);
-        layoutMainControls(model);
+        layoutMainControls();
         populateProviderList(model);
         if (analysisPresenter != nullptr && analysisWindow != nullptr) {
             analysisPresenter->updateViewModel(model.analysis);
@@ -3954,7 +4049,9 @@ public:
         }
         SendMessageW(statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(statusText.c_str()));
 
-        syncPreferencesWindowState();
+        if (preferencesWindow != nullptr) {
+            syncPreferencesWindowState();
+        }
         syncShellDialogContent(DashboardShellDialog::Help);
         syncShellDialogContent(DashboardShellDialog::About);
     }
@@ -3971,26 +4068,15 @@ public:
         }
     }
 
-    void requestViewModelSync() {
-        HWND hwnd = nullptr;
-        HWND prefs = nullptr;
-        bool shouldSyncMainWindow = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            hwnd = window;
-            prefs = preferencesWindow;
-            shouldSyncMainWindow =
-                visible ||
-                analysisWindow != nullptr ||
-                helpDialog.window != nullptr ||
-                aboutDialog.window != nullptr;
-        }
+    // Call with mutex held.
+    bool shouldSyncMainWindow() const {
+        return visible || analysisWindow != nullptr || helpDialog.window != nullptr || aboutDialog.window != nullptr;
+    }
 
-        if (shouldSyncMainWindow && hwnd != nullptr) {
-            PostMessageW(hwnd, WM_JISTATS_SYNC_VIEWMODEL, 0, 0);
-        }
-        if (prefs != nullptr) {
-            PostMessageW(prefs, WM_JISTATS_SYNC_PREFERENCES, 0, 0);
+    void requestViewModelSync() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (window != nullptr && !viewModelSyncPending && (shouldSyncMainWindow() || preferencesWindow != nullptr)) {
+            viewModelSyncPending = PostMessageW(window, WM_JISTATS_SYNC_VIEWMODEL, 0, 0) != FALSE;
         }
     }
 
@@ -5324,19 +5410,14 @@ public:
 
     LRESULT handleAnalysisMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         switch (msg) {
-        case WM_CREATE:
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                analysisWindow = hwnd;
+            case WM_CREATE: {
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    analysisWindow = hwnd;
+                }
+                initializeAnalysisControls(hwnd);
+                return 0;
             }
-            if (analysisPresenter != nullptr) {
-                analysisPresenter->init(hwnd);
-                analysisPresenter->setVisible(true);
-            }
-            syncAnalysisLauncherState(copyViewModel());
-            layoutAnalysisWindowControls(hwnd);
-            syncViewModelToControls();
-            return 0;
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
             info->ptMinTrackSize.x = kAnalysisMinWidth;
@@ -5382,18 +5463,12 @@ public:
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_JISTATS_ATTACH_ANALYSIS:
-            if (analysisPresenter != nullptr) {
-                analysisPresenter->init(hwnd);
-                analysisPresenter->setVisible(true);
-                layoutAnalysisWindowControls(hwnd);
-                syncViewModelToControls();
-            }
+            initializeAnalysisControls(hwnd);
             return 0;
         case WM_EXITSIZEMOVE:
             persistAnalysisWindowPlacement(hwnd);
             return 0;
         case WM_CLOSE:
-            persistAnalysisWindowPlacement(hwnd);
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
@@ -5539,7 +5614,7 @@ public:
             const auto& bounds = *reinterpret_cast<const RECT*>(lParam);
             SetWindowPos(hwnd, nullptr, bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
-            layoutMainControls(copyViewModel());
+            layoutMainControls();
             return 0;
         }
         case WM_SETTINGCHANGE:
@@ -5568,7 +5643,7 @@ public:
                 }
                 return 0;
             }
-            layoutMainControls(copyViewModel());
+            layoutMainControls();
             return 0;
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
@@ -5736,9 +5811,20 @@ public:
             SetDCBrushColor(dc, background);
             return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
         }
-        case WM_JISTATS_SYNC_VIEWMODEL:
-            syncViewModelToControls();
+        case WM_JISTATS_SYNC_VIEWMODEL: {
+            bool syncMainWindow;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                viewModelSyncPending = false;
+                syncMainWindow = shouldSyncMainWindow();
+            }
+            if (syncMainWindow) {
+                syncViewModelToControls();
+            } else if (preferencesWindow != nullptr) {
+                syncPreferencesWindowState();
+            }
             return 0;
+        }
         case WM_JISTATS_ATTACH_ANALYSIS:
             if (analysisWindow != nullptr && analysisPresenter != nullptr) {
                 PostMessageW(analysisWindow, WM_JISTATS_ATTACH_ANALYSIS, 0, 0);
@@ -6897,7 +6983,7 @@ public:
         });
     }
 
-    void runUiThread() {
+    void runUiThread(const std::optional<RECT>& savedRect) {
         initializeCommonControls();
         ensureAppIcons();
         HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -6941,7 +7027,7 @@ public:
         RegisterClassW(&shellDialogClass);
 
         RECT bounds{0, 0, MulDiv(kDefaultWidth, GetDpiForSystem(), 96), MulDiv(kDefaultHeight, GetDpiForSystem(), 96)};
-        if (const auto savedRect = loadSavedMainWindowRect()) {
+        if (savedRect) {
             bounds = *savedRect;
         } else {
             RECT workArea{};
@@ -7013,6 +7099,7 @@ public:
         window = nullptr;
         preferencesWindow = nullptr;
         analysisWindow = nullptr;
+        viewModelSyncPending = false;
         clearShellDialogState(DashboardShellDialog::Help);
         clearShellDialogState(DashboardShellDialog::About);
         visible = false;
@@ -7041,10 +7128,15 @@ bool DashboardPresenter::init() {
     }
 
 #ifdef _WIN32
+    std::optional<RECT> savedMainRect;
+    pImpl->savedAnalysisWindowRect.reset();
+    if (pImpl->ensurePlacementStorage()) {
+        savedMainRect = pImpl->loadSavedMainWindowRect();
+    }
+    pImpl->stopPlacementWriter = false;
+    pImpl->placementWriter = std::thread([this]() { pImpl->runPlacementWriter(); });
     pImpl->threadReady = false;
-    pImpl->uiThread = std::thread([this]() {
-        pImpl->runUiThread();
-    });
+    pImpl->uiThread = std::thread([this, savedMainRect]() { pImpl->runUiThread(savedMainRect); });
 
     std::unique_lock<std::mutex> lock(pImpl->mutex);
     pImpl->readyCv.wait(lock, [this]() {
@@ -7087,6 +7179,9 @@ int DashboardPresenter::waitForExit() {
     std::lock_guard<std::mutex> joinLock(pImpl->threadJoinMutex);
     if (pImpl->uiThread.joinable() && pImpl->uiThread.get_id() != std::this_thread::get_id()) {
         pImpl->uiThread.join();
+    }
+    if (!pImpl->uiThread.joinable() && pImpl->placementWriter.joinable()) {
+        pImpl->joinPlacementWriter();
     }
 #endif
     pImpl->joinOpenAIImportThreads();

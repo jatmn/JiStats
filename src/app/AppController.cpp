@@ -3843,8 +3843,10 @@ public:
     std::atomic<unsigned> subscriptionWatchMask{0};
     std::condition_variable interactionWorkCv;
     std::optional<DashboardPreferences> pendingInteractionPreferences;
-    bool pendingInteractionRequiresRuntimeRefresh = false;
+    std::optional<DashboardPreferences> activeInteractionPreferences;
+    std::optional<AnalysisScopeState> pendingAnalysisScope;
     bool pendingProviderDiscoveryRefresh = false;
+    bool pendingPersistedActivityRefresh = false;
     std::vector<std::thread> miniMaxValidationThreads;
     std::chrono::milliseconds openAICodexRefreshPollInterval{
         std::chrono::duration_cast<std::chrono::milliseconds>(kOpenAICodexRefreshPollInterval)};
@@ -3880,6 +3882,7 @@ public:
     bool taskbarTestModeForTesting = false;
     bool disableCodexTokenImportForTesting = false;
     std::shared_future<void> miniMaxValidationReleaseForTesting;
+    std::function<void()> afterSettingsDequeueForTesting;
     std::function<void()> beforeRuntimePublicationForTesting;
     std::optional<std::time_t> currentTimeForTesting;
 #endif
@@ -3972,14 +3975,20 @@ public:
         });
     }
 
-    void requestInteractionWork(const DashboardPreferences& preferences, bool requiresRuntimeRefresh) {
+    void requestPreferencesChange(const DashboardPreferences& preferences) {
         {
             std::lock_guard<std::mutex> lock(interactionWorkMutex);
             pendingInteractionPreferences = preferences;
-            pendingInteractionRequiresRuntimeRefresh =
-                pendingInteractionRequiresRuntimeRefresh || requiresRuntimeRefresh;
         }
-        interactionWorkCv.notify_all();
+        interactionWorkCv.notify_one();
+    }
+
+    void requestAnalysisScopeChange(const AnalysisScopeState& scope) {
+        {
+            std::lock_guard<std::mutex> lock(interactionWorkMutex);
+            pendingAnalysisScope = scope;
+        }
+        interactionWorkCv.notify_one();
     }
 
     void requestProviderDiscoveryRefresh() {
@@ -3990,37 +3999,58 @@ public:
         interactionWorkCv.notify_all();
     }
 
+    void requestPersistedActivityRefresh() {
+        {
+            std::lock_guard<std::mutex> lock(interactionWorkMutex);
+            if (shuttingDown.load()) {
+                return;
+            }
+            pendingPersistedActivityRefresh = true;
+        }
+        interactionWorkCv.notify_one();
+    }
+
     void runInteractionWorkLoop() {
         while (true) {
             std::optional<DashboardPreferences> preferences;
-            bool requiresRuntimeRefresh = false;
+            std::optional<AnalysisScopeState> analysisScope;
             bool requiresProviderDiscoveryRefresh = false;
+            bool requiresPersistedActivityRefresh = false;
             {
                 std::unique_lock<std::mutex> lock(interactionWorkMutex);
                 interactionWorkCv.wait(lock, [this]() {
-                    return shuttingDown.load() ||
-                        pendingInteractionPreferences.has_value() ||
-                        pendingProviderDiscoveryRefresh;
+                    return shuttingDown.load() || pendingInteractionPreferences.has_value() ||
+                           pendingAnalysisScope.has_value() || pendingProviderDiscoveryRefresh ||
+                           pendingPersistedActivityRefresh;
                 });
-                if (shuttingDown.load() &&
-                    !pendingInteractionPreferences.has_value() &&
-                    !pendingProviderDiscoveryRefresh) {
+                if (shuttingDown.load() && !pendingInteractionPreferences.has_value() &&
+                    !pendingAnalysisScope.has_value() && !pendingProviderDiscoveryRefresh) {
+                    pendingPersistedActivityRefresh = false;
                     break;
                 }
                 preferences = pendingInteractionPreferences;
-                requiresRuntimeRefresh = pendingInteractionRequiresRuntimeRefresh;
+                activeInteractionPreferences = preferences;
+                analysisScope = pendingAnalysisScope;
                 requiresProviderDiscoveryRefresh = pendingProviderDiscoveryRefresh;
+                requiresPersistedActivityRefresh = pendingPersistedActivityRefresh;
                 pendingInteractionPreferences.reset();
-                pendingInteractionRequiresRuntimeRefresh = false;
+                pendingAnalysisScope.reset();
                 pendingProviderDiscoveryRefresh = false;
+                pendingPersistedActivityRefresh = false;
             }
 
-            if (preferences.has_value() && requiresRuntimeRefresh) {
-                DashboardPreferences effectivePreferences = applyStartupPreferences(*preferences);
-                savePreferences(effectivePreferences);
-                applyProviderPreferences(effectivePreferences);
-                syncPresentedPreferences(effectivePreferences);
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
+            if (preferences.has_value()) {
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+                if (afterSettingsDequeueForTesting) {
+                    afterSettingsDequeueForTesting();
+                }
+#endif
+                const auto effectivePreferences =
+                    refreshProviderRuntimeState(std::time(nullptr), true, true, &*preferences, analysisScope);
+                {
+                    std::lock_guard<std::mutex> lock(interactionWorkMutex);
+                    activeInteractionPreferences.reset();
+                }
                 runScheduledExportIfDue(std::time(nullptr));
                 refreshWatcherCv.notify_all();
 #ifdef JISTATS_ENABLE_TEST_HOOKS
@@ -4033,9 +4063,9 @@ public:
                 continue;
             }
 
-            if (preferences.has_value()) {
-                syncPresentedPreferences(*preferences);
-                savePreferences(*preferences);
+            if (analysisScope.has_value()) {
+                refreshPersistedActivityPresenters(std::time(nullptr), &*analysisScope);
+            } else if (requiresPersistedActivityRefresh && !shuttingDown.load() && shouldRefreshAnalysisSurface()) {
                 refreshPersistedActivityPresenters(std::time(nullptr));
             }
 
@@ -4134,14 +4164,26 @@ public:
         return pollState.response;
     }
 
-    std::vector<QuotaResponse> fetchQuotaResponses(
-        const std::vector<std::shared_ptr<IProviderAdapter>>& providers,
-        std::time_t now,
-        QuotaRefresh& refresh) {
+    bool hasProviderOptOutInProgress(const std::string& providerKey) {
+        // A Settings request can be waiting for the refresh lock with the old opt-in still on disk.
+        std::lock_guard<std::mutex> lock(interactionWorkMutex);
+        return (activeInteractionPreferences &&
+                !isProviderTrackingEnabled(*activeInteractionPreferences, providerKey)) ||
+               (pendingInteractionPreferences &&
+                !isProviderTrackingEnabled(*pendingInteractionPreferences, providerKey));
+    }
+
+    std::vector<QuotaResponse> fetchQuotaResponses(std::vector<std::shared_ptr<IProviderAdapter>>& providers,
+                                                   std::time_t now, QuotaRefresh& refresh) {
         std::vector<QuotaResponse> responses;
         responses.reserve(providers.size());
-        for (const auto& provider : providers) {
+        for (auto nextProvider = providers.begin(); nextProvider != providers.end();) {
+            const auto& provider = *nextProvider;
             const auto key = provider->getProviderKey();
+            if (hasProviderOptOutInProgress(key)) {
+                nextProvider = providers.erase(nextProvider);
+                continue;
+            }
             if (refresh.deferNewSubscriptions && (key == "grok" || key == "cursor")) {
                 QuotaResponse pending;
                 pending.unavailable = true;
@@ -4150,6 +4192,7 @@ public:
             } else {
                 responses.push_back(fetchQuotaWithDirectApiBudget(provider, now, refresh));
             }
+            ++nextProvider;
         }
         return responses;
     }
@@ -6275,6 +6318,10 @@ public:
                 continue;
             }
 
+            if (hasProviderOptOutInProgress(provider.providerKey)) {
+                continue;
+            }
+
             // Attempt provider-side backfill for this provider's gap window
             UsageResponse usageResp = adapter->fetchUsage(recoveryStart, now);
             std::string backfillOutcome = usageResp.success ? "no_data" : "fetch_failed";
@@ -6607,7 +6654,7 @@ public:
         refresh.providerApiKeys.clear();
 #ifdef JISTATS_ENABLE_TEST_HOOKS
         if (testProviderManager) {
-            const auto providers = testProviderManager->getEnabledProviders();
+            auto providers = testProviderManager->getEnabledProviders();
             const auto quotaResponses = fetchQuotaResponses(providers, now, refresh);
             persistQuotaSnapshots(providers, quotaResponses, now);
             DashboardViewModel viewModel =
@@ -6621,7 +6668,7 @@ public:
         applyProviderDiscoveryStatusToViewModel(viewModel);
         return viewModel;
 #else
-        const auto providers = providerManager.getEnabledProviders();
+        auto providers = providerManager.getEnabledProviders();
         const auto quotaResponses = fetchQuotaResponses(providers, now, refresh);
         persistQuotaSnapshots(providers, quotaResponses, now);
         DashboardViewModel viewModel =
@@ -6646,9 +6693,13 @@ public:
         return viewModel;
     }
 
-    void refreshPersistedActivityPresenters(std::time_t now) {
+    void refreshPersistedActivityPresenters(std::time_t now, const AnalysisScopeState* requestedScope = nullptr) {
         std::lock_guard<std::mutex> refreshLock(runtimeRefreshMutex);
         DashboardViewModel viewModel = dashboardPresenter.getViewModel();
+        if (requestedScope) {
+            setAnalysisScope(viewModel.preferences, *requestedScope);
+            saveAnalysisScope(*requestedScope);
+        }
         if (!viewModel.appVersion.empty()) {
             viewModel.lastUpdateTime = formatTimeUtc(now);
             applyPersistedActivitySummaries(viewModel, now);
@@ -6729,15 +6780,24 @@ public:
         }
     }
 
-    void refreshProviderRuntimeState(
-        std::time_t now,
-        bool refreshProviderDiscovery,
-        bool importLocalActivity) {
+    DashboardPreferences
+    refreshProviderRuntimeState(std::time_t now, bool refreshProviderDiscovery, bool importLocalActivity,
+                                const DashboardPreferences* requestedSettings = nullptr,
+                                const std::optional<AnalysisScopeState>& requestedScope = std::nullopt) {
         std::lock_guard<std::mutex> refreshLock(runtimeRefreshMutex);
         DashboardViewModel currentViewModel = dashboardPresenter.getViewModel();
         DashboardPreferences preferences = storageAvailable
             ? loadPreferences()
             : (currentViewModel.appVersion.empty() ? loadPreferences() : currentViewModel.preferences);
+        if (requestedSettings) {
+            const auto scope = requestedScope ? *requestedScope : analysisScopeFromPreferences(preferences);
+            preferences = applyStartupPreferences(*requestedSettings);
+            setAnalysisScope(preferences, scope);
+            savePreferences(preferences);
+            if (requestedScope) {
+                saveAnalysisScope(scope);
+            }
+        }
         if (refreshProviderDiscovery) {
             runProviderDiscovery();
         }
@@ -6761,6 +6821,7 @@ public:
         }
 #endif
         applyRuntimeViewModel(viewModel, now, std::move(connectivityUpdates));
+        return preferences;
     }
 
     DashboardPreferences loadPreferences() const {
@@ -6852,6 +6913,35 @@ public:
         return resolved;
     }
 
+    static AnalysisScopeState analysisScopeFromPreferences(const DashboardPreferences& preferences) {
+        return {preferences.analysisSelectedProviderId, preferences.analysisSelectedAccountId,
+                preferences.analysisDateRangePreset, preferences.analysisCustomRangeStartUtc,
+                preferences.analysisCustomRangeEndUtc};
+    }
+
+    static void setAnalysisScope(DashboardPreferences& preferences, const AnalysisScopeState& scope) {
+        preferences.analysisSelectedProviderId = scope.selectedProviderId;
+        preferences.analysisSelectedAccountId = scope.selectedAccountId;
+        preferences.analysisDateRangePreset = scope.dateRangePreset;
+        preferences.analysisCustomRangeStartUtc = scope.customRangeStartUtc;
+        preferences.analysisCustomRangeEndUtc = scope.customRangeEndUtc;
+    }
+
+    void saveAnalysisScope(const AnalysisScopeState& scope) {
+        if (!storageAvailable) {
+            return;
+        }
+
+        settingsService.setString(preference_keys::ANALYSIS_SELECTED_PROVIDER_ID, scope.selectedProviderId);
+        settingsService.setString(preference_keys::ANALYSIS_SELECTED_ACCOUNT_ID, scope.selectedAccountId);
+        settingsService.setString(preference_keys::ANALYSIS_DATE_RANGE_PRESET,
+                                  AnalysisQueryEngine::dateRangePresetSettingValue(scope.dateRangePreset));
+        settingsService.setString(preference_keys::ANALYSIS_CUSTOM_RANGE_START_UTC,
+                                  scope.customRangeStartUtc > 0 ? formatTimeUtcIso(scope.customRangeStartUtc) : "");
+        settingsService.setString(preference_keys::ANALYSIS_CUSTOM_RANGE_END_UTC,
+                                  scope.customRangeEndUtc > 0 ? formatTimeUtcIso(scope.customRangeEndUtc) : "");
+    }
+
     void savePreferences(const DashboardPreferences& preferences) {
         if (storageAvailable) {
             settingsService.setBool(preference_keys::TASKBAR_OVERLAY_ENABLED,
@@ -6874,23 +6964,7 @@ public:
                                     preferences.startupStartInBackground);
             settingsService.setString(preference_keys::LAST_SELECTED_PROVIDER_ID,
                                       preferences.lastSelectedProviderId);
-            settingsService.setString(preference_keys::LAST_SELECTED_ACCOUNT_ID,
-                                      preferences.lastSelectedAccountId);
-            settingsService.setString(preference_keys::ANALYSIS_SELECTED_PROVIDER_ID,
-                                      preferences.analysisSelectedProviderId);
-            settingsService.setString(preference_keys::ANALYSIS_SELECTED_ACCOUNT_ID,
-                                      preferences.analysisSelectedAccountId);
-            settingsService.setString(preference_keys::ANALYSIS_DATE_RANGE_PRESET,
-                                      AnalysisQueryEngine::dateRangePresetSettingValue(
-                                          preferences.analysisDateRangePreset));
-            settingsService.setString(preference_keys::ANALYSIS_CUSTOM_RANGE_START_UTC,
-                                      preferences.analysisCustomRangeStartUtc > 0
-                                          ? formatTimeUtcIso(preferences.analysisCustomRangeStartUtc)
-                                          : "");
-            settingsService.setString(preference_keys::ANALYSIS_CUSTOM_RANGE_END_UTC,
-                                      preferences.analysisCustomRangeEndUtc > 0
-                                          ? formatTimeUtcIso(preferences.analysisCustomRangeEndUtc)
-                                          : "");
+            settingsService.setString(preference_keys::LAST_SELECTED_ACCOUNT_ID, preferences.lastSelectedAccountId);
             settingsService.setBool(preference_keys::SCHEDULED_EXPORT_ENABLED,
                                     preferences.scheduledExportEnabled);
             settingsService.setInt(preference_keys::SCHEDULED_EXPORT_INTERVAL_MINUTES,
@@ -7083,6 +7157,7 @@ bool AppController::init(bool launchInBackground) {
         DashboardPreferences loadedPreferences = pImpl->loadPreferences();
         loadedPreferences = pImpl->applyStartupPreferences(loadedPreferences);
         pImpl->savePreferences(loadedPreferences);
+        pImpl->saveAnalysisScope(Impl::analysisScopeFromPreferences(loadedPreferences));
 
         pImpl->dashboardPresenter.setMiniMaxCredentialActionCallback(
             [this](const DashboardMiniMaxCredentialRequest& request) {
@@ -7222,41 +7297,28 @@ bool AppController::init(bool launchInBackground) {
 #endif
 
         pImpl->startInteractionWorkThread();
-        pImpl->dashboardPresenter.setPreferencesChangedCallback([this](const DashboardPreferences& preferences) {
-            pImpl->requestInteractionWork(preferences, true);
-        });
+        pImpl->dashboardPresenter.setPreferencesChangedCallback(
+            [this](const DashboardPreferences& preferences) { pImpl->requestPreferencesChange(preferences); });
         pImpl->dashboardPresenter.setPreferencesOpenedCallback([this]() {
             pImpl->requestProviderDiscoveryRefresh();
         });
-        pImpl->dashboardPresenter.setPeriodicRefreshCallback([this]() {
-            pImpl->refreshPersistedActivityPresenters(std::time(nullptr));
+        pImpl->dashboardPresenter.setPeriodicRefreshCallback([this]() { pImpl->requestPersistedActivityRefresh(); });
+        pImpl->analysisPresenter.setScopeChangedCallback([this](const AnalysisScopeState& state) {
+            pImpl->analysisPresenter.setInteractionPending(true);
+            pImpl->requestAnalysisScopeChange(state);
         });
-        pImpl->analysisPresenter.setScopeChangedCallback(
-            [this](const AnalysisScopeState& state) {
-                DashboardPreferences preferences = pImpl->dashboardPresenter.getViewModel().preferences;
-                preferences.analysisSelectedProviderId = state.selectedProviderId;
-                preferences.analysisSelectedAccountId = state.selectedAccountId;
-                preferences.analysisDateRangePreset = state.dateRangePreset;
-                preferences.analysisCustomRangeStartUtc = state.customRangeStartUtc;
-                preferences.analysisCustomRangeEndUtc = state.customRangeEndUtc;
-                pImpl->analysisPresenter.setInteractionPending(true);
-                pImpl->requestInteractionWork(preferences, false);
-            });
 
         // Initialize tray controller
 #ifdef JISTATS_ENABLE_TEST_HOOKS
         if (!pImpl->headlessForTesting) {
 #endif
         if (pImpl->trayController.init()) {
-            // Set up tray menu callbacks
-            pImpl->trayController.setOnShowDashboardCallback([this]() {
+            const auto showDashboard = [this]() {
                 pImpl->dashboardPresenter.setVisible(true);
-                pImpl->refreshPersistedActivityPresenters(std::time(nullptr));
-            });
-            pImpl->trayController.setOnPreferencesCallback([this]() {
-                pImpl->dashboardPresenter.setVisible(true);
-                pImpl->refreshPersistedActivityPresenters(std::time(nullptr));
-            });
+                pImpl->requestPersistedActivityRefresh();
+            };
+            pImpl->trayController.setOnShowDashboardCallback(showDashboard);
+            pImpl->trayController.setOnPreferencesCallback(showDashboard);
             pImpl->trayController.setOnRetryNowCallback([this]() {
                 pImpl->dashboardPresenter.requestOfflineRetry();
             });
@@ -7266,14 +7328,8 @@ bool AppController::init(bool launchInBackground) {
             pImpl->trayController.setOnExitCallback([this]() {
                 requestShutdown();
             });
-            pImpl->taskbarPresenter.setOnShowDashboardCallback([this]() {
-                pImpl->dashboardPresenter.setVisible(true);
-                pImpl->refreshPersistedActivityPresenters(std::time(nullptr));
-            });
-            pImpl->taskbarPresenter.setOnPreferencesCallback([this]() {
-                pImpl->dashboardPresenter.setVisible(true);
-                pImpl->refreshPersistedActivityPresenters(std::time(nullptr));
-            });
+            pImpl->taskbarPresenter.setOnShowDashboardCallback(showDashboard);
+            pImpl->taskbarPresenter.setOnPreferencesCallback(showDashboard);
             pImpl->taskbarPresenter.setOnRetryNowCallback([this]() {
                 pImpl->dashboardPresenter.requestOfflineRetry();
             });
@@ -7539,6 +7595,10 @@ void AppController::refreshRuntimeForTesting() {
     pImpl->refreshProviderRuntimeState(pImpl->currentTime(), true, true);
 }
 
+void AppController::setAfterSettingsDequeueForTesting(std::function<void()> callback) {
+    pImpl->afterSettingsDequeueForTesting = std::move(callback);
+}
+
 void AppController::setBeforeRuntimePublicationForTesting(std::function<void()> callback) {
     pImpl->beforeRuntimePublicationForTesting = std::move(callback);
 }
@@ -7546,10 +7606,12 @@ void AppController::setBeforeRuntimePublicationForTesting(std::function<void()> 
 void AppController::applyDashboardPreferencesForTesting(const DashboardPreferences& preferences) {
     DashboardPreferences effectivePreferences = pImpl->applyStartupPreferences(preferences);
     pImpl->savePreferences(effectivePreferences);
+    pImpl->saveAnalysisScope(Impl::analysisScopeFromPreferences(effectivePreferences));
     pImpl->applyProviderPreferences(effectivePreferences);
     pImpl->syncPresentedPreferences(effectivePreferences);
     pImpl->refreshProviderRuntimeState(std::time(nullptr), true, true);
     pImpl->savePreferences(effectivePreferences);
+    pImpl->saveAnalysisScope(Impl::analysisScopeFromPreferences(effectivePreferences));
     pImpl->syncPresentedPreferences(effectivePreferences);
     pImpl->runScheduledExportIfDue(std::time(nullptr));
     pImpl->refreshWatcherCv.notify_all();

@@ -10,11 +10,18 @@
 #include <future>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 
 #include <windows.h>
 #include <commctrl.h>
 
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+#include <sqlite3.h>
+#endif
+
+#include "db/SettingsService.hpp"
+#include "db/StorageService.hpp"
 #include "gui/AnalysisPresenter.hpp"
 #include "gui/DashboardPresenter.hpp"
 #include "temp_test_directory.hpp"
@@ -38,6 +45,37 @@ bool waitForCondition(const std::function<bool()>& predicate,
     }
     return predicate();
 }
+
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+struct PlacementReadGate {
+    std::promise<void> entered;
+    std::shared_future<void> release;
+};
+
+std::atomic<PlacementReadGate*> analysisPlacementRead = nullptr;
+
+int installAnalysisPlacementReadGate(sqlite3* db, char**, const sqlite3_api_routines*) {
+    return sqlite3_trace_v2(
+        db, SQLITE_TRACE_STMT,
+        [](unsigned, void*, void* stmt, void*) {
+            if (analysisPlacementRead.load() != nullptr) {
+                char* sql = sqlite3_expanded_sql(static_cast<sqlite3_stmt*>(stmt));
+                const bool isPlacementRead =
+                    sql != nullptr &&
+                    std::string_view(sql).find("WHERE key = 'ui.analysis_window_x'") != std::string_view::npos;
+                sqlite3_free(sql);
+                if (isPlacementRead) {
+                    if (auto* gate = analysisPlacementRead.exchange(nullptr)) {
+                        gate->entered.set_value();
+                        gate->release.wait_for(std::chrono::seconds(10));
+                    }
+                }
+            }
+            return 0;
+        },
+        nullptr);
+}
+#endif
 
 std::optional<DashboardSummaryItem> findSummary(
     const std::vector<DashboardSummaryItem>& items,
@@ -897,6 +935,87 @@ TEST_CASE("DashboardPresenter scrolls to the final chart after a native resize",
     presenter.shutdown();
 }
 
+TEST_CASE("DashboardPresenter shows the dashboard while saved Analysis placement is loading",
+          "[dashboard_presenter][navigation]") {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    StorageService storage;
+    REQUIRE(storage.init());
+    SettingsService settings(storage);
+    const std::array<std::string, 4> keys = {"ui.analysis_window_x", "ui.analysis_window_y", "ui.analysis_window_width",
+                                             "ui.analysis_window_height"};
+    const std::array<int, 4> saved = {20, 30, 1173, 839};
+    std::array<std::optional<std::string>, 4> original;
+    for (size_t index = 0; index < keys.size(); ++index) {
+        original[index] = settings.getString(keys[index]);
+    }
+
+    bool moveBeforeClosing = false;
+    SECTION("keep saved bounds when the fallback window is untouched") {}
+    SECTION("persist a deliberate resize while the saved bounds load") {
+        moveBeforeClosing = true;
+    }
+
+    DashboardPresenter presenter;
+    std::promise<void> release;
+    PlacementReadGate gate{std::promise<void>{}, release.get_future().share()};
+    auto entered = gate.entered.get_future();
+    const auto extension = reinterpret_cast<void (*)()>(installAnalysisPlacementReadGate);
+    REQUIRE(sqlite3_auto_extension(extension) == SQLITE_OK);
+    for (size_t index = 0; index < keys.size(); ++index) {
+        CHECK(settings.setInt(keys[index], saved[index]));
+    }
+    analysisPlacementRead.store(&gate);
+
+    auto startup = std::async(std::launch::async, [&]() { return presenter.init(); });
+    const bool placementReadStarted = entered.wait_for(std::chrono::seconds(4)) == std::future_status::ready;
+    const bool startedWhileBlocked = startup.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    const bool analysisOpenedWhileBlocked =
+        startedWhileBlocked && presenter.clickOpenAnalysisWindowForTesting() &&
+        waitForCondition([&]() { return presenter.isAnalysisWindowOpenForTesting(); });
+
+    std::array<int, 4> expected = saved;
+    bool moved = false;
+    bool closedWhileBlocked = false;
+    if (analysisOpenedWhileBlocked) {
+        const HWND analysis = FindWindowW(L"JiStatsAnalysisWindow", nullptr);
+        if (moveBeforeClosing && SetWindowPos(analysis, nullptr, 50, 70, 1205, 855, SWP_NOACTIVATE | SWP_NOZORDER)) {
+            WINDOWPLACEMENT placement{};
+            placement.length = sizeof(placement);
+            moved = GetWindowPlacement(analysis, &placement) != FALSE;
+            const RECT& rect = placement.rcNormalPosition;
+            expected = {rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top};
+        }
+        closedWhileBlocked = PostMessageW(analysis, WM_CLOSE, 0, 0) &&
+                             waitForCondition([&]() { return !presenter.isAnalysisWindowOpenForTesting(); });
+    }
+
+    release.set_value();
+    const bool initialized = startup.get();
+    analysisPlacementRead.store(nullptr);
+    sqlite3_cancel_auto_extension(extension);
+
+    CHECK(placementReadStarted);
+    CHECK(initialized);
+    CHECK(startedWhileBlocked);
+    CHECK(analysisOpenedWhileBlocked);
+    CHECK(closedWhileBlocked);
+    if (moveBeforeClosing) {
+        CHECK(moved);
+    }
+    presenter.shutdown();
+    for (size_t index = 0; index < keys.size(); ++index) {
+        CHECK(settings.getInt(keys[index]) == expected[index]);
+        if (original[index]) {
+            CHECK(settings.setString(keys[index], *original[index]));
+        } else {
+            settings.remove(keys[index]);
+        }
+    }
+#else
+    SKIP("SQLite is not compiled into this test build");
+#endif
+}
+
 TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the dedicated Analysis window",
           "[dashboard_presenter][analysis]") {
     DashboardPresenter presenter;
@@ -932,7 +1051,6 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
 
     presenter.updateViewModel(model);
 
-    presenter.setVisible(true);
     const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
     REQUIRE(dashboard != nullptr);
     const HWND tabs = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
@@ -941,6 +1059,7 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
     REQUIRE(viewport != nullptr);
     const HWND providers = FindWindowExW(viewport, nullptr, WC_LISTVIEWW, nullptr);
     REQUIRE(providers != nullptr);
+    REQUIRE(waitForCondition([&]() { return IsWindowVisible(dashboard) && ListView_GetItemCount(providers) > 0; }));
 
     RECT overviewTab{};
     REQUIRE(TabCtrl_GetItemRect(tabs, 0, &overviewTab));
@@ -952,6 +1071,7 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
     input.cbSize = sizeof(input);
     REQUIRE(GetGUIThreadInfo(GetWindowThreadProcessId(tabs, nullptr), &input));
     REQUIRE(input.hwndFocus == tabs);
+    const std::uint64_t syncCount = presenter.getViewModelSyncCountForTesting();
 
     REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
     REQUIRE(waitForCondition([&]() { return TabCtrl_GetCurSel(tabs) == 1 && IsWindowVisible(providers); }));
@@ -969,6 +1089,7 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
     const HWND analysis = FindWindowW(L"JiStatsAnalysisWindow", nullptr);
     REQUIRE(analysis != nullptr);
     CHECK(GetWindow(analysis, GW_OWNER) == dashboard);
+    CHECK(presenter.getViewModelSyncCountForTesting() == syncCount);
     const auto analysisRect = presenter.getAnalysisWindowRectForTesting();
     CHECK(analysisRect[2] > analysisRect[0]);
     CHECK(analysisRect[3] > analysisRect[1]);
