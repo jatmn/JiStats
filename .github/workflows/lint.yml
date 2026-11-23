@@ -1,11 +1,12 @@
 name: Lint
 
 on:
+  merge_group:
   pull_request:
     branches: [main, 'release/**']
 
 concurrency:
-  group: lint-${{ github.event.pull_request.number }}
+  group: lint-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -16,13 +17,15 @@ jobs:
     name: C++ format and workflow lint
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      BASE: ${{ github.event.merge_group.base_sha || 'HEAD^1' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           filter: blob:none
           persist-credentials: false
           # The pull_request checkout is a merge commit. Its first parent is the base.
-          fetch-depth: 2
+          fetch-depth: ${{ github.event_name == 'merge_group' && '0' || '2' }}
       - name: Install actionlint
         env:
           GH_TOKEN: ${{ github.token }}
@@ -33,4 +36,4 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: Run PR lint checks
-        run: bash scripts/check_pr_lint.sh HEAD^1 HEAD
+        run: bash scripts/check_pr_lint.sh "$BASE" HEAD
