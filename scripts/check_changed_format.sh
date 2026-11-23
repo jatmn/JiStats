@@ -18,6 +18,12 @@ changed_files=$(mktemp)
 trap 'rm -f "$changed_files"' EXIT
 git diff --raw -z --no-abbrev --no-renames --diff-filter=AMT "$base" "$head" -- src/ include/ tests/ >"$changed_files"
 
+# Git batches missing parent blobs for a single multi-file patch. Hydrate them
+# together before asking for each file's changed line ranges below.
+if [[ -s $changed_files && $(git config --bool --get remote.origin.promisor) == true ]]; then
+    git diff --no-ext-diff --no-textconv --no-renames "$base" "$head" -- src/ include/ tests/ >/dev/null
+fi
+
 hunk_pattern='^@@ -[0-9]+(,[0-9]+)? \+([0-9]+)(,([0-9]+))? @@'
 failed=0
 while IFS= read -r -d '' change && IFS= read -r -d '' file; do
