@@ -185,12 +185,34 @@ class NativeBudgetTest(unittest.TestCase):
         self.assertNotIn("Windows suite", result.stdout)
         self.assertEqual(output, "overrun=false\n")
 
-    def test_historical_unsharded_job_reports_its_single_suite_step(self):
-        historical = job(GATE, 1, 33, steps=[step(SUITE_STEP, 0, 30)])
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT)], input=json.dumps([{"jobs": [historical]}]),
+    def run_completed_audit(self, *jobs):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT)], input=json.dumps([{"jobs": jobs}]),
             text=True, capture_output=True, check=False,
         )
+
+    def test_completed_audit_checks_the_full_windows_cohort(self):
+        for latest_finish, expected_exit in ((29, 0), (30, 1)):
+            with self.subTest(latest_finish=latest_finish):
+                result = self.run_completed_audit(
+                    shard(0, 0, 17), shard(1, 5, 25), shard(2, 12, latest_finish),
+                )
+                self.assertEqual(result.returncode, expected_exit, result.stdout + result.stderr)
+                self.assertIn(f"Windows suite wall time across shards: {latest_finish}s", result.stdout)
+                self.assertNotIn("Windows suite step:", result.stdout)
+
+    def test_completed_audit_times_only_jobs_in_a_partial_retry(self):
+        current = shard(2, 25, 42)
+        for cohort in ((current,), (shard(0, 0, 17, attempt=1), shard(1, 5, 25, attempt=1), current)):
+            with self.subTest(cohort=cohort):
+                result = self.run_completed_audit(*cohort)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Windows suite step: 17s", result.stdout)
+                self.assertNotIn("Windows suite wall time across shards", result.stdout)
+
+    def test_historical_unsharded_job_reports_its_single_suite_step(self):
+        historical = job(GATE, 1, 33, steps=[step(SUITE_STEP, 0, 30)])
+        result = self.run_completed_audit(historical)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(result.stdout.count("Windows suite step: 30s (limit <30s) **FAIL**"), 1)
         self.assertNotIn("Windows suite wall time across shards", result.stdout)

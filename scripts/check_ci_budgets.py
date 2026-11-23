@@ -9,6 +9,7 @@ from pathlib import Path
 
 OVERRUN_STEP = "Fail on a measured native CI overrun"
 WINDOWS_SUITE_STEP = "Run Windows suite and diagnose intermittent restart stalls"
+WINDOWS_SHARD_NAMES = tuple(f"Windows tests (shard {index})" for index in range(3))
 
 
 def timing(item):
@@ -81,6 +82,17 @@ def windows_shard_cohort(jobs, shard_names, attempt, conclusion):
     return shards, (finish - start).total_seconds()
 
 
+def completed_windows_span(jobs):
+    """Measure a successful cohort during an audit of one completed attempt."""
+    shards = [job for job in jobs if job["name"] in WINDOWS_SHARD_NAMES]
+    successful = {job["name"] for job in shards if job["conclusion"] == "success"}
+    attempts = {job["run_attempt"] for job in shards}
+    if successful != set(WINDOWS_SHARD_NAMES) or len(attempts) != 1:
+        return None
+    _, span = windows_shard_cohort(shards, WINDOWS_SHARD_NAMES, attempts.pop(), "success")
+    return span
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--running-job", type=int, help="also check elapsed time of this active job")
@@ -115,6 +127,11 @@ def main():
             jobs = selected
         except ValueError as error:
             sys.exit(f"{error} Rerun all jobs if the upstream timings are unavailable.")
+    else:
+        try:
+            windows_span = completed_windows_span(jobs)
+        except ValueError as error:
+            sys.exit(str(error))
 
     if windows_span is not None:
         failed |= check("Windows suite wall time across shards", windows_span, 30)
