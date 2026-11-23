@@ -41,16 +41,22 @@ status=0
 JISTATS_FORMAT_TREE="$tmp" bash scripts/check_changed_format.sh "$base" "$head" || status=1
 (cd "$tmp" && git init --quiet && actionlint) || status=1
 if [[ ${JISTATS_PUSH_CHECK:-0} == 1 && -f "$tmp/scripts/check_js_ci.sh" ]]; then
-    # Pushing a fetched ref does not grant its scripts local execution.
+    # Run ref-owned scripts only for an exact revision checked out locally.
     trusted=false
-    while read -r field tip; do
-        if [[ $field == HEAD ]] && git merge-base --is-ancestor "$head" "$tip"; then
-            trusted=true
-            break
-        fi
-    done < <(git worktree list --porcelain)
+    worktree=
+    while IFS= read -r -d '' entry; do
+        case "$entry" in
+            "worktree "*) worktree=${entry#worktree } ;;
+            "HEAD $head")
+                if [[ -n $worktree && -e $worktree/.git ]]; then
+                    trusted=true
+                    break
+                fi
+                ;;
+        esac
+    done < <(git worktree list --porcelain -z)
     if [[ $trusted != true ]]; then
-        echo "Skipping local JavaScript checks for $head outside checked-out worktree history." >&2
+        echo "Skipping local JavaScript checks for $head because it is not checked out in a worktree." >&2
         exit "$status"
     fi
     # The archive contains the pushed lockfile, even on a non-HEAD ref.

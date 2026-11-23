@@ -10,7 +10,7 @@ Dependabot checks GitHub Actions for version updates. It does not track the C++ 
 
 With hk 2.13.0, clang-format-18, actionlint 1.7.12 and Bash on your path, run `hk install` in the clone. Pre-commit formats staged C++ files and lints staged workflow changes. Pre-push runs the same changed-line format and workflow lint command as CI. For a release PR, set `JISTATS_PR_BASE` to its remote-tracking target branch. Keep that ref current before pushing. To run it directly, use `bash scripts/check_pr_lint.sh "$(git merge-base "${JISTATS_PR_BASE:-origin/main}" HEAD)" HEAD`. The native build and platform test commands are in the verification guide.
 
-For the JavaScript hooks, put Bun 1.4.5 (the CI installer version) and Node.js 24 on your path. Run `bun install --frozen-lockfile` in the checkout to install the pinned development tools. Pre-commit checks staged JavaScript. Pre-push checks JavaScript and runs the authorization tests under Node for pushed revisions reachable from a checked-out worktree. Other pushed revisions still receive the C++ and workflow lint checks.
+For the JavaScript hooks, put Bun 1.4.5 (the CI installer version) and Node.js 24 on your path. Run `bun install --frozen-lockfile` in the checkout to install the pinned development tools. Pre-commit checks staged JavaScript. Pre-push checks JavaScript and runs the authorization tests under Node when a pushed revision is the current HEAD of a checked-out worktree. Other pushed revisions still receive the C++ and workflow lint checks.
 
 ### Pullfrog
 
