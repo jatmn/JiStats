@@ -10,10 +10,15 @@
 #include <future>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 
 #include <windows.h>
 #include <commctrl.h>
+
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+#include <sqlite3.h>
+#endif
 
 #include "gui/AnalysisPresenter.hpp"
 #include "gui/DashboardPresenter.hpp"
@@ -38,6 +43,37 @@ bool waitForCondition(const std::function<bool()>& predicate,
     }
     return predicate();
 }
+
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+struct PlacementReadGate {
+    std::promise<void> entered;
+    std::shared_future<void> release;
+};
+
+std::atomic<PlacementReadGate*> analysisPlacementRead = nullptr;
+
+int installAnalysisPlacementReadGate(sqlite3* db, char**, const sqlite3_api_routines*) {
+    return sqlite3_trace_v2(
+        db, SQLITE_TRACE_STMT,
+        [](unsigned, void*, void* stmt, void*) {
+            if (analysisPlacementRead.load() != nullptr) {
+                char* sql = sqlite3_expanded_sql(static_cast<sqlite3_stmt*>(stmt));
+                const bool isPlacementRead =
+                    sql != nullptr &&
+                    std::string_view(sql).find("WHERE key = 'ui.analysis_window_x'") != std::string_view::npos;
+                sqlite3_free(sql);
+                if (isPlacementRead) {
+                    if (auto* gate = analysisPlacementRead.exchange(nullptr)) {
+                        gate->entered.set_value();
+                        gate->release.wait_for(std::chrono::seconds(10));
+                    }
+                }
+            }
+            return 0;
+        },
+        nullptr);
+}
+#endif
 
 std::optional<DashboardSummaryItem> findSummary(
     const std::vector<DashboardSummaryItem>& items,
@@ -895,6 +931,39 @@ TEST_CASE("DashboardPresenter scrolls to the final chart after a native resize",
     REQUIRE(SetWindowPos(dashboard, nullptr, original.left, original.top, original.right - original.left,
                          original.bottom - original.top, SWP_NOZORDER | SWP_NOACTIVATE));
     presenter.shutdown();
+}
+
+TEST_CASE("DashboardPresenter shows the dashboard while saved Analysis placement is loading",
+          "[dashboard_presenter][navigation]") {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    DashboardPresenter presenter;
+    std::promise<void> release;
+    PlacementReadGate gate{std::promise<void>{}, release.get_future().share()};
+    auto entered = gate.entered.get_future();
+    const auto extension = reinterpret_cast<void (*)()>(installAnalysisPlacementReadGate);
+    REQUIRE(sqlite3_auto_extension(extension) == SQLITE_OK);
+    analysisPlacementRead.store(&gate);
+
+    auto startup = std::async(std::launch::async, [&]() { return presenter.init(); });
+    const bool placementReadStarted = entered.wait_for(std::chrono::seconds(4)) == std::future_status::ready;
+    const bool startedWhileBlocked = startup.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    const bool analysisOpenedWhileBlocked =
+        startedWhileBlocked && presenter.clickOpenAnalysisWindowForTesting() &&
+        waitForCondition([&]() { return presenter.isAnalysisWindowOpenForTesting(); });
+
+    release.set_value();
+    const bool initialized = startup.get();
+    analysisPlacementRead.store(nullptr);
+    sqlite3_cancel_auto_extension(extension);
+
+    CHECK(placementReadStarted);
+    CHECK(initialized);
+    CHECK(startedWhileBlocked);
+    CHECK(analysisOpenedWhileBlocked);
+    presenter.shutdown();
+#else
+    SKIP("SQLite is not compiled into this test build");
+#endif
 }
 
 TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the dedicated Analysis window",

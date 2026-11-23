@@ -38,6 +38,9 @@
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
 
+#include <windows.h>
+#include <commctrl.h>
+
 using namespace JiStats;
 using namespace JiStats::TestSupport;
 
@@ -1558,6 +1561,77 @@ TEST_CASE("AppController tray navigation stays responsive during a runtime refre
     CHECK(trayResponsive);
     CHECK(helpOpenedDuringRefresh);
     CHECK(app.isDashboardVisibleForTesting());
+    app.shutdown();
+}
+
+TEST_CASE("AppController applies a custom Analysis edit after an older provider refresh",
+          "[app][analysis][navigation]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    const auto editedStart = parseUtcIsoForTest("2026-04-01T00:00:00Z");
+    REQUIRE(editedStart.has_value());
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        SettingsService settings(storage);
+        REQUIRE(settings.setString("ui.analysis_date_range_preset", "custom"));
+        REQUIRE(settings.setString("ui.analysis_custom_range_start_utc", "2026-04-02T00:00:00Z"));
+        REQUIRE(settings.setString("ui.analysis_custom_range_end_utc", "2026-04-05T00:00:00Z"));
+    }
+
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    REQUIRE(app.init());
+
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    REQUIRE(dashboard != nullptr);
+    const HWND tabs = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
+    REQUIRE(tabs != nullptr);
+    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
+    REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
+    HWND startDate = nullptr;
+    REQUIRE(waitForCondition(
+        [&]() {
+            startDate = GetDlgItem(FindWindowW(L"JiStatsAnalysisWindow", nullptr), 2104);
+            return startDate != nullptr && IsWindowVisible(startDate) && IsWindowEnabled(startDate);
+        },
+        std::chrono::seconds(5)));
+
+    std::promise<void> reachedPublication;
+    auto publicationReached = reachedPublication.get_future();
+    std::promise<void> releasePublication;
+    auto publicationReleased = releasePublication.get_future().share();
+    app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
+        reachedPublication.set_value();
+        publicationReleased.wait();
+    });
+
+    auto refresh = std::async(std::launch::async, [&app]() { app.refreshRuntimeForTesting(); });
+    const bool refreshPaused = publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    const bool editQueued = SetWindowTextW(startDate, L"2026-04-01") != FALSE &&
+                            waitForCondition([&]() { return !IsWindowEnabled(startDate); });
+
+    // On the old path the blocked worker could publish the edited preferences early.
+    // Allow that publication before releasing the held provider snapshot.
+    waitForCondition(
+        [&]() { return app.getDashboardViewModelForTesting().preferences.analysisCustomRangeStartUtc == *editedStart; },
+        std::chrono::milliseconds(500));
+    releasePublication.set_value();
+    refresh.get();
+
+    CHECK(refreshPaused);
+    CHECK(editQueued);
+    REQUIRE(waitForCondition(
+        [&]() {
+            const auto model = app.getDashboardViewModelForTesting();
+            return model.analysis.scope.customRangeStartUtc == *editedStart && IsWindowEnabled(startDate);
+        },
+        std::chrono::seconds(3)));
+    CHECK(app.getDashboardViewModelForTesting().analysis.scope.dateRangePreset == AnalysisDateRangePreset::Custom);
     app.shutdown();
 }
 

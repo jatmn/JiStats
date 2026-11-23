@@ -1494,16 +1494,21 @@ public:
     std::optional<RECT> loadSavedAnalysisWindowRect() {
         SettingsService settings(placementStorage);
         const auto x = settings.getInt(kAnalysisWindowPosXKey);
+        if (!x) {
+            return std::nullopt;
+        }
         const auto y = settings.getInt(kAnalysisWindowPosYKey);
+        if (!y) {
+            return std::nullopt;
+        }
         const auto width = settings.getInt(kAnalysisWindowWidthKey);
+        if (!width || *width < kAnalysisMinWidth) {
+            return std::nullopt;
+        }
         const auto height = settings.getInt(kAnalysisWindowHeightKey);
-        if (!x.has_value() || !y.has_value() || !width.has_value() || !height.has_value()) {
+        if (!height || *height < kAnalysisMinHeight) {
             return std::nullopt;
         }
-        if (*width < kAnalysisMinWidth || *height < kAnalysisMinHeight) {
-            return std::nullopt;
-        }
-
         return RECT{*x, *y, *x + *width, *y + *height};
     }
 
@@ -1527,7 +1532,11 @@ public:
             return;
         }
 
-        queuePlacementSave(pendingMainPlacement, rect);
+        {
+            std::lock_guard<std::mutex> lock(placementMutex);
+            pendingMainPlacement = rect;
+        }
+        placementCv.notify_one();
     }
 
     void persistAnalysisWindowPlacement(HWND hwnd) {
@@ -1545,14 +1554,10 @@ public:
             return;
         }
 
-        savedAnalysisWindowRect = rect;
-        queuePlacementSave(pendingAnalysisPlacement, rect);
-    }
-
-    void queuePlacementSave(std::optional<RECT>& pendingPlacement, const RECT& rect) {
         {
             std::lock_guard<std::mutex> lock(placementMutex);
-            pendingPlacement = rect;
+            savedAnalysisWindowRect = rect;
+            pendingAnalysisPlacement = rect;
         }
         placementCv.notify_one();
     }
@@ -1572,6 +1577,13 @@ public:
     }
 
     void runPlacementWriter() {
+        if (placementStorage.isOpen()) {
+            const auto storedRect = loadSavedAnalysisWindowRect();
+            std::lock_guard<std::mutex> lock(placementMutex);
+            if (!savedAnalysisWindowRect) {
+                savedAnalysisWindowRect = storedRect;
+            }
+        }
         for (;;) {
             std::optional<RECT> mainPlacement;
             std::optional<RECT> analysisPlacement;
@@ -2093,9 +2105,14 @@ public:
             return;
         }
 
+        std::optional<RECT> savedRect;
+        {
+            std::lock_guard<std::mutex> lock(placementMutex);
+            savedRect = savedAnalysisWindowRect;
+        }
         RECT rect{};
-        if (savedAnalysisWindowRect) {
-            rect = *savedAnalysisWindowRect;
+        if (savedRect) {
+            rect = *savedRect;
             RECT workArea{};
             if (tryGetMonitorWorkArea(rect, workArea)) {
                 clampRectToWorkArea(rect, workArea);
@@ -7103,7 +7120,6 @@ bool DashboardPresenter::init() {
     pImpl->savedAnalysisWindowRect.reset();
     if (pImpl->ensurePlacementStorage()) {
         savedMainRect = pImpl->loadSavedMainWindowRect();
-        pImpl->savedAnalysisWindowRect = pImpl->loadSavedAnalysisWindowRect();
     }
     pImpl->stopPlacementWriter = false;
     pImpl->placementWriter = std::thread([this]() { pImpl->runPlacementWriter(); });

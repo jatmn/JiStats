@@ -4049,11 +4049,8 @@ public:
             }
 
             if (preferences.has_value()) {
-                syncPresentedPreferences(*preferences);
-                savePreferences(*preferences);
-            }
-            if (preferences.has_value() ||
-                (requiresPersistedActivityRefresh && !shuttingDown.load() && shouldRefreshAnalysisSurface())) {
+                refreshPersistedActivityPresenters(std::time(nullptr), &*preferences);
+            } else if (requiresPersistedActivityRefresh && !shuttingDown.load() && shouldRefreshAnalysisSurface()) {
                 refreshPersistedActivityPresenters(std::time(nullptr));
             }
 
@@ -6664,9 +6661,14 @@ public:
         return viewModel;
     }
 
-    void refreshPersistedActivityPresenters(std::time_t now) {
+    void refreshPersistedActivityPresenters(std::time_t now,
+                                            const DashboardPreferences* requestedPreferences = nullptr) {
         std::lock_guard<std::mutex> refreshLock(runtimeRefreshMutex);
         DashboardViewModel viewModel = dashboardPresenter.getViewModel();
+        if (requestedPreferences) {
+            savePreferences(*requestedPreferences);
+            viewModel.preferences = *requestedPreferences;
+        }
         if (!viewModel.appVersion.empty()) {
             viewModel.lastUpdateTime = formatTimeUtc(now);
             applyPersistedActivitySummaries(viewModel, now);
