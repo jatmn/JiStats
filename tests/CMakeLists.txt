@@ -87,6 +87,10 @@ target_include_directories(JiStatsTests PRIVATE
 
 if(JISTATS_SQLITE_TARGET)
     target_link_libraries(JiStatsTests PRIVATE ${JISTATS_SQLITE_TARGET})
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(JiStatsTests PRIVATE JISTATS_TEST_WRAP_SQLITE_STEP=1)
+        target_link_options(JiStatsTests PRIVATE "LINKER:--wrap=sqlite3_step")
+    endif()
 endif()
 
 if(JISTATS_HAS_SPDLOG)
