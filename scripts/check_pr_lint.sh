@@ -41,6 +41,18 @@ status=0
 JISTATS_FORMAT_TREE="$tmp" bash scripts/check_changed_format.sh "$base" "$head" || status=1
 (cd "$tmp" && git init --quiet && actionlint) || status=1
 if [[ ${JISTATS_PUSH_CHECK:-0} == 1 && -f "$tmp/scripts/check_js_ci.sh" ]]; then
+    # Pushing a fetched ref does not grant its scripts local execution.
+    trusted=false
+    while read -r field tip; do
+        if [[ $field == HEAD ]] && git merge-base --is-ancestor "$head" "$tip"; then
+            trusted=true
+            break
+        fi
+    done < <(git worktree list --porcelain)
+    if [[ $trusted != true ]]; then
+        echo "Cannot execute JavaScript checks for $head outside a checked-out worktree's history." >&2
+        exit 1
+    fi
     # The archive contains the pushed lockfile, even on a non-HEAD ref.
     if (cd "$tmp" && bun install --frozen-lockfile); then
         (cd "$tmp" && bash scripts/check_js_ci.sh) || status=1
