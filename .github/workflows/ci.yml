@@ -216,8 +216,8 @@ jobs:
             if ($process.ExitCode -ne 0) { exit $process.ExitCode }
           }
           # Reserve 15 seconds for GDB and 35 seconds for runner setup and cleanup.
-          Invoke-WindowsTests @('--list-tests', '--reporter', 'xml::out=catch-inventory.xml') 250000
-          Invoke-WindowsTests @('--order', 'rand', '--durations', 'yes', '--reporter', 'console', '--reporter', 'xml::out=catch-results.xml') 250000
+          Invoke-WindowsTests @('*', '--list-tests', '--reporter', 'xml::out=catch-inventory.xml') 250000
+          Invoke-WindowsTests @('*', '--order', 'rand', '--durations', 'yes', '--reporter', 'console', '--reporter', 'xml::out=catch-results.xml') 250000
           $expected = @(git ls-files -- 'tests/*.cpp')
           if ($LASTEXITCODE -ne 0 -or !$expected) { throw 'Cannot enumerate the Windows test sources.' }
           ./scripts/check_test_inventory.ps1 -Inventory catch-inventory.xml -Results catch-results.xml -Output test-file-times.json -ExpectedFiles $expected
