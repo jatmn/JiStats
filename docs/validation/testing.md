@@ -13,13 +13,37 @@ Choose checks for the behavior affected and record the commands, results, and an
 
 ## Linux commands
 
-Follow the [Linux build instructions](../../README.md#building-on-linux) for the native test build and the MinGW cross-build. For a focused native run, execute `build-linux/bin/JiStatsTests "[schema][migration]"` from the repository root. The native target covers the portable components listed in [tests/CMakeLists.txt](../../tests/CMakeLists.txt). The Windows target includes the remaining provider, controller, reporting and desktop integration tests.
+Run the portable Catch2 tests from the repository root on Debian or Ubuntu.
+
+```bash
+sudo apt install build-essential cmake ninja-build
+cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
+cmake --build build-linux --target JiStatsTests
+ctest --test-dir build-linux --output-on-failure
+```
+
+For a focused native run, execute `build-linux/bin/JiStatsTests "[schema][migration]"` from the repository root. The native target covers the portable components listed in [tests/CMakeLists.txt](../../tests/CMakeLists.txt).
+
+For a Windows-facing change, install the [MinGW cross-build prerequisites](../../README.md#building-on-linux) and build the desktop app, CLI, and Windows test executable.
+
+```bash
+cmake -S . -B build-mingw-checks -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Debug -DJISTATS_BUILD_TESTS=ON -DJISTATS_BUILD_MINIMAX_CLI=ON
+cmake --build build-mingw-checks --target JiStats JiStatsMiniMaxCli JiStatsTests
+```
 
 Both suites randomize case order. Full Windows runs compare the Catch2 execution report with its registration list and every tracked test translation unit. The `windows-test-file-times` artifact records the revision, seed and elapsed seconds per source file for 14 days.
 
 ## Windows commands
 
-Use the [UCRT64 build instructions](../../README.md#building-on-windows) to run the full suite locally. [CTest](../../tests/CMakeLists.txt) sets the working directory for relative fixture paths. For a focused run, launch `build-ucrt/bin/JiStatsTests.exe "[openai]"` from the repository root.
+Install the [UCRT64 build prerequisites](../../README.md#building-on-windows) and run the full suite in a separate build directory from the repository root. Some Windows tests open desktop windows while exercising the UI.
+
+```bash
+cmake -S . -B build-ucrt-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DJISTATS_BUILD_TESTS=ON
+cmake --build build-ucrt-tests --target JiStatsTests
+ctest --test-dir build-ucrt-tests --output-on-failure
+```
+
+The Windows target adds provider, controller, reporting, and desktop integration coverage. [CTest](../../tests/CMakeLists.txt) sets the working directory for relative fixture paths. For a focused run, launch `build-ucrt-tests/bin/JiStatsTests.exe "[openai]"` from the repository root.
 
 ## Continuous integration
 

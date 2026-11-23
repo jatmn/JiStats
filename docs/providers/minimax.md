@@ -23,6 +23,6 @@ A dedicated PAYG key yielded per-request token usage on the text API in the reco
 
 ## Building the MiniMax CLI
 
-For standalone readiness, capture, and diagnostics commands, add `-DJISTATS_BUILD_MINIMAX_CLI=ON` to the Windows-target CMake configure command. Follow the [Linux cross-build instructions](../../README.md#building-on-linux) or the [Windows build instructions](../../README.md#building-on-windows).
+For standalone readiness, capture, and diagnostics commands, add `-DJISTATS_BUILD_MINIMAX_CLI=ON` when configuring and include `JiStatsMiniMaxCli` in the `--target` list when building. Follow the [Linux cross-build instructions](../../README.md#building-on-linux) or the [Windows build instructions](../../README.md#building-on-windows).
 
 The option defaults to `OFF`. Enabling it builds `JiStatsMiniMaxCli.exe` alongside the desktop app, and `cmake --install` installs it to the install prefix's `bin/` directory. The desktop MiniMax integration is available in either configuration. `JISTATS_BUILD_TESTS` controls the tests independently.
