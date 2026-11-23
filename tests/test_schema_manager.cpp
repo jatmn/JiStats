@@ -9,6 +9,7 @@
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -157,6 +158,12 @@ int installSchemaVersionReadFailure(sqlite3* db, char**, const sqlite3_api_routi
             return SQLITE_OK;
         },
         nullptr);
+}
+
+int installCompactionFailure(sqlite3* db, char**, const sqlite3_api_routines*) {
+    // VACUUM attaches a temporary database before copying the live rows.
+    sqlite3_limit(db, SQLITE_LIMIT_ATTACHED, 0);
+    return SQLITE_OK;
 }
 #endif
 
@@ -427,17 +434,69 @@ TEST_CASE("StorageService upgrades legacy Claude references without reading the 
              source_type, source_run_id, surface_key, raw_reference)
         SELECT id + 10, provider_id, id, 'claude_code_local_stats', 'session_active', '2025-01-02T00:00:00Z', 30,
                'local', 'claude_code_local_v1|2025-01-02', 'stats-cache',
-               'C:/private-fixture/stats-cache.json|date=2025-01-02'
+               CASE WHEN id = 21 THEN 'C:/private-fixture/stats-cache.json|date=2025-01-02'
+                    ELSE 'C:/other-fixture/stats-cache.json|date=2025-01-02' END
         FROM accounts WHERE id IN (21, 22);
         INSERT INTO usage_events
             (id, provider_id, account_id, event_time_utc, source_type, source_run_id, total_tokens,
              is_backfilled, raw_reference)
         SELECT id + 20, provider_id, id, '2025-01-02T00:00:00Z', 'provider_backfill',
-               'claude_code_local_v1|2025-01-02', 42, 1, 'C:/private-fixture/stats-cache.json'
+               'claude_code_local_v1|2025-01-02', 42, 1,
+               CASE WHEN id = 21 THEN 'C:/private-fixture/stats-cache.json'
+                    ELSE 'C:/other-fixture/stats-cache.json' END
         FROM accounts WHERE id IN (21, 22);
+        -- Spread the same legacy reference across ordinary activity and usage pages.
+        WITH RECURSIVE days(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM days WHERE n < 90)
+        INSERT INTO activity_events
+            (provider_id, account_id, provider_surface, activity_kind, started_at_utc, duration_seconds,
+             source_type, source_run_id, surface_key, raw_reference)
+        SELECT provider_id, account_id, provider_surface, activity_kind,
+               datetime(started_at_utc, n || ' days'), duration_seconds,
+               source_type, source_run_id, surface_key, raw_reference
+        FROM activity_events CROSS JOIN days WHERE id = 31;
+        WITH RECURSIVE days(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM days WHERE n < 90)
+        INSERT INTO usage_events
+            (provider_id, account_id, event_time_utc, source_type, source_run_id, total_tokens,
+             is_backfilled, raw_reference)
+        SELECT provider_id, account_id, datetime(event_time_utc, n || ' days'), source_type, source_run_id,
+               total_tokens, is_backfilled, raw_reference
+        FROM usage_events CROSS JOIN days WHERE id = 41;
     )sql")
                 .success());
+    SECTION("WAL database") {
+        const auto journalMode = storage.execute("PRAGMA main.journal_mode = WAL;");
+        REQUIRE(journalMode.success());
+        REQUIRE(journalMode.rowCount() == 1);
+        REQUIRE(journalMode.getString(0, 0) == "wal");
+    }
     storage.close();
+
+    constexpr auto legacyPath = "C:/private-fixture/stats-cache.json";
+    REQUIRE(readDatabaseFile(tempDb).find(legacyPath) != std::string::npos);
+
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    SECTION("Failed compaction leaves the upgrade pending") {
+        const auto extension = reinterpret_cast<void (*)()>(installCompactionFailure);
+        REQUIRE(sqlite3_auto_extension(extension) == SQLITE_OK);
+        const bool opened = storage.init(tempDb.path());
+        sqlite3_cancel_auto_extension(extension);
+        REQUIRE_FALSE(opened);
+        CHECK(storage.getLastError().find("Cannot compact the database") != std::string::npos);
+        CHECK(readDatabaseFile(tempDb).find(legacyPath) != std::string::npos);
+
+        sqlite3* connection = nullptr;
+        const int openedRaw = sqlite3_open_v2(tempDb.path().c_str(), &connection, SQLITE_OPEN_READONLY, nullptr);
+        const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(connection, sqlite3_close);
+        REQUIRE(openedRaw == SQLITE_OK);
+        sqlite3_stmt* query = nullptr;
+        REQUIRE(sqlite3_prepare_v2(db.get(), "SELECT MAX(version) FROM schema_version;", -1, &query, nullptr) ==
+                SQLITE_OK);
+        const std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> version(query, sqlite3_finalize);
+        REQUIRE(sqlite3_step(version.get()) == SQLITE_ROW);
+        CHECK(sqlite3_column_int(version.get(), 0) == 12);
+    }
+#endif
+    SECTION("Rollback-journal database") {}
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
@@ -446,21 +505,30 @@ TEST_CASE("StorageService upgrades legacy Claude references without reading the 
     const auto activity =
         storage.execute("SELECT id, raw_reference, duration_seconds FROM activity_events ORDER BY id;");
     REQUIRE(activity.success());
-    REQUIRE(activity.rowCount() == 2);
+    REQUIRE(activity.rowCount() == 92);
     CHECK(activity.getInt(0, 0) == 31);
     CHECK(activity.getString(0, 1) == hashedPath);
     CHECK(activity.getInt(0, 2) == 30);
-    CHECK(activity.getString(1, 1) == "C:/private-fixture/stats-cache.json|date=2025-01-02");
+    CHECK(activity.getString(1, 1) == "C:/other-fixture/stats-cache.json|date=2025-01-02");
+    for (size_t row = 2; row < activity.rowCount(); ++row) {
+        CHECK(activity.getString(row, 1) == hashedPath);
+    }
     const auto usage = storage.execute("SELECT id, raw_reference, total_tokens FROM usage_events ORDER BY id;");
     REQUIRE(usage.success());
-    REQUIRE(usage.rowCount() == 2);
+    REQUIRE(usage.rowCount() == 92);
     CHECK(usage.getInt(0, 0) == 41);
     CHECK(usage.getString(0, 1) == hashedPath);
     CHECK(usage.getInt(0, 2) == 42);
-    CHECK(usage.getString(1, 1) == "C:/private-fixture/stats-cache.json");
+    CHECK(usage.getString(1, 1) == "C:/other-fixture/stats-cache.json");
+    for (size_t row = 2; row < usage.rowCount(); ++row) {
+        CHECK(usage.getString(row, 1) == hashedPath);
+    }
+    // A WAL database must have the compacted pages in the main file before close.
+    CHECK(readDatabaseFile(tempDb).find(legacyPath) == std::string::npos);
     storage.close();
 
     const auto upgraded = readDatabaseFile(tempDb);
+    CHECK(upgraded.find(legacyPath) == std::string::npos);
     REQUIRE(storage.init(tempDb.path()));
     storage.close();
     CHECK((readDatabaseFile(tempDb) == upgraded));

@@ -1,4 +1,5 @@
 -- Replace legacy Claude paths in place independently of the current source data.
+-- SchemaManager records version 13 after committing this script and compacting the database.
 UPDATE activity_events
 SET raw_reference = jistats_path_reference(substr(raw_reference, 1, instr(raw_reference, '|date=') - 1))
 WHERE provider_id = (SELECT id FROM providers WHERE provider_key = 'claude_code')
@@ -17,5 +18,3 @@ WHERE provider_id = (SELECT id FROM providers WHERE provider_key = 'claude_code'
   AND is_backfilled = 1
   AND raw_reference <> ''
   AND raw_reference NOT GLOB 'scope:fnv1a64:*';
-
-INSERT INTO schema_version (version, description) VALUES (13, 'Redact Claude source references');

@@ -73,6 +73,25 @@ bool SchemaManager::migrate() {
         // Another instance may have completed the same repair while we waited.
         baseline = runBaselineTransaction(current, true);
     }
+    if (baseline == BaselineResult::NeedsCompaction) {
+        // A page split can leave plaintext outside the live cells. Rebuild the file
+        // after the redaction transaction commits. VACUUM requires autocommit.
+        const auto compacted = storage.execute("VACUUM main;");
+        if (!compacted.success()) {
+            pImpl->lastError =
+                "Cannot compact the database after redacting legacy Claude references: " + compacted.error();
+            return false;
+        }
+        // For databases using WAL, flush the rebuilt pages into the main file.
+        const auto checkpoint = storage.execute("PRAGMA main.wal_checkpoint(TRUNCATE);");
+        if (!checkpoint.success() || checkpoint.rowCount() != 1 || checkpoint.getInt(0, 0) != 0) {
+            pImpl->lastError = "Cannot checkpoint the compacted database after redacting legacy Claude references";
+            return false;
+        }
+        // Leave version 12 recorded until the file is compacted so a failed or
+        // interrupted open retries the redaction and rebuild on its next attempt.
+        baseline = recordClaudeRedaction(current);
+    }
     if (baseline != BaselineResult::Ready) {
         return false;
     }
@@ -152,7 +171,7 @@ SchemaManager::BaselineResult SchemaManager::prepareBaseline(int& current, bool 
                 return BaselineResult::Ready;
             }
             const auto baseline = reconcileBaseline(writable);
-            return baseline == BaselineResult::Ready ? migrateClaudeReferences(current, writable) : baseline;
+            return baseline == BaselineResult::Ready ? migrateClaudeReferences(writable) : baseline;
         }
     }
 
@@ -160,15 +179,21 @@ SchemaManager::BaselineResult SchemaManager::prepareBaseline(int& current, bool 
         return BaselineResult::NeedsWrite;
     }
 
+    const auto pages = storage.execute("PRAGMA main.page_count;");
+    if (!pages.success() || pages.rowCount() != 1) {
+        pImpl->lastError = "Cannot inspect database page count before initializing the baseline";
+        return BaselineResult::Failed;
+    }
     const auto result = storage.execute(kBaselineSchemaSql);
     if (!result.success()) {
         pImpl->lastError = "Cannot initialize baseline: " + result.error();
         return BaselineResult::Failed;
     }
-    return migrateClaudeReferences(current, writable);
+    // An empty database has no historical cells to redact or compact.
+    return pages.getInt(0, 0) == 0 ? recordClaudeRedaction(current) : migrateClaudeReferences(writable);
 }
 
-SchemaManager::BaselineResult SchemaManager::migrateClaudeReferences(int& current, bool writable) {
+SchemaManager::BaselineResult SchemaManager::migrateClaudeReferences(bool writable) {
     if (!writable) {
         return BaselineResult::NeedsWrite;
     }
@@ -178,6 +203,18 @@ SchemaManager::BaselineResult SchemaManager::migrateClaudeReferences(int& curren
         pImpl->lastError = "Cannot redact legacy Claude source references: " + result.error();
         return BaselineResult::Failed;
     }
+    return BaselineResult::NeedsCompaction;
+}
+
+SchemaManager::BaselineResult SchemaManager::recordClaudeRedaction(int& current) {
+    const auto result = storage.execute("INSERT INTO main.schema_version (version, description) "
+                                        "VALUES (13, 'Redact Claude source references') "
+                                        "ON CONFLICT(version) DO NOTHING;");
+    if (!result.success()) {
+        pImpl->lastError = "Cannot record the Claude reference upgrade: " + result.error();
+        return BaselineResult::Failed;
+    }
+
     current = kClaudeRedactionVersion;
     return BaselineResult::Ready;
 }
