@@ -122,10 +122,13 @@ TEST_CASE("CodexLocalUsageImporter retries an incomplete consent baseline withou
     StorageService storage;
     REQUIRE(storage.init(appDb.path()));
 
+    const std::string conflictAction = GENERATE("ABORT", "ROLLBACK");
+    CAPTURE(conflictAction);
     writeCodexStateDb(sourceDb.path(), 950, 300);
     REQUIRE(storage
                 .execute("CREATE TRIGGER fail_codex_baseline BEFORE INSERT ON codex_thread_import_state "
-                         "WHEN NEW.thread_id = 'thread-2' BEGIN SELECT RAISE(ABORT, 'test checkpoint failure'); END;")
+                         "WHEN NEW.thread_id = 'thread-2' BEGIN SELECT RAISE(" +
+                         conflictAction + ", 'test checkpoint failure'); END;")
                 .success());
     CodexLocalUsageImporter importer(storage);
     const auto failed = importer.importFromSource(sourceDb.path(), 1700003500, 2);

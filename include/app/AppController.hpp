@@ -100,6 +100,7 @@ public:
     void refreshRuntimeForTesting();
     void setAfterSettingsDequeueForTesting(std::function<void()> callback);
     void setBeforeRuntimePublicationForTesting(std::function<void()> callback);
+    void setBeforeCodexSourceReadForTesting(std::function<void()> callback);
     void applyDashboardPreferencesForTesting(const DashboardPreferences& preferences);
     void setMiniMaxCredentialStoreForTesting(std::shared_ptr<WindowsCredentialStore> store);
     void setMiniMaxValidationResponseForTesting(

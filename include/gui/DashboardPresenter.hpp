@@ -75,7 +75,7 @@ public:
 
     // Subscribe to preference changes from the dashboard UI
     void setPreferencesChangedCallback(std::function<void(const DashboardPreferences&)> callback);
-    void setCodexModelAttributionChangedCallback(std::function<void(bool)> callback);
+    void setCodexModelAttributionChangedCallback(std::function<void(bool, std::uint64_t)> callback);
     void setPreferencesOpenedCallback(std::function<void()> callback);
     void setPeriodicRefreshCallback(std::function<void()> callback);
 
@@ -265,6 +265,7 @@ struct DashboardViewModel {
     bool isOnline = true;
     RuntimeState runtimeState = RuntimeState::Unknown;
     DashboardPreferences preferences;
+    std::uint64_t completedCodexAttributionRequest = 0;
     CodexAttributionSaveError codexAttributionSaveError = CodexAttributionSaveError::None;
     bool claudeCodeLocallyDetected = false;
     std::string claudeCodeDetectionMessage;

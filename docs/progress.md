@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- Codex attribution now serializes profile revocation with source scans, recovers after a SQLite transaction rolls itself back, and keeps pending checkbox choices during Settings redraw. The starting revision reproduced all three defects. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and all 472 Windows cases passed under Wine after repair. Native Windows desktop smoke remains open. [PR #31](https://github.com/jatmn/JiStats/pull/31)
+
 - Codex attribution now preserves queued revocation, reports and retries failed saves, checks shared consent before scanning, and commits initial checkpoints together. The SQLite regressions reproduced all four review findings on the original PR head. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and all 471 Windows cases passed under Wine after the repair. Native Windows desktop smoke remains open. [PR #31](https://github.com/jatmn/JiStats/pull/31)
 
 - Codex SQLite model attribution now has a separate, default-off setting. The [controller regression](../tests/test_app_controller.cpp) exercises startup, refresh, restart, and a new baseline after re-enabling with a synthetic SQLite source. Bundled-SQLite CTest passed all 126 cases, the three MinGW Debug targets built, and all 469 Windows cases passed under Wine. The [native Windows desktop smoke](plan.md#follow-up-reliability-and-maintenance) remains open.

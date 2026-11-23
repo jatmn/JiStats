@@ -5083,6 +5083,58 @@ TEST_CASE("AppController requires explicit consent to read Codex SQLite model at
     CHECK(profile.tokens() == 150);
 }
 
+TEST_CASE("AppController serializes a peer Codex scan with profile revocation", "[app][runtime][codex]") {
+    requireSqlite();
+
+    CodexAttributionTestProfile profile;
+    REQUIRE(SettingsService(profile.storage).setInt(kCodexAttributionSetting, 1));
+    AppController revoking;
+    profile.startController(revoking);
+    AppController scanning;
+    profile.startController(scanning);
+    REQUIRE(profile.sourceCount() == 1);
+
+    std::promise<void> aboutToRead;
+    auto sourceReadReached = aboutToRead.get_future();
+    std::promise<void> releaseRead;
+    auto sourceReadReleased = releaseRead.get_future();
+    scanning.setBeforeCodexSourceReadForTesting([&]() {
+        aboutToRead.set_value();
+        sourceReadReleased.wait_for(std::chrono::seconds(5));
+    });
+    profile.updateSource(150);
+    auto peerScan = std::async(std::launch::async, [&]() { scanning.refreshRuntimeForTesting(); });
+    REQUIRE(sourceReadReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+
+    auto preferences = revoking.getDashboardViewModelForTesting().preferences;
+    preferences.codexModelAttributionEnabled = false;
+    std::promise<void> attemptOff;
+    auto offStarted = attemptOff.get_future();
+    auto peerRevocation = std::async(std::launch::async, [&]() {
+        attemptOff.set_value();
+        revoking.applyDashboardPreferencesForTesting(preferences);
+    });
+    REQUIRE(offStarted.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    const bool savedBeforeRead =
+        waitForCondition([&]() { return profile.generation() == -1; }, std::chrono::milliseconds(600));
+    CHECK_FALSE(savedBeforeRead);
+    if (savedBeforeRead) {
+        // Reproduce a new counter arriving after a durable Off while the old scan is paused.
+        profile.updateSource(250);
+    }
+    releaseRead.set_value();
+    peerScan.get();
+    peerRevocation.get();
+    scanning.setBeforeCodexSourceReadForTesting({});
+
+    REQUIRE(profile.generation() == -1);
+    CHECK(profile.tokens() == 50);
+    profile.updateSource(300);
+    scanning.refreshRuntimeForTesting();
+    CHECK(profile.tokens() == 50);
+    CHECK_FALSE(scanning.getDashboardViewModelForTesting().preferences.codexModelAttributionEnabled);
+}
+
 TEST_CASE("AppController preserves queued Codex revocation and retries a failed save", "[app][runtime][codex]") {
     requireSqlite();
 
@@ -5126,6 +5178,9 @@ TEST_CASE("AppController preserves queued Codex revocation and retries a failed 
         const HWND checkbox = selectAttributionTab();
         REQUIRE(SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
         SendMessageW(checkbox, BM_CLICK, 0, 0);
+        // Redraw Settings while the worker is still blocked and the saved choice is still On.
+        REQUIRE(app.selectDashboardPreferencesTabForTesting(1));
+        CHECK(SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_UNCHECKED);
         SendMessageW(checkbox, BM_CLICK, 0, 0);
 
         profile.updateSource(900);

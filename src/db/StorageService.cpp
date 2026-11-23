@@ -452,8 +452,7 @@ public:
     std::string dbPath;
     std::string lastError;
     std::optional<int> rejectedSchemaVersion;
-    bool inTransaction = false;
-    
+
     static int callback(void*, int, char**, char**) {
         // Callback implementation would be here
         return 0;
@@ -505,7 +504,6 @@ void StorageService::close() {
     if (pImpl->db) {
         sqlite3_close(pImpl->db);
         pImpl->db = nullptr;
-        pImpl->inTransaction = false;
     }
 #endif
 }
@@ -668,42 +666,31 @@ QueryResult StorageService::execute(const std::string& sql, const std::vector<st
 }
 
 bool StorageService::beginTransaction(TransactionMode mode) {
-    if (pImpl->inTransaction) {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    if (pImpl->db && sqlite3_get_autocommit(pImpl->db) == 0) {
         return mode == TransactionMode::Deferred;
     }
-
-    auto result = execute(mode == TransactionMode::Immediate ? "BEGIN IMMEDIATE;" : "BEGIN TRANSACTION;");
-    if (result.success()) {
-        pImpl->inTransaction = true;
-        return true;
-    }
-    return false;
+#endif
+    return execute(mode == TransactionMode::Immediate ? "BEGIN IMMEDIATE;" : "BEGIN TRANSACTION;").success();
 }
 
 bool StorageService::commitTransaction() {
-    if (!pImpl->inTransaction) {
-        return true;
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    if (pImpl->db && sqlite3_get_autocommit(pImpl->db) == 0) {
+        return execute("COMMIT;").success();
     }
-    
-    auto result = execute("COMMIT;");
-    if (result.success()) {
-        pImpl->inTransaction = false;
-        return true;
-    }
-    return false;
+#endif
+    return true;
 }
 
 bool StorageService::rollbackTransaction() {
-    if (!pImpl->inTransaction) {
-        return true;
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    // SQLite can already have rolled back a transaction on errors such as SQLITE_FULL.
+    if (pImpl->db && sqlite3_get_autocommit(pImpl->db) == 0) {
+        return execute("ROLLBACK;").success();
     }
-    
-    auto result = execute("ROLLBACK;");
-    if (result.success()) {
-        pImpl->inTransaction = false;
-        return true;
-    }
-    return false;
+#endif
+    return true;
 }
 
 std::string StorageService::getLastError() const {

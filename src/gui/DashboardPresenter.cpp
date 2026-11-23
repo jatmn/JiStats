@@ -1118,7 +1118,9 @@ public:
     std::string lastError;
     DashboardViewModel viewModel;
     std::function<void(const DashboardPreferences&)> preferencesChangedCallback;
-    std::function<void(bool)> codexModelAttributionChangedCallback;
+    std::function<void(bool, std::uint64_t)> codexModelAttributionChangedCallback;
+    std::uint64_t codexAttributionRequest = 0;
+    bool requestedCodexAttributionEnabled = false;
     std::function<void()> preferencesOpenedCallback;
     std::function<void()> periodicRefreshCallback;
     std::function<DashboardMiniMaxCredentialResult(const DashboardMiniMaxCredentialRequest&)>
@@ -3561,6 +3563,7 @@ public:
         HWND overlay = nullptr;
         HWND openaiSubscription = nullptr;
         HWND codexModelAttribution = nullptr;
+        bool attributionChecked = false;
         HWND openaiInfo = nullptr;
         HWND startup = nullptr;
         HWND startupBackground = nullptr;
@@ -3591,6 +3594,9 @@ public:
             overlay = overlayCheckbox;
             openaiSubscription = openaiSubscriptionCheckbox;
             codexModelAttribution = codexModelAttributionCheckbox;
+            attributionChecked = model.completedCodexAttributionRequest < codexAttributionRequest
+                                     ? requestedCodexAttributionEnabled
+                                     : model.preferences.codexModelAttributionEnabled;
             openaiInfo = openAISettingsInfo;
             startup = startupCheckbox;
             startupBackground = startupBackgroundCheckbox;
@@ -3637,8 +3643,7 @@ public:
             setWindowText(openaiInfo, codexAttributionSettingsInfo(model.codexAttributionSaveError));
         }
         if (codexModelAttribution != nullptr) {
-            SendMessageW(codexModelAttribution, BM_SETCHECK,
-                         model.preferences.codexModelAttributionEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+            SendMessageW(codexModelAttribution, BM_SETCHECK, attributionChecked ? BST_CHECKED : BST_UNCHECKED, 0);
         }
         if (miniMaxSubscription != nullptr) {
             SendMessageW(
@@ -5233,13 +5238,19 @@ public:
                 return 0;
             case kPreferencesCodexModelAttributionCheckboxId:
                 if (HIWORD(wParam) == BN_CLICKED) {
-                    std::function<void(bool)> callback;
+                    const bool enabled = SendMessageW(codexModelAttributionCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                    std::function<void(bool, std::uint64_t)> callback;
+                    std::uint64_t request = 0;
                     {
                         std::lock_guard<std::mutex> lock(mutex);
                         callback = codexModelAttributionChangedCallback;
+                        if (callback) {
+                            requestedCodexAttributionEnabled = enabled;
+                            request = ++codexAttributionRequest;
+                        }
                     }
                     if (callback) {
-                        callback(SendMessageW(codexModelAttributionCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                        callback(enabled, request);
                     }
                 }
                 return 0;
@@ -7250,7 +7261,7 @@ void DashboardPresenter::setPreferencesChangedCallback(std::function<void(const 
     pImpl->preferencesChangedCallback = std::move(callback);
 }
 
-void DashboardPresenter::setCodexModelAttributionChangedCallback(std::function<void(bool)> callback) {
+void DashboardPresenter::setCodexModelAttributionChangedCallback(std::function<void(bool, std::uint64_t)> callback) {
     std::lock_guard<std::mutex> lock(pImpl->mutex);
     pImpl->codexModelAttributionChangedCallback = std::move(callback);
 }
@@ -7667,8 +7678,8 @@ bool DashboardPresenter::selectPreferencesTabForTesting(int tabIndex) {
         pImpl->selectedPreferencesTab = tabIndex;
     }
     SendMessageW(tab, TCM_SETCURSEL, static_cast<WPARAM>(tabIndex), 0);
-    PostMessageW(prefs, WM_SIZE, 0, 0);
-    PostMessageW(prefs, Impl::WM_JISTATS_SYNC_PREFERENCES, 0, 0);
+    SendMessageW(prefs, WM_SIZE, 0, 0);
+    SendMessageW(prefs, Impl::WM_JISTATS_SYNC_PREFERENCES, 0, 0);
     return true;
 #else
     (void)tabIndex;

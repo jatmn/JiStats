@@ -372,7 +372,8 @@ TEST_CASE("DashboardPresenter routes the separate Codex attribution checkbox",
           "[dashboard_presenter][settings][codex]") {
     std::atomic<int> requested{-1};
     DashboardPresenter presenter;
-    presenter.setCodexModelAttributionChangedCallback([&requested](bool enabled) { requested.store(enabled ? 1 : 0); });
+    presenter.setCodexModelAttributionChangedCallback(
+        [&requested](bool enabled, std::uint64_t) { requested.store(enabled ? 1 : 0); });
     REQUIRE(presenter.init());
     presenter.updateViewModel(makeQuotaViewModel());
 
