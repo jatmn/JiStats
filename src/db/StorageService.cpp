@@ -759,7 +759,7 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     auto activityEventExists = [this](const PersistedActivityEvent& candidate) -> std::optional<bool> {
-        std::string sql = "SELECT id, raw_reference FROM activity_events "
+        std::string sql = "SELECT 1 FROM activity_events "
                           "WHERE provider_id = ? AND account_id = ? AND ";
         std::vector<std::string> params = {
             std::to_string(candidate.providerId),
@@ -814,19 +814,9 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
         sql += "confidence_tier = ? AND ";
         params.push_back(toString(candidate.activity.confidence));
 
-        const auto& activity = candidate.activity;
-        const bool claudeStatsCache = activity.providerSurface == "claude_code_local_stats" &&
-                                      activity.surfaceKey == "stats-cache" &&
-                                      activity.rawReference.rfind(kLocalPathReferencePrefix, 0) == 0;
-        if (claudeStatsCache) {
-            // Earlier versions stored the stats-cache path followed by the activity date.
-            sql += "(raw_reference = ? OR (instr(raw_reference, '|date=') > 0 AND "
-                   "jistats_path_reference(substr(raw_reference, 1, instr(raw_reference, '|date=') - 1)) = ?)) "
-                   "ORDER BY (raw_reference = ?) DESC ";
-            params.insert(params.end(), 3, activity.rawReference);
-        } else if (!activity.rawReference.empty()) {
+        if (!candidate.activity.rawReference.empty()) {
             sql += "raw_reference = ? ";
-            params.push_back(activity.rawReference);
+            params.push_back(candidate.activity.rawReference);
         } else {
             sql += "raw_reference IS NULL ";
         }
@@ -839,18 +829,7 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
             return std::nullopt;
         }
 
-        if (result.rowCount() == 0) {
-            return false;
-        }
-        if (claudeStatsCache && result.getString(0, 1) != activity.rawReference) {
-            const auto updated = execute("UPDATE activity_events SET raw_reference = ? WHERE id = ?;",
-                                         {activity.rawReference, result.getString(0, 0)});
-            if (!updated.success()) {
-                pImpl->lastError = "Failed to normalize the existing activity reference";
-                return std::nullopt;
-            }
-        }
-        return true;
+        return result.rowCount() > 0;
     };
 
     const auto alreadyExists = activityEventExists(event);
@@ -3047,8 +3026,8 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         return false;
     }
 
-    auto findUsageEvent = [this](const PersistedUsageEvent& event, bool matchesLegacyCounter, bool claudeStatsCache) {
-        std::string sql = "SELECT id, event_subsecond_ns, source_run_id, raw_reference FROM usage_events "
+    auto findUsageEvent = [this](const PersistedUsageEvent& event, bool matchesLegacyCounter) {
+        std::string sql = "SELECT id, event_subsecond_ns, source_run_id FROM usage_events "
                           "WHERE provider_id = ? AND account_id = ? AND ";
         std::vector<std::string> params = {
             std::to_string(event.providerId),
@@ -3067,10 +3046,7 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
                                     : "AND source_run_id = ? ";
         sql += "AND model_key = ? AND request_type = ? "
                "AND input_tokens = ? AND output_tokens = ? AND total_tokens = ? "
-               "AND cost_minor_units = ? AND is_backfilled = ? ";
-        // An older Claude recovery row contains the original stats-cache path.
-        sql += claudeStatsCache ? "AND (raw_reference = ? OR jistats_path_reference(raw_reference) = ?) "
-                                : "AND raw_reference = ? ";
+               "AND cost_minor_units = ? AND is_backfilled = ? AND raw_reference = ? ";
 
         params.push_back(toUtcIsoString(event.eventTime));
         params.push_back(event.sourceType);
@@ -3083,9 +3059,6 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         params.push_back(std::to_string(event.costMinorUnits));
         params.push_back(event.isBackfilled ? "1" : "0");
         params.push_back(event.rawReference);
-        if (claudeStatsCache) {
-            params.push_back(event.rawReference);
-        }
 
         if (event.eventSubsecondNs.has_value()) {
             sql += "AND (event_subsecond_ns = ? OR event_subsecond_ns IS NULL) ";
@@ -3095,9 +3068,6 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         }
         if (matchesLegacyCounter) {
             sql += "ORDER BY (source_run_id = 'codex_token_usage'), event_subsecond_ns DESC ";
-        } else if (claudeStatsCache) {
-            sql += "ORDER BY (raw_reference = ?) DESC ";
-            params.push_back(event.rawReference);
         } else if (event.eventSubsecondNs.has_value()) {
             sql += "ORDER BY event_subsecond_ns DESC ";
         }
@@ -3128,25 +3098,13 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         const auto& event = updateOnly ? savedCodexCounters[i - events.size()] : events[i];
         const bool matchesLegacyCounter = event.sourceType == "codex_local_rollout" &&
                                           event.requestType == "codex_turn" && event.sourceRunId.rfind("line:", 0) == 0;
-        const bool claudeStatsCache = event.sourceType == "provider_backfill" &&
-                                      event.sourceRunId.rfind("claude_code_local_v1|", 0) == 0 &&
-                                      event.rawReference.rfind(kLocalPathReferencePrefix, 0) == 0;
-        const auto existing = findUsageEvent(event, matchesLegacyCounter, claudeStatsCache);
+        const auto existing = findUsageEvent(event, matchesLegacyCounter);
         if (!existing.success()) {
             pImpl->lastError = "Failed to check for duplicate usage event";
             success = false;
             break;
         }
         if (existing.rowCount() > 0) {
-            if (claudeStatsCache && existing.getString(0, 3) != event.rawReference) {
-                const auto updated = execute("UPDATE usage_events SET raw_reference = ? WHERE id = ?;",
-                                             {event.rawReference, existing.getString(0, 0)});
-                if (!updated.success()) {
-                    pImpl->lastError = "Failed to normalize the existing usage reference";
-                    success = false;
-                    break;
-                }
-            }
             const bool needsSourceId = matchesLegacyCounter && existing.getString(0, 2) != event.sourceRunId;
             const bool needsPrecision = event.eventSubsecondNs.has_value() && existing.getString(0, 1).empty();
             if (needsSourceId || needsPrecision) {

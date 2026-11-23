@@ -11,6 +11,7 @@ namespace JiStats {
 
 namespace {
 constexpr int kBaselineVersion = 12;
+constexpr int kClaudeRedactionVersion = 13;
 }
 
 class SchemaManager::Impl {
@@ -44,7 +45,7 @@ int SchemaManager::getCurrentVersion() const {
 }
 
 int SchemaManager::getLatestVersion() const {
-    int latest = kBaselineVersion;
+    int latest = kClaudeRedactionVersion;
     try {
         for (const auto& entry : std::filesystem::directory_iterator(pImpl->migrationsPath)) {
             const std::string name = entry.path().filename().string();
@@ -147,7 +148,11 @@ SchemaManager::BaselineResult SchemaManager::prepareBaseline(int& current, bool 
                                    ")";
                 return BaselineResult::Failed;
             }
-            return current == kBaselineVersion ? reconcileBaseline(writable) : BaselineResult::Ready;
+            if (current > kBaselineVersion) {
+                return BaselineResult::Ready;
+            }
+            const auto baseline = reconcileBaseline(writable);
+            return baseline == BaselineResult::Ready ? migrateClaudeReferences(current, writable) : baseline;
         }
     }
 
@@ -160,7 +165,20 @@ SchemaManager::BaselineResult SchemaManager::prepareBaseline(int& current, bool 
         pImpl->lastError = "Cannot initialize baseline: " + result.error();
         return BaselineResult::Failed;
     }
-    current = kBaselineVersion;
+    return migrateClaudeReferences(current, writable);
+}
+
+SchemaManager::BaselineResult SchemaManager::migrateClaudeReferences(int& current, bool writable) {
+    if (!writable) {
+        return BaselineResult::NeedsWrite;
+    }
+
+    const auto result = storage.execute(kClaudeRedactionSql);
+    if (!result.success()) {
+        pImpl->lastError = "Cannot redact legacy Claude source references: " + result.error();
+        return BaselineResult::Failed;
+    }
+    current = kClaudeRedactionVersion;
     return BaselineResult::Ready;
 }
 

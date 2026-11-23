@@ -59,7 +59,12 @@ std::optional<int> ensureLocalCodexAccount(StorageService& storage, int provider
     QueryResult existing = storage.execute(
         "SELECT id FROM accounts WHERE provider_id = ? AND account_key = ? LIMIT 1;",
         {std::to_string(providerId), accountKey});
-    if (existing.success() && existing.rowCount() == 1) return existing.getInt(0, 0);
+    if (!existing.success()) {
+        return std::nullopt;
+    }
+    if (existing.rowCount() == 1) {
+        return existing.getInt(0, 0);
+    }
 
     QueryResult insert = storage.execute(
         "INSERT INTO accounts (provider_id, account_key, display_name, scope_type, scope_identifier) "
@@ -181,16 +186,17 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
         const auto providerId = findProviderId(storage_, *providerKey);
         const auto accountId = providerId ? ensureLocalCodexAccount(storage_, *providerId, *providerKey) : std::nullopt;
         if (!accountId) {
-            if (!sourceBaselineEstablished) {
-                result.error = "Could not bind a Codex thread to its local account during baseline";
-                return result;
-            }
-            ++result.skippedRows;
-            continue;
+            // A failed account write can cause SQLite to roll back the entire import.
+            result.error = "Could not bind a Codex thread to its local account";
+            return result;
         }
 
         auto existing =
             sourceBaselineEstablished ? storage_.getCodexThreadImportState(sourceId, row.threadId) : std::nullopt;
+        if (!storage_.getLastError().empty()) {
+            result.error = storage_.getLastError();
+            return result;
+        }
         PersistedCodexThreadImportState state;
         if (existing.has_value()) {
             state = *existing;

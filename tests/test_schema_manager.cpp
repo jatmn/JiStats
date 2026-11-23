@@ -162,12 +162,12 @@ int installSchemaVersionReadFailure(sqlite3* db, char**, const sqlite3_api_routi
 
 } // namespace
 
-TEST_CASE("SchemaManager::getLatestVersion reports the baseline version", "[schema]") {
+TEST_CASE("SchemaManager::getLatestVersion includes the bundled privacy migration", "[schema]") {
     StorageService storage;
     SchemaManager manager(storage);
 
     int latest = manager.getLatestVersion();
-    REQUIRE(latest == 12);
+    REQUIRE(latest == 13);
 }
 
 TEST_CASE("SchemaManager::getStatus reports version info", "[schema]") {
@@ -197,7 +197,7 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(storage.init(tempDb.path()));
 
     SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 12);
+    REQUIRE(manager.getCurrentVersion() == 13);
     REQUIRE_FALSE(manager.needsMigration());
 
     REQUIRE(tableExists(storage, "activity_events"));
@@ -244,10 +244,11 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(columnExists(storage, "codex_thread_import_state", "baseline_tokens_used"));
     REQUIRE(indexExists(storage, "idx_codex_thread_import_state_provider_model"));
 
-    auto versions = storage.execute("SELECT version FROM schema_version;");
+    auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 1);
+    REQUIRE(versions.rowCount() == 2);
     CHECK(versions.getInt(0, 0) == 12);
+    CHECK(versions.getInt(1, 0) == 13);
 
     auto providers = storage.execute("SELECT provider_key FROM providers ORDER BY id;");
     REQUIRE(providers.success());
@@ -269,7 +270,8 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     CHECK(settings.getBool("ui.taskbar_overlay_enabled") == true);
 }
 
-TEST_CASE("StorageService preserves version 12 database settings on reopen", "[schema][migration][settings]") {
+TEST_CASE("StorageService preserves database settings on reopen without rewriting it",
+          "[schema][migration][settings]") {
     requireSqlite();
 
     TempTestDatabase tempDb;
@@ -285,12 +287,13 @@ TEST_CASE("StorageService preserves version 12 database settings on reopen", "[s
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    CHECK(manager.getCurrentVersion() == 12);
+    CHECK(manager.getCurrentVersion() == 13);
     CHECK_FALSE(manager.needsMigration());
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 1);
+    REQUIRE(versions.rowCount() == 2);
     CHECK(versions.getInt(0, 0) == 12);
+    CHECK(versions.getInt(1, 0) == 13);
     CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
     CHECK(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     storage.close();
@@ -304,6 +307,7 @@ TEST_CASE(
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
     REQUIRE(storage.execute("DELETE FROM providers WHERE provider_key = 'grok';").success());
     REQUIRE(storage.execute("UPDATE providers SET enabled = 0 WHERE provider_key = 'cursor';").success());
     REQUIRE(storage.execute("ALTER TABLE usage_events DROP COLUMN event_subsecond_ns;").success());
@@ -328,6 +332,7 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
 
     SettingsService settings(storage);
     REQUIRE(settings.setString("ui.last_selected_provider_id", "minimax"));
@@ -358,9 +363,10 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     REQUIRE(storage.init(tempDb.path()));
     REQUIRE(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
-    REQUIRE(versions.rowCount() == 2);
+    REQUIRE(versions.rowCount() == 3);
     CHECK(versions.getInt(0, 0) == 10);
     CHECK(versions.getInt(1, 0) == 12);
+    CHECK(versions.getInt(2, 0) == 13);
     const auto kimi = storage.execute("SELECT enabled FROM providers WHERE provider_key = 'kimi';");
     REQUIRE(kimi.rowCount() == 1);
     CHECK(kimi.getBool(0, 0) == hadAnalysisMigration);
@@ -404,11 +410,68 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     CHECK((readDatabaseFile(tempDb) == repaired));
 }
 
+TEST_CASE("StorageService upgrades legacy Claude references without reading the source cache", "[schema][migration]") {
+    requireSqlite();
+
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage
+                .execute(R"sql(
+        DELETE FROM schema_version WHERE version = 13;
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier) VALUES
+            (21, (SELECT id FROM providers WHERE provider_key = 'claude_code'), 'fixture-claude', 'Claude', 'user', 'fixture'),
+            (22, (SELECT id FROM providers WHERE provider_key = 'openai'), 'fixture-openai', 'OpenAI', 'user', 'fixture');
+        INSERT INTO activity_events
+            (id, provider_id, account_id, provider_surface, activity_kind, started_at_utc, duration_seconds,
+             source_type, source_run_id, surface_key, raw_reference)
+        SELECT id + 10, provider_id, id, 'claude_code_local_stats', 'session_active', '2025-01-02T00:00:00Z', 30,
+               'local', 'claude_code_local_v1|2025-01-02', 'stats-cache',
+               'C:/private-fixture/stats-cache.json|date=2025-01-02'
+        FROM accounts WHERE id IN (21, 22);
+        INSERT INTO usage_events
+            (id, provider_id, account_id, event_time_utc, source_type, source_run_id, total_tokens,
+             is_backfilled, raw_reference)
+        SELECT id + 20, provider_id, id, '2025-01-02T00:00:00Z', 'provider_backfill',
+               'claude_code_local_v1|2025-01-02', 42, 1, 'C:/private-fixture/stats-cache.json'
+        FROM accounts WHERE id IN (21, 22);
+    )sql")
+                .success());
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    SchemaManager manager(storage);
+    CHECK(manager.getCurrentVersion() == 13);
+    constexpr auto hashedPath = "scope:fnv1a64:1370ad0dcd1472bd";
+    const auto activity =
+        storage.execute("SELECT id, raw_reference, duration_seconds FROM activity_events ORDER BY id;");
+    REQUIRE(activity.success());
+    REQUIRE(activity.rowCount() == 2);
+    CHECK(activity.getInt(0, 0) == 31);
+    CHECK(activity.getString(0, 1) == hashedPath);
+    CHECK(activity.getInt(0, 2) == 30);
+    CHECK(activity.getString(1, 1) == "C:/private-fixture/stats-cache.json|date=2025-01-02");
+    const auto usage = storage.execute("SELECT id, raw_reference, total_tokens FROM usage_events ORDER BY id;");
+    REQUIRE(usage.success());
+    REQUIRE(usage.rowCount() == 2);
+    CHECK(usage.getInt(0, 0) == 41);
+    CHECK(usage.getString(0, 1) == hashedPath);
+    CHECK(usage.getInt(0, 2) == 42);
+    CHECK(usage.getString(1, 1) == "C:/private-fixture/stats-cache.json");
+    storage.close();
+
+    const auto upgraded = readDatabaseFile(tempDb);
+    REQUIRE(storage.init(tempDb.path()));
+    storage.close();
+    CHECK((readDatabaseFile(tempDb) == upgraded));
+}
+
 TEST_CASE("StorageService supports overlapping opens during historical baseline repair", "[schema][migration]") {
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
     SettingsService settings(storage);
     REQUIRE(settings.setString("ui.last_selected_provider_id", "minimax"));
     removeHistoricalAnalysisSchema(storage);
@@ -454,7 +517,10 @@ TEST_CASE("StorageService does not bootstrap after a failed version read", "[sch
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
-    REQUIRE(storage.execute("UPDATE schema_version SET version = 11;").success());
+    REQUIRE(storage
+                .execute("DELETE FROM schema_version; INSERT INTO schema_version (version, description) VALUES (11, "
+                         "'Unsupported fixture');")
+                .success());
     storage.close();
     const auto before = readDatabaseFile(tempDb);
 
@@ -483,7 +549,10 @@ TEST_CASE("StorageService rejects databases older than the baseline", "[schema][
 
     REQUIRE(storage.init(tempDb.path()));
 
-    REQUIRE(storage.execute("UPDATE schema_version SET version = 11;").success());
+    REQUIRE(storage
+                .execute("DELETE FROM schema_version; INSERT INTO schema_version (version, description) VALUES (11, "
+                         "'Unsupported fixture');")
+                .success());
     storage.close();
     const auto before = readDatabaseFile(tempDb);
 
