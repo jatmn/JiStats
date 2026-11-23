@@ -31,7 +31,7 @@ The Linux build restores compiler results seeded by pushes to the default branch
 
 ### Prebuilt Linux toolchain
 
-Dispatch **Prepare Linux CI toolchain** to verify the MinGW and native toolchain on a standard runner. An organization with an image-generation runner can set `JISTATS_IMAGE_GENERATOR` to its label and dispatch the same workflow to snapshot the verified tools. Configure a Linux larger runner from the generated `jistats-linux-build` image, then set `JISTATS_LINUX_BUILD_RUNNER` to the consumer's label. CI uses that image for the cross-build and fingerprints the installed compiler packages on every run. With both variables unset, the current standard runners work without a subscription.
+Dispatch **Prepare Linux CI toolchain** to verify the MinGW and native toolchain on a standard runner. An organization with an image-generation runner can set `JISTATS_IMAGE_GENERATOR` to its label, add `snapshot: jistats-linux-build` beneath the job’s `runs-on` line, then dispatch the workflow to snapshot the verified tools. GitHub rejects workflow definitions containing `snapshot` on personal repositories before evaluating job conditions. Configure a Linux larger runner from the generated `jistats-linux-build` image, then set `JISTATS_LINUX_BUILD_RUNNER` to the consumer's label. CI uses that image for the cross-build and fingerprints the installed compiler packages on every run. With both variables unset, the current standard runners work without a subscription.
 
 ## Pull request lint
 
