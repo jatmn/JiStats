@@ -79,7 +79,7 @@ jobs:
                   ;;
                 *.md)
                   continue ;;
-                docs/fixtures/* | .github/workflows/ci.yml)
+                docs/fixtures/* | .github/workflows/ci.yml | scripts/check_test_inventory.ps1)
                   ;;
                 docs/*)
                   continue ;;
@@ -205,6 +205,8 @@ jobs:
       # Run from the checkout root so the suite can read the test fixtures.
       - name: Run Windows suite and diagnose intermittent restart stalls
         env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
           REPEAT_OFFLINE_NOTICE_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.repeat_offline_notice_tests }}
         shell: pwsh
         run: |
@@ -243,13 +245,25 @@ jobs:
             if ($process.ExitCode -ne 0) { exit $process.ExitCode }
           }
           # Reserve 15 seconds for GDB and 35 seconds for runner setup and cleanup.
-          Invoke-WindowsTests @() 250000
+          Invoke-WindowsTests @('*', '--list-tests', '--reporter', 'xml::out=catch-inventory.xml') 250000
+          Invoke-WindowsTests @('*', '--order', 'rand', '--durations', 'yes', '--reporter', 'console', '--reporter', 'xml::out=catch-results.xml') 250000
+          $expected = @(git ls-files -- 'tests/*.cpp')
+          if ($LASTEXITCODE -ne 0 -or !$expected) { throw 'Cannot enumerate the Windows test sources.' }
+          ./scripts/check_test_inventory.ps1 -Inventory catch-inventory.xml -Results catch-results.xml -Output test-file-times.json -ExpectedFiles $expected
           if ($env:REPEAT_OFFLINE_NOTICE_TESTS -ne 'true') { exit 0 }
           foreach ($attempt in 1..8) {
             Write-Host "Checking offline notice restart timing, pass $attempt"
             Invoke-WindowsTests @('[offline_notice]', '--reporter', 'compact', '--success') 60000
           }
           exit 0
+
+      - name: Save verified per-file test times
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-test-file-times
+          path: test-file-times.json
+          if-no-files-found: error
+          retention-days: 14
 
   # The ruleset requires this check. It passes when the build jobs pass or were
   # skipped because nothing they cover changed, and fails otherwise.
