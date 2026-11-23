@@ -5,9 +5,16 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 ## Working agreement
 
 - Start at the [documentation index](docs/README.md) for current guides and technical references.
-- Keep scope and open tasks in the [roadmap](docs/plan.md). Record evidence and handoffs in the [progress log](docs/progress.md), and update the relevant technical docs when behavior or decisions change.
+- The maintainer sets the roadmap and decides what to merge. Contributions and bug reports are welcome. Follow [CONTRIBUTING.md](CONTRIBUTING.md) and use the [roadmap](docs/plan.md) to check how proposed changes fit the project.
+- Record evidence and handoffs in the [progress log](docs/progress.md), and update the relevant technical docs when behavior or decisions change.
 - Check the implementation and its tests when documentation disagrees with the code. Keep changes focused and fit new work into the existing design.
 - Use the [capability matrix](docs/capability-matrix.md) for provider evidence and the [release checklist](docs/release-checklist.md) for release signoff.
+
+## Platform, UI, and performance
+
+- Write application code in native C++17 and use the existing CMake build. Do not add Python code, scripts, tooling, or dependencies to the repository.
+- Target Windows 11. Preserve the intentional Windows XP-era look of the desktop UI while keeping it easy to use on Windows 11. Preserve keyboard navigation, readable contrast, and DPI scaling. Use the [desktop validation guide](docs/validation/desktop.md) for affected UI behavior.
+- Prioritize low memory use and speed. Keep the idle and steady-state memory footprint small, startup quick, and the UI responsive during background work. Avoid unnecessary allocations, retained data, dependencies, and background work. When measuring performance, compare the relevant memory use or timings before and after on Windows 11 under the same workload.
 
 ## Provider and privacy boundaries
 
@@ -32,7 +39,7 @@ During the [two-week observation window](docs/progress.md#test-failure-observati
 
 From Linux, run the portable tests before pushing code changes. For Windows-facing changes, also cross-build the app, CLI and full test executable with MinGW-w64. Both command sequences and dependencies are in the [Linux verification commands](docs/validation/testing.md#linux-commands).
 
-CI executes the cross-built suite across hosted Windows runners for PRs, protected-branch pushes and manual dispatch. Use the [build and packaging instructions](README.md#build-and-packaging) for MinGW releases from Linux or Windows.
+CI runs the portable tests on Linux and shards the cross-built suite across hosted Windows runners when native validation is required. See the [CI rules](docs/validation/testing.md#continuous-integration) for when these jobs run. Use the [build and packaging instructions](README.md#build-and-packaging) for MinGW releases from Linux or Windows.
 
 - Use the [verification guide](docs/validation/testing.md) to choose verification for the change and record what ran and any blockers in the handoff.
 - For storage, schema, or SQLite persistence changes, run the [SQLite-enabled quality gate](docs/validation/sqlite-quality-gate.md). Run the bundled-SQLite portable tests on Linux and check the full Windows suite in CI. Use [manual CI dispatch](.github/workflows/ci.yml) to test any branch.
