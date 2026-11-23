@@ -26,7 +26,7 @@ JiStats is a local-first Windows 11 desktop app built with native C++17 and CMak
 
 ## Test failure evidence
 
-During the [two-week observation window](docs/progress.md#test-failure-observation), record each test failure you fix with the failing run, case and file, the fix, and what behavior the test protected. Classify a caught regression or an assertion that only detected an intended implementation change. Record fixture and infrastructure defects explicitly when neither description fits. A whole file is eligible for removal only after the window, when its evidence shows exclusively change detection and its remaining assertions protect no behavior. Record the demonstrated pattern here when removing it. Keep authorization, privacy, migration and concurrency tests.
+During the [two-week observation window](docs/progress.md#test-failure-observation), record each test failure when found with the failing run, case and file, the fix, and what behavior the test protected. Keep unresolved entries open and exclude their files from removal. On resolution, classify a caught regression or an assertion that only detected an intended implementation change. Record fixture and infrastructure defects explicitly when neither description fits. A whole file is eligible for removal only after the window, when its evidence shows exclusively change detection and its remaining assertions protect no behavior. Record the demonstrated pattern here when removing it. Keep authorization, privacy, migration and concurrency tests.
 
 ## Build and verify
 
