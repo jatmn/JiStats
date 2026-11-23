@@ -194,18 +194,21 @@ jobs:
         run: |
           set -euo pipefail
           setup_dir=$(mktemp -d "$RUNNER_TEMP/jistats-toolchain.XXXXXXXX")
-          archive_dir="$RUNNER_TEMP/jistats-apt"
-          mkdir -p "$archive_dir"
           read -ra packages <<< "$PACKAGES"
           exec {setup_lock}>"$setup_dir/install.lock"
           flock -x "$setup_lock"
           (
             trap 'printf "%s\n" "$?" > "$setup_dir/install.status"' EXIT
+            # APT's _apt user can traverse its archive directory on hosted runners.
+            shopt -s nullglob
+            cached=("$RUNNER_TEMP/jistats-apt"/*.deb)
+            if (( ${#cached[@]} )); then
+              sudo cp -- "${cached[@]}" /var/cache/apt/archives/
+            fi
             # The hosted VM is discarded after this job. Its toolchain needs
             # neither crash-recovery flushes nor a daemon restart scan.
             install=(sudo env NEEDRESTART_SUSPEND=1 apt-get
               -o Dpkg::Options::=--force-unsafe-io
-              -o Dir::Cache::archives="$archive_dir"
               -o APT::Keep-Downloaded-Packages=true
               install -y --no-install-recommends)
             if ! "${install[@]}" "${packages[@]}"; then
@@ -235,7 +238,6 @@ jobs:
           key: jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           restore-keys: jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Install the pinned CMake dependencies and wait for MinGW
-        id: dependencies
         if: ${{ !cancelled() && steps.toolchain.outputs.directory != '' }}
         env:
           SETUP_DIR: ${{ steps.toolchain.outputs.directory }}
@@ -253,9 +255,6 @@ jobs:
           if (( install_status != 0 )); then exit "$install_status"; fi
           if (( prefetch_status != 0 )); then exit "$prefetch_status"; fi
           echo "JISTATS_PREFETCHED_DEPS_DIR=$deps_dir" >> "$GITHUB_ENV"
-          if compgen -G "$RUNNER_TEMP/jistats-apt/*.deb" > /dev/null; then
-            echo "package-archives=true" >> "$GITHUB_OUTPUT"
-          fi
       - name: Identify compiler packages for the cache
         run: |
           # GCC invokes separate assembler and compiler backends. Include their
@@ -314,10 +313,25 @@ jobs:
           # A Windows-only retry needs the same inputs throughout the 30-day rerun window.
           retention-days: 30
           overwrite: true
-      - name: Seed MinGW package archives
+      - name: Prepare MinGW package archives for caching
+        id: seed-packages
         if: >-
           github.event_name == 'push' && github.ref_name == github.event.repository.default_branch &&
-          steps.dependencies.outputs.package-archives == 'true' && steps.apt-cache.outputs.cache-hit != 'true'
+          steps.toolchain.outputs.directory != '' && steps.apt-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get autoclean
+          shopt -s nullglob
+          archives=(/var/cache/apt/archives/*.deb)
+          if (( ${#archives[@]} )); then
+            cache_dir="$RUNNER_TEMP/jistats-apt"
+            mkdir -p "$cache_dir"
+            rm -f -- "$cache_dir"/*.deb
+            cp -- "${archives[@]}" "$cache_dir/"
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Seed MinGW package archives
+        if: steps.seed-packages.outputs.ready == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/jistats-apt/*.deb
