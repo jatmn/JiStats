@@ -50,6 +50,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace JiStats {
@@ -6927,7 +6928,9 @@ public:
         preferences.analysisCustomRangeEndUtc = scope.customRangeEndUtc;
     }
 
-    static SettingsService::StringValues analysisSettings(const AnalysisScopeState& scope) {
+    using SettingValues = std::vector<std::pair<std::string, std::string>>;
+
+    static SettingValues analysisSettings(const AnalysisScopeState& scope) {
         return {
             {preference_keys::ANALYSIS_SELECTED_PROVIDER_ID, scope.selectedProviderId},
             {preference_keys::ANALYSIS_SELECTED_ACCOUNT_ID, scope.selectedAccountId},
@@ -6940,7 +6943,7 @@ public:
         };
     }
 
-    static SettingsService::StringValues preferenceSettings(const DashboardPreferences& preferences) {
+    static SettingValues preferenceSettings(const DashboardPreferences& preferences) {
         const auto booleanValue = [](bool value) { return value ? "true" : "false"; };
         return {
             {preference_keys::TASKBAR_OVERLAY_ENABLED, booleanValue(preferences.taskbarOverlayEnabled)},
@@ -6963,7 +6966,7 @@ public:
         };
     }
 
-    void saveSettingsIndividually(const SettingsService::StringValues& values) {
+    void saveSettingsIndividually(const SettingValues& values) {
         for (const auto& [key, value] : values) {
             settingsService.setString(key, value);
         }
@@ -6990,7 +6993,18 @@ public:
         const auto scope = analysisSettings(analysisScopeFromPreferences(preferences));
         values.insert(values.end(), scope.begin(), scope.end());
         // Save once at startup while retaining per-setting recovery when the batch fails.
-        if (!settingsService.setStrings(values)) {
+        std::string sql = "INSERT OR REPLACE INTO settings (key, value, updated_at_utc) VALUES ";
+        std::vector<std::string> parameters;
+        parameters.reserve(values.size() * 2);
+        for (const auto& [key, value] : values) {
+            if (!parameters.empty()) {
+                sql += ", ";
+            }
+            sql += "(?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))";
+            parameters.push_back(key);
+            parameters.push_back(value);
+        }
+        if (!storageService.execute(sql, parameters).success()) {
             saveSettingsIndividually(values);
         }
     }

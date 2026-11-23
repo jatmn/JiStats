@@ -86,26 +86,6 @@ bool SettingsService::setString(const std::string& key, const std::string& value
     return result.success();
 }
 
-bool SettingsService::setStrings(const StringValues& values) {
-    if (values.empty()) {
-        return true;
-    }
-
-    std::string sql = "INSERT OR REPLACE INTO settings (key, value, updated_at_utc) VALUES ";
-    std::vector<std::string> parameters;
-    parameters.reserve(values.size() * 2);
-    for (const auto& [key, value] : values) {
-        if (!parameters.empty()) {
-            sql += ", ";
-        }
-        sql += "(?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))";
-        parameters.push_back(key);
-        parameters.push_back(value);
-    }
-
-    return storage_.execute(sql, parameters).success();
-}
-
 bool SettingsService::exists(const std::string& key) const {
     auto result = storage_.execute(
         "SELECT 1 FROM settings WHERE key = ? LIMIT 1",

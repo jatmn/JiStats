@@ -8,13 +8,25 @@ from pathlib import Path
 
 
 OVERRUN_STEP = "Fail on a measured native CI overrun"
+WINDOWS_SUITE_STEP = "Run Windows suite and diagnose intermittent restart stalls"
+
+
+def timing(item):
+    if not item.get("started_at") or not item.get("completed_at"):
+        raise ValueError(f'Incomplete timing for {item["name"]}.')
+    start = datetime.fromisoformat(item["started_at"].replace("Z", "+00:00"))
+    finish = datetime.fromisoformat(item["completed_at"].replace("Z", "+00:00"))
+    if finish < start:
+        raise ValueError(f'Invalid timing for {item["name"]}.')
+    return start, finish
 
 
 def elapsed(item):
-    if not item.get("started_at") or not item.get("completed_at"):
-        sys.exit(f'Incomplete timing for {item["name"]}. Rerun all jobs if the timings are unavailable.')
-    return (datetime.fromisoformat(item["completed_at"].replace("Z", "+00:00"))
-            - datetime.fromisoformat(item["started_at"].replace("Z", "+00:00"))).total_seconds()
+    try:
+        start, finish = timing(item)
+    except ValueError as error:
+        sys.exit(f"{error} Rerun all jobs if the timings are unavailable.")
+    return (finish - start).total_seconds()
 
 
 def check(name, duration, limit):
@@ -23,19 +35,22 @@ def check(name, duration, limit):
     return over
 
 
+def latest_completed_job(jobs, name, attempt, conclusion):
+    candidates = [job for job in jobs if job["name"] == name and job["run_attempt"] <= attempt]
+    latest_attempt = max((job["run_attempt"] for job in candidates), default=None)
+    latest = [job for job in candidates if job["run_attempt"] == latest_attempt]
+    if len(latest) != 1 or latest[0]["status"] != "completed" or latest[0]["conclusion"] != conclusion:
+        raise ValueError(f"Could not identify the upstream execution for {name}.")
+    return latest[0]
+
+
 def native_jobs(jobs, current_id, attempt, upstream):
     """Find the active gate and the executions whose results it depends on."""
     current = next((job for job in jobs if job["id"] == current_id), None)
     if current is None or current["run_attempt"] != attempt or current["status"] != "in_progress":
         raise ValueError("The active CI gate is missing from this attempt.")
 
-    selected = []
-    for name, conclusion in upstream:
-        candidates = (job for job in jobs if job["name"] == name and job["run_attempt"] <= attempt)
-        job = max(candidates, key=lambda item: item["run_attempt"], default=None)
-        if job is None or job["status"] != "completed" or job["conclusion"] != conclusion:
-            raise ValueError(f"Could not identify the upstream execution for {name}.")
-        selected.append(job)
+    selected = [latest_completed_job(jobs, name, attempt, conclusion) for name, conclusion in upstream]
 
     for job in jobs:
         if job["name"] == current["name"] and job["run_attempt"] < attempt:
@@ -46,13 +61,39 @@ def native_jobs(jobs, current_id, attempt, upstream):
     return [*selected, current], False
 
 
+def windows_shard_cohort(jobs, shard_names, attempt, conclusion):
+    if len(shard_names) != len(set(shard_names)):
+        raise ValueError("Windows shard names must be distinct.")
+    shards = [latest_completed_job(jobs, name, attempt, conclusion) for name in shard_names]
+    if conclusion == "skipped":
+        return shards, None
+    if len({job["run_attempt"] for job in shards}) != 1:
+        raise ValueError("Windows shards came from different attempts and cannot be timed together.")
+
+    spans = []
+    for job in shards:
+        steps = [step for step in job["steps"] if step["name"] == WINDOWS_SUITE_STEP]
+        if len(steps) != 1 or steps[0]["status"] != "completed" or steps[0]["conclusion"] != "success":
+            raise ValueError(f'Could not identify the completed Windows suite step for {job["name"]}.')
+        spans.append(timing(steps[0]))
+    start = min(start for start, _ in spans)
+    finish = max(finish for _, finish in spans)
+    return shards, (finish - start).total_seconds()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--running-job", type=int, help="also check elapsed time of this active job")
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--upstream", action="append", nargs=2, metavar=("JOB", "CONCLUSION"))
+    parser.add_argument("--windows-shard", action="append", default=[], metavar="JOB")
+    parser.add_argument("--windows-result", choices=("success", "skipped"))
     parser.add_argument("--github-output", type=Path)
     args = parser.parse_args()
+    if bool(args.windows_shard) != bool(args.windows_result) or (
+        args.windows_shard and args.running_job is None
+    ):
+        parser.error("--windows-shard and --windows-result require each other and --running-job")
     setup_prefixes = ("set up job", "run actions/checkout", "check out the tested",
                       "checkout trusted", "install ", "run actions/download-artifact",
                       "initialize codeql", "fetch c++ dependency", "restore compiler results")
@@ -60,14 +101,23 @@ def main():
     if not jobs:
         sys.exit("No jobs returned for this attempt")
     failed = False
+    windows_span = None
     if args.running_job is not None:
         if args.attempt is None or not args.upstream or args.github_output is None:
             parser.error("--running-job requires --attempt, --upstream and --github-output")
         try:
-            jobs, failed = native_jobs(jobs, args.running_job, args.attempt, args.upstream)
+            selected, failed = native_jobs(jobs, args.running_job, args.attempt, args.upstream)
+            if args.windows_shard:
+                shards, windows_span = windows_shard_cohort(
+                    jobs, args.windows_shard, args.attempt, args.windows_result,
+                )
+                selected = [*selected[:-1], *shards, selected[-1]]
+            jobs = selected
         except ValueError as error:
             sys.exit(f"{error} Rerun all jobs if the upstream timings are unavailable.")
 
+    if windows_span is not None:
+        failed |= check("Windows suite wall time across shards", windows_span, 30)
     for job in jobs:
         if job["conclusion"] == "skipped":
             print(f'- {job["name"]}: skipped in source workflow')
@@ -85,7 +135,7 @@ def main():
         setup = sum(elapsed(s) for s in steps if s["name"].lower().startswith(setup_prefixes))
         failed |= check("Setup", setup, 15)
         for step in steps:
-            if step["name"] == "Run Windows suite and diagnose intermittent restart stalls":
+            if windows_span is None and step["name"] == WINDOWS_SUITE_STEP:
                 failed |= check("Windows suite step", elapsed(step), 30)
     if args.running_job is not None:
         with args.github_output.open("a", encoding="utf-8") as output:

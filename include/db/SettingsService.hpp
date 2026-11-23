@@ -2,8 +2,6 @@
 
 #include <string>
 #include <optional>
-#include <utility>
-#include <vector>
 
 namespace JiStats {
 
@@ -25,9 +23,6 @@ public:
     // String settings
     std::optional<std::string> getString(const std::string& key) const;
     bool setString(const std::string& key, const std::string& value);
-
-    using StringValues = std::vector<std::pair<std::string, std::string>>;
-    bool setStrings(const StringValues& values);
 
     // Check if a setting exists
     bool exists(const std::string& key) const;
