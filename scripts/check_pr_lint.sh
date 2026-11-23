@@ -52,12 +52,12 @@ if [[ ${JISTATS_PUSH_CHECK:-0} == 1 && -f "$archive/scripts/check_js_ci.sh" ]]; 
         delimiter=
     elif git -c core.quotePath=false worktree list --porcelain > "$worktree_list"; then
         delimiter=$'\n'
-        repository=$(git_common_directory)
     else
         echo "Could not verify a checked-out worktree for $head: git worktree list failed." >&2
         exit 1
     fi
     # Run ref-owned scripts only for an exact revision checked out locally.
+    repository=$(git_common_directory)
     trusted=false
     worktree=
     while IFS= read -r -d "$delimiter" entry; do
@@ -71,8 +71,8 @@ if [[ ${JISTATS_PUSH_CHECK:-0} == 1 && -f "$archive/scripts/check_js_ci.sh" ]]; 
                 ;;
             "HEAD $head")
                 [[ -n $worktree && -e $worktree/.git ]] || continue
-                # Verify legacy paths directly because newline-delimited output can be ambiguous.
-                if [[ -n $delimiter ]] && ! (
+                # Verify the checkout itself since Git can retain stale worktree records.
+                if ! (
                     cd -- "$worktree" &&
                         [[ $(git_common_directory) == "$repository" &&
                            $(git rev-parse --verify HEAD) == "$head" ]]
