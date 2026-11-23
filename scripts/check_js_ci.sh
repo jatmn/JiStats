@@ -21,7 +21,7 @@ check() {
 check lint 1 lint --type-aware --max-warnings=0 >"$logs/lint" 2>&1 & lint=$!
 check format 1 fmt --check scripts/*.mjs >"$logs/format" 2>&1 & format=$!
 check types 5 check >"$logs/types" 2>&1 & types=$!
-check tests 30 test scripts/*.test.mjs >"$logs/tests" 2>&1 & tests=$!
+check tests 30 test --isolate=modules --randomize scripts/*.test.mjs >"$logs/tests" 2>&1 & tests=$!
 status=0
 for pid in "$lint" "$format" "$types" "$tests"; do
     wait "$pid" || status=1
