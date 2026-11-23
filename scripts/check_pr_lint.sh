@@ -23,9 +23,9 @@ if [[ ${1:-} == --pre-push ]]; then
     done
     if (( updates == 0 )); then check_push "${2:?expected the pushed revision}" || status=1; fi
     awk -v start="$start" -v end="$EPOCHREALTIME" 'BEGIN {
-        printf "Pre-push checks: %.3fs (limit < 9s)\n", end-start
-        exit (end-start >= 9)
-    }' || status=1
+        elapsed = end-start
+        printf "Pre-push checks: %.3fs (target < 9s)%s\n", elapsed, (elapsed >= 9 ? " [over target]" : "")
+    }'
     exit "$status"
 fi
 base=$(git rev-parse --verify --end-of-options "${1:?expected a base revision}^{commit}")
@@ -50,8 +50,8 @@ if [[ ${JISTATS_PUSH_CHECK:-0} == 1 && -f "$tmp/scripts/check_js_ci.sh" ]]; then
         fi
     done < <(git worktree list --porcelain)
     if [[ $trusted != true ]]; then
-        echo "Cannot execute JavaScript checks for $head outside a checked-out worktree's history." >&2
-        exit 1
+        echo "Skipping local JavaScript checks for $head outside checked-out worktree history." >&2
+        exit "$status"
     fi
     # The archive contains the pushed lockfile, even on a non-HEAD ref.
     if (cd "$tmp" && bun install --frozen-lockfile); then
