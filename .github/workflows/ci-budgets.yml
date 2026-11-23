@@ -42,10 +42,11 @@ jobs:
           echo "Measuring $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$ATTEMPT" | tee -a "$GITHUB_STEP_SUMMARY"
           run_api="repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
           workflow=$(gh api "$run_api" --jq .path)
-          args=()
+          report_only=false
           case "${workflow%%@*}" in
             .github/workflows/ci.yml | .github/workflows/lint.yml | .github/workflows/pullfrog-checks.yml) ;;
-            *) args+=(--report-only) ;;
+            *) report_only=true ;;
           esac
           gh api --paginate "$run_api/attempts/$ATTEMPT/jobs?per_page=100" |
-            jq -s . | python3 scripts/check_ci_budgets.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+            jq --slurp --raw-output --argjson report_only "$report_only" -f scripts/check_ci_budgets.jq |
+            tee -a "$GITHUB_STEP_SUMMARY"
