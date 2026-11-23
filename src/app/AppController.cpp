@@ -50,7 +50,6 @@
 #include <sstream>
 #include <string>
 #include <thread>
-#include <utility>
 #include <vector>
 
 namespace JiStats {
@@ -6928,84 +6927,50 @@ public:
         preferences.analysisCustomRangeEndUtc = scope.customRangeEndUtc;
     }
 
-    using SettingValues = std::vector<std::pair<std::string, std::string>>;
-
-    static SettingValues analysisSettings(const AnalysisScopeState& scope) {
-        return {
-            {preference_keys::ANALYSIS_SELECTED_PROVIDER_ID, scope.selectedProviderId},
-            {preference_keys::ANALYSIS_SELECTED_ACCOUNT_ID, scope.selectedAccountId},
-            {preference_keys::ANALYSIS_DATE_RANGE_PRESET,
-             AnalysisQueryEngine::dateRangePresetSettingValue(scope.dateRangePreset)},
-            {preference_keys::ANALYSIS_CUSTOM_RANGE_START_UTC,
-             scope.customRangeStartUtc > 0 ? formatTimeUtcIso(scope.customRangeStartUtc) : ""},
-            {preference_keys::ANALYSIS_CUSTOM_RANGE_END_UTC,
-             scope.customRangeEndUtc > 0 ? formatTimeUtcIso(scope.customRangeEndUtc) : ""},
-        };
-    }
-
-    static SettingValues preferenceSettings(const DashboardPreferences& preferences) {
-        const auto booleanValue = [](bool value) { return value ? "true" : "false"; };
-        return {
-            {preference_keys::TASKBAR_OVERLAY_ENABLED, booleanValue(preferences.taskbarOverlayEnabled)},
-            {preference_keys::OPENAI_SUBSCRIPTION_TRACKING_ENABLED,
-             booleanValue(preferences.openaiSubscriptionTrackingEnabled)},
-            {preference_keys::MINIMAX_SUBSCRIPTION_TRACKING_ENABLED,
-             booleanValue(preferences.miniMaxSubscriptionTrackingEnabled)},
-            {preference_keys::CLAUDE_CODE_ENABLED, booleanValue(preferences.claudeCodeEnabled)},
-            {preference_keys::KIMI_CODE_ENABLED, booleanValue(preferences.kimiCodeEnabled)},
-            {preference_keys::GROK_TRACKING_ENABLED, booleanValue(preferences.grokSubscriptionTrackingEnabled)},
-            {preference_keys::CURSOR_TRACKING_ENABLED, booleanValue(preferences.cursorSubscriptionTrackingEnabled)},
-            {preference_keys::STARTUP_ENABLED, booleanValue(preferences.startupEnabled)},
-            {preference_keys::STARTUP_BACKGROUND, booleanValue(preferences.startupStartInBackground)},
-            {preference_keys::LAST_SELECTED_PROVIDER_ID, preferences.lastSelectedProviderId},
-            {preference_keys::LAST_SELECTED_ACCOUNT_ID, preferences.lastSelectedAccountId},
-            {preference_keys::SCHEDULED_EXPORT_ENABLED, booleanValue(preferences.scheduledExportEnabled)},
-            {preference_keys::SCHEDULED_EXPORT_INTERVAL_MINUTES,
-             std::to_string(std::max(1, preferences.scheduledExportIntervalMinutes))},
-            {preference_keys::SCHEDULED_EXPORT_PATH, preferences.scheduledExportPath},
-        };
-    }
-
-    void saveSettingsIndividually(const SettingValues& values) {
-        for (const auto& [key, value] : values) {
-            settingsService.setString(key, value);
-        }
-    }
-
     void saveAnalysisScope(const AnalysisScopeState& scope) {
-        if (storageAvailable) {
-            saveSettingsIndividually(analysisSettings(scope));
-        }
-    }
-
-    void savePreferences(const DashboardPreferences& preferences) {
-        if (storageAvailable) {
-            saveSettingsIndividually(preferenceSettings(preferences));
-        }
-    }
-
-    void saveStartupSettings(const DashboardPreferences& preferences) {
         if (!storageAvailable) {
             return;
         }
 
-        auto values = preferenceSettings(preferences);
-        const auto scope = analysisSettings(analysisScopeFromPreferences(preferences));
-        values.insert(values.end(), scope.begin(), scope.end());
-        // Save once at startup while retaining per-setting recovery when the batch fails.
-        std::string sql = "INSERT OR REPLACE INTO settings (key, value, updated_at_utc) VALUES ";
-        std::vector<std::string> parameters;
-        parameters.reserve(values.size() * 2);
-        for (const auto& [key, value] : values) {
-            if (!parameters.empty()) {
-                sql += ", ";
-            }
-            sql += "(?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))";
-            parameters.push_back(key);
-            parameters.push_back(value);
-        }
-        if (!storageService.execute(sql, parameters).success()) {
-            saveSettingsIndividually(values);
+        settingsService.setString(preference_keys::ANALYSIS_SELECTED_PROVIDER_ID, scope.selectedProviderId);
+        settingsService.setString(preference_keys::ANALYSIS_SELECTED_ACCOUNT_ID, scope.selectedAccountId);
+        settingsService.setString(preference_keys::ANALYSIS_DATE_RANGE_PRESET,
+                                  AnalysisQueryEngine::dateRangePresetSettingValue(scope.dateRangePreset));
+        settingsService.setString(preference_keys::ANALYSIS_CUSTOM_RANGE_START_UTC,
+                                  scope.customRangeStartUtc > 0 ? formatTimeUtcIso(scope.customRangeStartUtc) : "");
+        settingsService.setString(preference_keys::ANALYSIS_CUSTOM_RANGE_END_UTC,
+                                  scope.customRangeEndUtc > 0 ? formatTimeUtcIso(scope.customRangeEndUtc) : "");
+    }
+
+    void savePreferences(const DashboardPreferences& preferences) {
+        if (storageAvailable) {
+            settingsService.setBool(preference_keys::TASKBAR_OVERLAY_ENABLED,
+                                    preferences.taskbarOverlayEnabled);
+            settingsService.setBool(preference_keys::OPENAI_SUBSCRIPTION_TRACKING_ENABLED,
+                                    preferences.openaiSubscriptionTrackingEnabled);
+            settingsService.setBool(preference_keys::MINIMAX_SUBSCRIPTION_TRACKING_ENABLED,
+                                    preferences.miniMaxSubscriptionTrackingEnabled);
+            settingsService.setBool(preference_keys::CLAUDE_CODE_ENABLED,
+                                    preferences.claudeCodeEnabled);
+            settingsService.setBool(preference_keys::KIMI_CODE_ENABLED,
+                                    preferences.kimiCodeEnabled);
+            settingsService.setBool(preference_keys::GROK_TRACKING_ENABLED,
+                                    preferences.grokSubscriptionTrackingEnabled);
+            settingsService.setBool(preference_keys::CURSOR_TRACKING_ENABLED,
+                                    preferences.cursorSubscriptionTrackingEnabled);
+            settingsService.setBool(preference_keys::STARTUP_ENABLED,
+                                    preferences.startupEnabled);
+            settingsService.setBool(preference_keys::STARTUP_BACKGROUND,
+                                    preferences.startupStartInBackground);
+            settingsService.setString(preference_keys::LAST_SELECTED_PROVIDER_ID,
+                                      preferences.lastSelectedProviderId);
+            settingsService.setString(preference_keys::LAST_SELECTED_ACCOUNT_ID, preferences.lastSelectedAccountId);
+            settingsService.setBool(preference_keys::SCHEDULED_EXPORT_ENABLED,
+                                    preferences.scheduledExportEnabled);
+            settingsService.setInt(preference_keys::SCHEDULED_EXPORT_INTERVAL_MINUTES,
+                                   std::max(1, preferences.scheduledExportIntervalMinutes));
+            settingsService.setString(preference_keys::SCHEDULED_EXPORT_PATH,
+                                      preferences.scheduledExportPath);
         }
     }
 
@@ -7191,7 +7156,8 @@ bool AppController::init(bool launchInBackground) {
         // Load persisted preferences
         DashboardPreferences loadedPreferences = pImpl->loadPreferences();
         loadedPreferences = pImpl->applyStartupPreferences(loadedPreferences);
-        pImpl->saveStartupSettings(loadedPreferences);
+        pImpl->savePreferences(loadedPreferences);
+        pImpl->saveAnalysisScope(Impl::analysisScopeFromPreferences(loadedPreferences));
 
         pImpl->dashboardPresenter.setMiniMaxCredentialActionCallback(
             [this](const DashboardMiniMaxCredentialRequest& request) {
