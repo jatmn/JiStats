@@ -1,6 +1,7 @@
 name: Pullfrog checks
 
 on:
+  workflow_dispatch:
   pull_request:
   merge_group:
   push:
@@ -35,7 +36,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: node_modules
-          key: js-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json') }}
+          key: bench-dr-js-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock', 'package.json') }}
       - run: bun install --frozen-lockfile
       - name: Lint, format-check, typecheck and test JavaScript
         run: bash scripts/check_js_ci.sh
@@ -43,7 +44,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: node --test scripts/pullfrog-review-check.test.mjs
       - name: Seed installed dependencies from main
-        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.deps.outputs.cache-hit != 'true'
+        if: github.event_name == 'workflow_dispatch' && github.ref_name == 'bench/combined-ci-dr' && steps.deps.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: node_modules
