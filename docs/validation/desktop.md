@@ -5,7 +5,7 @@ Use a Windows 11 desktop session and a build of the candidate. Record the revisi
 ## Dashboard and background checks
 
 - Launch normally and with `--background`. Check that the tray opens the dashboard and that closing the dashboard leaves the app available.
-- Test **Start with Windows** with the packaged build in an isolated Windows profile. Enable the setting and exit JiStats. Move the disposable test database and any companion files aside, then sign out and back in without launching the app manually. Verify that the tray appears and the new database passes the [fresh packaged database check](#fresh-packaged-database). For a future release with a numbered migration after version 12, also use a disposable supported database with that migration pending and record the version before and after sign-in.
+- Test **Start with Windows** with the packaged build in an isolated Windows profile. Enable the setting and exit JiStats. Move the disposable test database and any companion files aside, then sign out and back in without launching the app manually. Verify that the tray appears and the new database passes the [fresh packaged database check](#fresh-packaged-database). Repeat with a disposable version 12 database and verify the version 13 upgrade after sign-in.
 - Enable several subscriptions. Compare each Overview remaining meter, reset time, and update time with its provider. Include paired windows, a stale reading, an account without quota, and a provider with local activity only. Select an account in Provider Details and check that Overview still shows every enabled subscription. Compare the provider table’s used percentages with the same quota windows.
 - Resize the dashboard to a compact window and scroll Overview to the last chart using the scrollbar, mouse wheel, and Page Up or Page Down. Check that the navigation and footer stay in view and that model charts stack on narrow windows. Repeat on a high-DPI display and with Windows contrast themes if available.
 - Focus the dashboard tabs and use Left and Right to switch between Overview and Provider Details. From both views, open History and Settings with the keyboard and confirm that each opens its own window.
@@ -25,7 +25,7 @@ SELECT
     EXISTS(SELECT 1 FROM providers WHERE provider_key = 'kimi') AS has_kimi_provider;
 ```
 
-Record all three results. The schema version must be `12`, and both existence checks must be `1`.
+Record all three results. The schema version must be `13`, and both existence checks must be `1`.
 
 ## Taskbar checks
 

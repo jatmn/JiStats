@@ -37,7 +37,7 @@ jobs:
         run: bash scripts/check_js_ci.sh
       - name: Test authorization on its production Node runtime
         if: ${{ !cancelled() }}
-        run: node --test scripts/pullfrog-review-check.test.mjs
+        run: node --test scripts/pullfrog-*.test.mjs
       - name: Seed installed dependencies from main
         if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.deps.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

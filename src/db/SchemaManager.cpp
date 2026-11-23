@@ -1,16 +1,20 @@
 #include "db/SchemaManager.hpp"
 #include "db/StorageService.hpp"
 #include "BaselineSchema.hpp"
+#include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <thread>
 
 namespace JiStats {
 
 namespace {
 constexpr int kBaselineVersion = 12;
+constexpr int kClaudeRedactionVersion = 13;
 }
 
 class SchemaManager::Impl {
@@ -44,7 +48,7 @@ int SchemaManager::getCurrentVersion() const {
 }
 
 int SchemaManager::getLatestVersion() const {
-    int latest = kBaselineVersion;
+    int latest = kClaudeRedactionVersion;
     try {
         for (const auto& entry : std::filesystem::directory_iterator(pImpl->migrationsPath)) {
             const std::string name = entry.path().filename().string();
@@ -71,6 +75,22 @@ bool SchemaManager::migrate() {
         // End the read snapshot before acquiring a write lock, then recheck under that lock.
         // Another instance may have completed the same repair while we waited.
         baseline = runBaselineTransaction(current, true);
+    }
+    if (baseline == BaselineResult::NeedsCompaction) {
+        // A page split can leave plaintext outside the live cells. Rebuild the file
+        // after the redaction transaction commits. VACUUM requires autocommit.
+        const auto compacted = storage.execute("VACUUM main;");
+        if (!compacted.success()) {
+            pImpl->lastError =
+                "Cannot compact the database after redacting legacy Claude references: " + compacted.error();
+            return false;
+        }
+        if (!checkpointClaudeRedaction()) {
+            return false;
+        }
+        // Leave version 12 recorded until the file is compacted so a failed or
+        // interrupted open retries the redaction and rebuild on its next attempt.
+        baseline = recordClaudeRedaction(current);
     }
     if (baseline != BaselineResult::Ready) {
         return false;
@@ -147,7 +167,11 @@ SchemaManager::BaselineResult SchemaManager::prepareBaseline(int& current, bool 
                                    ")";
                 return BaselineResult::Failed;
             }
-            return current == kBaselineVersion ? reconcileBaseline(writable) : BaselineResult::Ready;
+            if (current > kBaselineVersion) {
+                return BaselineResult::Ready;
+            }
+            const auto baseline = reconcileBaseline(writable);
+            return baseline == BaselineResult::Ready ? migrateClaudeReferences(writable) : baseline;
         }
     }
 
@@ -155,12 +179,87 @@ SchemaManager::BaselineResult SchemaManager::prepareBaseline(int& current, bool 
         return BaselineResult::NeedsWrite;
     }
 
+    const auto pages = storage.execute("PRAGMA main.page_count;");
+    if (!pages.success() || pages.rowCount() != 1) {
+        pImpl->lastError = "Cannot inspect database page count before initializing the baseline";
+        return BaselineResult::Failed;
+    }
     const auto result = storage.execute(kBaselineSchemaSql);
     if (!result.success()) {
         pImpl->lastError = "Cannot initialize baseline: " + result.error();
         return BaselineResult::Failed;
     }
-    current = kBaselineVersion;
+    // An empty database has no historical cells to redact or compact.
+    return pages.getInt(0, 0) == 0 ? recordClaudeRedaction(current) : migrateClaudeReferences(writable);
+}
+
+SchemaManager::BaselineResult SchemaManager::migrateClaudeReferences(bool writable) {
+    if (!writable) {
+        return BaselineResult::NeedsWrite;
+    }
+
+    const auto result = storage.execute(kClaudeRedactionSql);
+    if (!result.success()) {
+        pImpl->lastError = "Cannot redact legacy Claude source references: " + result.error();
+        return BaselineResult::Failed;
+    }
+    return BaselineResult::NeedsCompaction;
+}
+
+bool SchemaManager::checkpointClaudeRedaction() {
+    // Flush the rebuilt WAL pages into the main file. SQLite bypasses the
+    // connection's busy handler if another opener owns the checkpoint lock.
+    const auto normalTimeout = storage.execute("PRAGMA busy_timeout;");
+    if (!normalTimeout.success() || normalTimeout.rowCount() != 1) {
+        pImpl->lastError = "Cannot read the SQLite busy timeout for the Claude reference upgrade";
+        return false;
+    }
+    const auto normalWait = std::chrono::milliseconds(normalTimeout.getInt(0, 0));
+    const auto setBusyTimeout = [&](std::chrono::milliseconds wait) {
+        const auto result = storage.execute("PRAGMA busy_timeout = " + std::to_string(wait.count()) + ";");
+        return result.success() && result.rowCount() == 1 && result.getInt(0, 0) == wait.count();
+    };
+
+    using Clock = std::chrono::steady_clock;
+    const auto deadline = Clock::now() + std::chrono::seconds(5);
+    bool checkpointed = false;
+    while (true) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+        if (remaining.count() <= 0 || !setBusyTimeout(std::min(remaining, normalWait))) {
+            break;
+        }
+        const auto checkpoint = storage.execute("PRAGMA main.wal_checkpoint(TRUNCATE);");
+        if (!checkpoint.success() || checkpoint.rowCount() != 1) {
+            break;
+        }
+        const int busy = checkpoint.getInt(0, 0);
+        if (busy != 1) {
+            checkpointed = busy == 0;
+            break;
+        }
+        std::this_thread::sleep_until(std::min(deadline, Clock::now() + std::chrono::milliseconds(25)));
+    }
+
+    if (!setBusyTimeout(normalWait)) {
+        pImpl->lastError = "Cannot restore the SQLite busy timeout after the Claude reference upgrade";
+        return false;
+    }
+    if (!checkpointed) {
+        pImpl->lastError = "Cannot checkpoint the compacted database after redacting legacy Claude references";
+    }
+    return checkpointed;
+}
+
+SchemaManager::BaselineResult SchemaManager::recordClaudeRedaction(int& current) {
+    const auto result = storage.execute("INSERT INTO main.schema_version (version, description) "
+                                        "VALUES (13, 'Redact Claude source references') "
+                                        "ON CONFLICT(version) DO NOTHING;");
+    if (!result.success()) {
+        pImpl->lastError = "Cannot record the Claude reference upgrade: " + result.error();
+        return BaselineResult::Failed;
+    }
+
+    current = kClaudeRedactionVersion;
     return BaselineResult::Ready;
 }
 

@@ -942,7 +942,10 @@ TEST_CASE("AppController explains a rejected database during background startup"
     TempTestDatabase dbPath;
     StorageService storage;
     REQUIRE(storage.init(dbPath.path()));
-    REQUIRE(storage.execute("UPDATE schema_version SET version = 11;").success());
+    REQUIRE(storage
+                .execute("DELETE FROM schema_version; INSERT INTO schema_version (version, description) VALUES (11, "
+                         "'Unsupported fixture');")
+                .success());
     storage.close();
 
     AppController app;

@@ -4,11 +4,14 @@
 #include "db/StorageService.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -143,6 +146,77 @@ int installBaselineInspectionGate(sqlite3* db, char**, const sqlite3_api_routine
         nullptr);
 }
 
+struct WalCheckpointOverlap {
+    enum Stage { Starting, FirstReady, SecondReady, ReaderReady, CheckpointLocked, SecondReturned, ReaderClosed };
+
+    void advance(Stage next) {
+        {
+            std::lock_guard lock(mutex);
+            if (next > stage) {
+                stage = next;
+            }
+        }
+        changed.notify_all();
+    }
+
+    bool waitFor(Stage target) {
+        std::unique_lock lock(mutex);
+        const bool reached = changed.wait_for(lock, std::chrono::seconds(10), [&] { return stage >= target; });
+        timedOut |= !reached;
+        return reached;
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    Stage stage = Starting;
+    bool timedOut = false;
+};
+
+thread_local WalCheckpointOverlap* walOverlap = nullptr;
+thread_local bool firstWalOpener = false;
+
+int installWalCheckpointGate(sqlite3* db, char**, const sqlite3_api_routines*) {
+    if (!walOverlap) {
+        return SQLITE_OK;
+    }
+    return sqlite3_trace_v2(
+        db, SQLITE_TRACE_STMT | SQLITE_TRACE_PROFILE,
+        [](unsigned event, void* connection, void* statement, void*) {
+            const auto* sql = sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
+            if (!walOverlap || !sql || std::string_view(sql) != "PRAGMA main.wal_checkpoint(TRUNCATE);") {
+                return 0;
+            }
+            using Overlap = WalCheckpointOverlap;
+            if (firstWalOpener && event == SQLITE_TRACE_STMT) {
+                walOverlap->advance(Overlap::FirstReady);
+                walOverlap->waitFor(Overlap::ReaderReady);
+                sqlite3_busy_handler(
+                    static_cast<sqlite3*>(connection),
+                    [](void* data, int attempt) {
+                        auto& overlap = *static_cast<Overlap*>(data);
+                        // TRUNCATE owns the checkpoint lock while waiting for the WAL reader.
+                        overlap.advance(Overlap::CheckpointLocked);
+                        return attempt == 0 && overlap.waitFor(Overlap::ReaderClosed) ? 1 : 0;
+                    },
+                    walOverlap);
+            }
+            if (!firstWalOpener && event == SQLITE_TRACE_STMT) {
+                walOverlap->advance(Overlap::SecondReady);
+                walOverlap->waitFor(Overlap::CheckpointLocked);
+            }
+            if (event == SQLITE_TRACE_PROFILE) {
+                if (firstWalOpener) {
+                    sqlite3_busy_timeout(static_cast<sqlite3*>(connection), 5000);
+                } else {
+                    walOverlap->advance(Overlap::SecondReturned);
+                }
+                walOverlap = nullptr;
+            }
+            return 0;
+        },
+        db);
+}
+
 bool denySchemaVersionRead = false;
 
 int installSchemaVersionReadFailure(sqlite3* db, char**, const sqlite3_api_routines*) {
@@ -158,16 +232,22 @@ int installSchemaVersionReadFailure(sqlite3* db, char**, const sqlite3_api_routi
         },
         nullptr);
 }
+
+int installCompactionFailure(sqlite3* db, char**, const sqlite3_api_routines*) {
+    // VACUUM attaches a temporary database before copying the live rows.
+    sqlite3_limit(db, SQLITE_LIMIT_ATTACHED, 0);
+    return SQLITE_OK;
+}
 #endif
 
 } // namespace
 
-TEST_CASE("SchemaManager::getLatestVersion reports the baseline version", "[schema]") {
+TEST_CASE("SchemaManager::getLatestVersion includes the bundled privacy migration", "[schema]") {
     StorageService storage;
     SchemaManager manager(storage);
 
     int latest = manager.getLatestVersion();
-    REQUIRE(latest == 12);
+    REQUIRE(latest == 13);
 }
 
 TEST_CASE("SchemaManager::getStatus reports version info", "[schema]") {
@@ -197,7 +277,7 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(storage.init(tempDb.path()));
 
     SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 12);
+    REQUIRE(manager.getCurrentVersion() == 13);
     REQUIRE_FALSE(manager.needsMigration());
 
     REQUIRE(tableExists(storage, "activity_events"));
@@ -244,10 +324,11 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(columnExists(storage, "codex_thread_import_state", "baseline_tokens_used"));
     REQUIRE(indexExists(storage, "idx_codex_thread_import_state_provider_model"));
 
-    auto versions = storage.execute("SELECT version FROM schema_version;");
+    auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 1);
+    REQUIRE(versions.rowCount() == 2);
     CHECK(versions.getInt(0, 0) == 12);
+    CHECK(versions.getInt(1, 0) == 13);
 
     auto providers = storage.execute("SELECT provider_key FROM providers ORDER BY id;");
     REQUIRE(providers.success());
@@ -269,7 +350,8 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     CHECK(settings.getBool("ui.taskbar_overlay_enabled") == true);
 }
 
-TEST_CASE("StorageService preserves version 12 database settings on reopen", "[schema][migration][settings]") {
+TEST_CASE("StorageService preserves database settings on reopen without rewriting it",
+          "[schema][migration][settings]") {
     requireSqlite();
 
     TempTestDatabase tempDb;
@@ -285,12 +367,13 @@ TEST_CASE("StorageService preserves version 12 database settings on reopen", "[s
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    CHECK(manager.getCurrentVersion() == 12);
+    CHECK(manager.getCurrentVersion() == 13);
     CHECK_FALSE(manager.needsMigration());
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 1);
+    REQUIRE(versions.rowCount() == 2);
     CHECK(versions.getInt(0, 0) == 12);
+    CHECK(versions.getInt(1, 0) == 13);
     CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
     CHECK(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     storage.close();
@@ -304,6 +387,7 @@ TEST_CASE(
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
     REQUIRE(storage.execute("DELETE FROM providers WHERE provider_key = 'grok';").success());
     REQUIRE(storage.execute("UPDATE providers SET enabled = 0 WHERE provider_key = 'cursor';").success());
     REQUIRE(storage.execute("ALTER TABLE usage_events DROP COLUMN event_subsecond_ns;").success());
@@ -328,6 +412,7 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
 
     SettingsService settings(storage);
     REQUIRE(settings.setString("ui.last_selected_provider_id", "minimax"));
@@ -358,9 +443,10 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     REQUIRE(storage.init(tempDb.path()));
     REQUIRE(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
-    REQUIRE(versions.rowCount() == 2);
+    REQUIRE(versions.rowCount() == 3);
     CHECK(versions.getInt(0, 0) == 10);
     CHECK(versions.getInt(1, 0) == 12);
+    CHECK(versions.getInt(2, 0) == 13);
     const auto kimi = storage.execute("SELECT enabled FROM providers WHERE provider_key = 'kimi';");
     REQUIRE(kimi.rowCount() == 1);
     CHECK(kimi.getBool(0, 0) == hadAnalysisMigration);
@@ -404,11 +490,129 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     CHECK((readDatabaseFile(tempDb) == repaired));
 }
 
+TEST_CASE("StorageService upgrades legacy Claude references without reading the source cache", "[schema][migration]") {
+    requireSqlite();
+
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage
+                .execute(R"sql(
+        DELETE FROM schema_version WHERE version = 13;
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier) VALUES
+            (21, (SELECT id FROM providers WHERE provider_key = 'claude_code'), 'fixture-claude', 'Claude', 'user', 'fixture'),
+            (22, (SELECT id FROM providers WHERE provider_key = 'openai'), 'fixture-openai', 'OpenAI', 'user', 'fixture');
+        INSERT INTO activity_events
+            (id, provider_id, account_id, provider_surface, activity_kind, started_at_utc, duration_seconds,
+             source_type, source_run_id, surface_key, raw_reference)
+        SELECT id + 10, provider_id, id, 'claude_code_local_stats', 'session_active', '2025-01-02T00:00:00Z', 30,
+               'local', 'claude_code_local_v1|2025-01-02', 'stats-cache',
+               CASE WHEN id = 21 THEN 'C:/private-fixture/stats-cache.json|date=2025-01-02'
+                    ELSE 'C:/other-fixture/stats-cache.json|date=2025-01-02' END
+        FROM accounts WHERE id IN (21, 22);
+        INSERT INTO usage_events
+            (id, provider_id, account_id, event_time_utc, source_type, source_run_id, total_tokens,
+             is_backfilled, raw_reference)
+        SELECT id + 20, provider_id, id, '2025-01-02T00:00:00Z', 'provider_backfill',
+               'claude_code_local_v1|2025-01-02', 42, 1,
+               CASE WHEN id = 21 THEN 'C:/private-fixture/stats-cache.json'
+                    ELSE 'C:/other-fixture/stats-cache.json' END
+        FROM accounts WHERE id IN (21, 22);
+        -- Spread the same legacy reference across ordinary activity and usage pages.
+        WITH RECURSIVE days(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM days WHERE n < 90)
+        INSERT INTO activity_events
+            (provider_id, account_id, provider_surface, activity_kind, started_at_utc, duration_seconds,
+             source_type, source_run_id, surface_key, raw_reference)
+        SELECT provider_id, account_id, provider_surface, activity_kind,
+               datetime(started_at_utc, n || ' days'), duration_seconds,
+               source_type, source_run_id, surface_key, raw_reference
+        FROM activity_events CROSS JOIN days WHERE id = 31;
+        WITH RECURSIVE days(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM days WHERE n < 90)
+        INSERT INTO usage_events
+            (provider_id, account_id, event_time_utc, source_type, source_run_id, total_tokens,
+             is_backfilled, raw_reference)
+        SELECT provider_id, account_id, datetime(event_time_utc, n || ' days'), source_type, source_run_id,
+               total_tokens, is_backfilled, raw_reference
+        FROM usage_events CROSS JOIN days WHERE id = 41;
+    )sql")
+                .success());
+    SECTION("WAL database") {
+        const auto journalMode = storage.execute("PRAGMA main.journal_mode = WAL;");
+        REQUIRE(journalMode.success());
+        REQUIRE(journalMode.rowCount() == 1);
+        REQUIRE(journalMode.getString(0, 0) == "wal");
+    }
+    storage.close();
+
+    constexpr auto legacyPath = "C:/private-fixture/stats-cache.json";
+    REQUIRE(readDatabaseFile(tempDb).find(legacyPath) != std::string::npos);
+
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    SECTION("Failed compaction leaves the upgrade pending") {
+        const auto extension = reinterpret_cast<void (*)()>(installCompactionFailure);
+        REQUIRE(sqlite3_auto_extension(extension) == SQLITE_OK);
+        const bool opened = storage.init(tempDb.path());
+        sqlite3_cancel_auto_extension(extension);
+        REQUIRE_FALSE(opened);
+        CHECK(storage.getLastError().find("Cannot compact the database") != std::string::npos);
+        CHECK(readDatabaseFile(tempDb).find(legacyPath) != std::string::npos);
+
+        sqlite3* connection = nullptr;
+        const int openedRaw = sqlite3_open_v2(tempDb.path().c_str(), &connection, SQLITE_OPEN_READONLY, nullptr);
+        const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(connection, sqlite3_close);
+        REQUIRE(openedRaw == SQLITE_OK);
+        sqlite3_stmt* query = nullptr;
+        REQUIRE(sqlite3_prepare_v2(db.get(), "SELECT MAX(version) FROM schema_version;", -1, &query, nullptr) ==
+                SQLITE_OK);
+        const std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> version(query, sqlite3_finalize);
+        REQUIRE(sqlite3_step(version.get()) == SQLITE_ROW);
+        CHECK(sqlite3_column_int(version.get(), 0) == 12);
+    }
+#endif
+    SECTION("Rollback-journal database") {}
+
+    REQUIRE(storage.init(tempDb.path()));
+    SchemaManager manager(storage);
+    CHECK(manager.getCurrentVersion() == 13);
+    constexpr auto hashedPath = "scope:fnv1a64:1370ad0dcd1472bd";
+    const auto activity =
+        storage.execute("SELECT id, raw_reference, duration_seconds FROM activity_events ORDER BY id;");
+    REQUIRE(activity.success());
+    REQUIRE(activity.rowCount() == 92);
+    CHECK(activity.getInt(0, 0) == 31);
+    CHECK(activity.getString(0, 1) == hashedPath);
+    CHECK(activity.getInt(0, 2) == 30);
+    CHECK(activity.getString(1, 1) == "C:/other-fixture/stats-cache.json|date=2025-01-02");
+    for (size_t row = 2; row < activity.rowCount(); ++row) {
+        CHECK(activity.getString(row, 1) == hashedPath);
+    }
+    const auto usage = storage.execute("SELECT id, raw_reference, total_tokens FROM usage_events ORDER BY id;");
+    REQUIRE(usage.success());
+    REQUIRE(usage.rowCount() == 92);
+    CHECK(usage.getInt(0, 0) == 41);
+    CHECK(usage.getString(0, 1) == hashedPath);
+    CHECK(usage.getInt(0, 2) == 42);
+    CHECK(usage.getString(1, 1) == "C:/other-fixture/stats-cache.json");
+    for (size_t row = 2; row < usage.rowCount(); ++row) {
+        CHECK(usage.getString(row, 1) == hashedPath);
+    }
+    // A WAL database must have the compacted pages in the main file before close.
+    CHECK(readDatabaseFile(tempDb).find(legacyPath) == std::string::npos);
+    storage.close();
+
+    const auto upgraded = readDatabaseFile(tempDb);
+    CHECK(upgraded.find(legacyPath) == std::string::npos);
+    REQUIRE(storage.init(tempDb.path()));
+    storage.close();
+    CHECK((readDatabaseFile(tempDb) == upgraded));
+}
+
 TEST_CASE("StorageService supports overlapping opens during historical baseline repair", "[schema][migration]") {
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
     SettingsService settings(storage);
     REQUIRE(settings.setString("ui.last_selected_provider_id", "minimax"));
     removeHistoricalAnalysisSchema(storage);
@@ -449,12 +653,76 @@ TEST_CASE("StorageService supports overlapping opens during historical baseline 
 #endif
 }
 
+TEST_CASE("StorageService supports overlapping WAL opens during the Claude upgrade", "[schema][migration]") {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    const auto journalMode = storage.execute("PRAGMA main.journal_mode = WAL;");
+    REQUIRE(journalMode.success());
+    REQUIRE(journalMode.getString(0, 0) == "wal");
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
+    storage.close();
+
+    WalCheckpointOverlap gate;
+    const auto extension = reinterpret_cast<void (*)()>(installWalCheckpointGate);
+    REQUIRE(sqlite3_auto_extension(extension) == SQLITE_OK);
+    const auto open = [&](bool first) {
+        walOverlap = &gate;
+        firstWalOpener = first;
+        StorageService connection;
+        if (!connection.init(tempDb.path())) {
+            return connection.getLastError();
+        }
+        const auto timeout = connection.execute("PRAGMA busy_timeout;");
+        if (!timeout.success() || timeout.rowCount() != 1 || timeout.getInt(0, 0) != 5000) {
+            return std::string("The upgrade did not restore the connection busy timeout");
+        }
+        return SchemaManager(connection).getCurrentVersion() == 13 ? std::string{} : "Version 13 was not recorded";
+    };
+
+    auto first = std::async(std::launch::async, open, true);
+    const bool firstReady = gate.waitFor(WalCheckpointOverlap::FirstReady);
+    auto second = std::async(std::launch::async, open, false);
+    const bool secondReady = gate.waitFor(WalCheckpointOverlap::SecondReady);
+
+    sqlite3* connection = nullptr;
+    const int opened = sqlite3_open_v2(tempDb.path().c_str(), &connection, SQLITE_OPEN_READONLY, nullptr);
+    int read = opened;
+    if (opened == SQLITE_OK) {
+        read = sqlite3_exec(connection, "BEGIN; SELECT MAX(version) FROM schema_version;", nullptr, nullptr, nullptr);
+    }
+    gate.advance(WalCheckpointOverlap::ReaderReady);
+    const bool secondReturned = gate.waitFor(WalCheckpointOverlap::SecondReturned);
+    sqlite3_close(connection);
+    gate.advance(WalCheckpointOverlap::ReaderClosed);
+
+    const auto firstError = first.get();
+    const auto secondError = second.get();
+    sqlite3_cancel_auto_extension(extension);
+    REQUIRE(firstReady);
+    REQUIRE(secondReady);
+    REQUIRE(opened == SQLITE_OK);
+    REQUIRE(read == SQLITE_OK);
+    REQUIRE(secondReturned);
+    REQUIRE_FALSE(gate.timedOut);
+    INFO("First open: " << firstError << ", second open: " << secondError);
+    CHECK(firstError.empty());
+    CHECK(secondError.empty());
+#else
+    requireSqlite();
+#endif
+}
+
 TEST_CASE("StorageService does not bootstrap after a failed version read", "[schema][migration]") {
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
-    REQUIRE(storage.execute("UPDATE schema_version SET version = 11;").success());
+    REQUIRE(storage
+                .execute("DELETE FROM schema_version; INSERT INTO schema_version (version, description) VALUES (11, "
+                         "'Unsupported fixture');")
+                .success());
     storage.close();
     const auto before = readDatabaseFile(tempDb);
 
@@ -483,7 +751,10 @@ TEST_CASE("StorageService rejects databases older than the baseline", "[schema][
 
     REQUIRE(storage.init(tempDb.path()));
 
-    REQUIRE(storage.execute("UPDATE schema_version SET version = 11;").success());
+    REQUIRE(storage
+                .execute("DELETE FROM schema_version; INSERT INTO schema_version (version, description) VALUES (11, "
+                         "'Unsupported fixture');")
+                .success());
     storage.close();
     const auto before = readDatabaseFile(tempDb);
 

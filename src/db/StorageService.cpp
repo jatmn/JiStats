@@ -1,4 +1,5 @@
 #include "db/StorageService.hpp"
+#include "core/LocalPathReference.hpp"
 #include "db/QueryResult.hpp"
 #include "db/SchemaManager.hpp"
 #include <filesystem>
@@ -7,6 +8,7 @@
 #include <iomanip>
 #include <cstdlib>
 #include <map>
+#include <new>
 #include <tuple>
 
 #ifdef _WIN32
@@ -474,6 +476,28 @@ bool StorageService::init(const std::string& dbPath) {
         return false;
     }
 
+    const auto hashReference = [](sqlite3_context* context, int, sqlite3_value** values) {
+        const auto* path = reinterpret_cast<const char*>(sqlite3_value_text(values[0]));
+        if (path == nullptr) {
+            sqlite3_result_null(context);
+            return;
+        }
+        try {
+            const auto length = static_cast<size_t>(sqlite3_value_bytes(values[0]));
+            const auto reference = localPathReference(std::string_view(path, length));
+            sqlite3_result_text(context, reference.c_str(), -1, SQLITE_TRANSIENT);
+        } catch (const std::bad_alloc&) {
+            sqlite3_result_error_nomem(context);
+        }
+    };
+    if (sqlite3_create_function_v2(pImpl->db, "jistats_path_reference", 1,
+                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC | SQLITE_DIRECTONLY, nullptr, hashReference,
+                                   nullptr, nullptr, nullptr) != SQLITE_OK) {
+        pImpl->lastError = "Failed to register local path reference normalization";
+        close();
+        return false;
+    }
+
     // Give concurrent readers/writers a short grace period before surfacing
     // SQLITE_BUSY so background retention/recovery work can coexist with tests.
     sqlite3_busy_timeout(pImpl->db, 5000);
@@ -735,9 +759,8 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     auto activityEventExists = [this](const PersistedActivityEvent& candidate) -> std::optional<bool> {
-        std::string sql =
-            "SELECT 1 FROM activity_events "
-            "WHERE provider_id = ? AND account_id = ? AND ";
+        std::string sql = "SELECT 1 FROM activity_events "
+                          "WHERE provider_id = ? AND account_id = ? AND ";
         std::vector<std::string> params = {
             std::to_string(candidate.providerId),
             std::to_string(candidate.accountId)
@@ -2997,7 +3020,8 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
         return true;
     }
 
-    if (!beginTransaction()) {
+    const bool ownsTransaction = sqlite3_get_autocommit(pImpl->db) != 0;
+    if (ownsTransaction && !beginTransaction()) {
         pImpl->lastError = "Failed to begin transaction for usage events";
         return false;
     }
@@ -3062,7 +3086,9 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         pImpl->lastError = "Failed to prepare usage events insert statement";
-        rollbackTransaction();
+        if (ownsTransaction) {
+            rollbackTransaction();
+        }
         return false;
     }
 
@@ -3137,13 +3163,16 @@ bool StorageService::insertUsageEvents(const std::vector<PersistedUsageEvent>& e
 
     sqlite3_finalize(stmt);
 
-    if (success) {
-        if (!commitTransaction()) {
+    if (ownsTransaction) {
+        if (!success) {
+            const std::string error = pImpl->lastError;
+            rollbackTransaction();
+            pImpl->lastError = error;
+        } else if (!commitTransaction()) {
+            rollbackTransaction();
             pImpl->lastError = "Failed to commit usage events";
             return false;
         }
-    } else {
-        rollbackTransaction();
     }
 
     return success;

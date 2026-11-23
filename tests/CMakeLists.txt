@@ -134,3 +134,11 @@ set_target_properties(JiStatsTests PROPERTIES
 # Register with CTest (run from repo root so relative fixture paths work)
 add_test(NAME JiStatsTests COMMAND $<TARGET_FILE:JiStatsTests> "*" --order rand)
 set_tests_properties(JiStatsTests PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME JiStatsRuntimeStatusNonUtc COMMAND $<TARGET_FILE:JiStatsTests> "[runtime_status]")
+    set_tests_properties(JiStatsRuntimeStatusNonUtc PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        ENVIRONMENT "TZ=PST8PDT,M3.2.0,M11.1.0"
+    )
+endif()

@@ -25,7 +25,8 @@ void execSql(sqlite3* db, const char* sql) {
     if (err) sqlite3_free(err);
 }
 
-void writeCodexStateDb(const std::string& path, long long tokens, long long newThreadTokens = -1) {
+void writeCodexStateDb(const std::string& path, long long tokens, long long newThreadTokens = -1,
+                       const char* newThreadProvider = "hicap-ai") {
     sqlite3* db = nullptr;
     REQUIRE(sqlite3_open(path.c_str(), &db) == SQLITE_OK);
     execSql(db,
@@ -46,12 +47,12 @@ void writeCodexStateDb(const std::string& path, long long tokens, long long newT
     sqlite3_finalize(stmt);
     if (newThreadTokens >= 0) {
         REQUIRE(sqlite3_prepare_v2(db,
-            "INSERT INTO threads (id, model_provider, model, reasoning_effort, tokens_used, created_at_ms, updated_at_ms) "
-            "VALUES ('thread-2', 'hicap-ai', 'gpt-5.5', 'medium', ?, 1700010900000, 1700010900000);",
-            -1,
-            &stmt,
-            nullptr) == SQLITE_OK);
-        sqlite3_bind_int64(stmt, 1, newThreadTokens);
+                                   "INSERT INTO threads (id, model_provider, model, reasoning_effort, tokens_used, "
+                                   "created_at_ms, updated_at_ms) "
+                                   "VALUES ('thread-2', ?, 'gpt-5.5', 'medium', ?, 1700010900000, 1700010900000);",
+                                   -1, &stmt, nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_bind_text(stmt, 1, newThreadProvider, -1, SQLITE_TRANSIENT) == SQLITE_OK);
+        REQUIRE(sqlite3_bind_int64(stmt, 2, newThreadTokens) == SQLITE_OK);
         REQUIRE(sqlite3_step(stmt) == SQLITE_DONE);
         sqlite3_finalize(stmt);
     }
@@ -152,5 +153,106 @@ TEST_CASE("CodexLocalUsageImporter retries an incomplete consent baseline withou
     REQUIRE(later.success);
     CHECK(countUsageEvents(storage) == 1);
     CHECK(totalUsageTokens(storage) == 50);
+#endif
+}
+
+TEST_CASE("CodexLocalUsageImporter retries later checkpoint writes without counting overlapping deltas",
+          "[codex][storage][import]") {
+#if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
+    SKIP("SQLite unavailable");
+#else
+    TempTestDatabase appDb;
+    TempTestDatabase sourceDb;
+    StorageService storage;
+    REQUIRE(storage.init(appDb.path()));
+    CodexLocalUsageImporter importer(storage);
+    const bool newThread = GENERATE(false, true);
+    CAPTURE(newThread);
+
+    writeCodexStateDb(sourceDb.path(), 1000);
+    REQUIRE(importer.importFromSource(sourceDb.path(), 1700007200, 2).success);
+    CHECK(countUsageEvents(storage) == 0);
+
+    const std::string failure = newThread ? "INSERT" : "UPDATE";
+    const std::string thread = newThread ? "thread-2" : "thread-1";
+    REQUIRE(storage
+                .execute("CREATE TRIGGER reject_checkpoint BEFORE " + failure +
+                         " ON codex_thread_import_state WHEN NEW.thread_id = '" + thread +
+                         "' BEGIN SELECT RAISE(ABORT, 'test checkpoint failure'); END;")
+                .success());
+    std::filesystem::remove(sourceDb.path());
+    writeCodexStateDb(sourceDb.path(), 1250, newThread ? 300 : -1);
+    const auto failed = importer.importFromSource(sourceDb.path(), 1700010800, 2);
+    REQUIRE_FALSE(failed.success);
+    CHECK(failed.error.find("Failed to upsert Codex thread import state") != std::string::npos);
+    CHECK(failed.deltaEventsInserted == 0);
+    CHECK(totalUsageTokens(storage) == 0);
+
+    REQUIRE(storage.execute("DROP TRIGGER reject_checkpoint;").success());
+    storage.close();
+    REQUIRE(storage.init(appDb.path()));
+    std::filesystem::remove(sourceDb.path());
+    writeCodexStateDb(sourceDb.path(), 1350, newThread ? 400 : -1);
+    const auto retry = importer.importFromSource(sourceDb.path(), 1700014400, 2);
+    REQUIRE(retry.success);
+    const int expectedEvents = newThread ? 2 : 1;
+    const int expectedTokens = newThread ? 750 : 350;
+    CHECK(retry.deltaEventsInserted == expectedEvents);
+    CHECK(countUsageEvents(storage) == expectedEvents);
+    CHECK(totalUsageTokens(storage) == expectedTokens);
+
+    const auto repeated = importer.importFromSource(sourceDb.path(), 1700018000, 2);
+    REQUIRE(repeated.success);
+    CHECK(repeated.deltaEventsInserted == 0);
+    CHECK(countUsageEvents(storage) == expectedEvents);
+    CHECK(totalUsageTokens(storage) == expectedTokens);
+#endif
+}
+
+TEST_CASE("CodexLocalUsageImporter stops when an account write rolls the scan back", "[codex][storage][import]") {
+#if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
+    SKIP("SQLite unavailable");
+#else
+    TempTestDatabase appDb;
+    TempTestDatabase sourceDb;
+    StorageService storage;
+    REQUIRE(storage.init(appDb.path()));
+    CodexLocalUsageImporter importer(storage);
+
+    writeCodexStateDb(sourceDb.path(), 1000);
+    REQUIRE(importer.importFromSource(sourceDb.path(), 1700007200, 2).success);
+
+    REQUIRE(storage
+                .execute("CREATE TRIGGER reject_openai_account BEFORE INSERT ON accounts "
+                         "WHEN NEW.account_key = 'openai.codex_local_sqlite' "
+                         "BEGIN SELECT RAISE(ROLLBACK, 'test account rollback'); END; "
+                         "CREATE TRIGGER reject_thread_checkpoint BEFORE UPDATE ON codex_thread_import_state "
+                         "BEGIN SELECT RAISE(ABORT, 'test checkpoint failure after account rollback'); END;")
+                .success());
+
+    // The earlier HICAP thread has a pending delta when the OpenAI account write rolls back.
+    std::filesystem::remove(sourceDb.path());
+    writeCodexStateDb(sourceDb.path(), 1250, 300, "openai");
+    const auto failed = importer.importFromSource(sourceDb.path(), 1700010800, 2);
+    REQUIRE_FALSE(failed.success);
+    CHECK(failed.error == "Could not bind a Codex thread to its local account");
+    CHECK(countUsageEvents(storage) == 0);
+    const auto checkpoints =
+        storage.execute("SELECT thread_id, last_imported_tokens_used FROM codex_thread_import_state;");
+    REQUIRE(checkpoints.success());
+    REQUIRE(checkpoints.rowCount() == 1);
+    CHECK(checkpoints.getString(0, 0) == "thread-1");
+    CHECK(checkpoints.getInt64(0, 1) == 1000);
+
+    REQUIRE(storage.execute("DROP TRIGGER reject_openai_account; DROP TRIGGER reject_thread_checkpoint;").success());
+    storage.close();
+    REQUIRE(storage.init(appDb.path()));
+    std::filesystem::remove(sourceDb.path());
+    writeCodexStateDb(sourceDb.path(), 1350, 400, "openai");
+    const auto retry = importer.importFromSource(sourceDb.path(), 1700014400, 2);
+    REQUIRE(retry.success);
+    CHECK(retry.deltaEventsInserted == 2);
+    CHECK(countUsageEvents(storage) == 2);
+    CHECK(totalUsageTokens(storage) == 750);
 #endif
 }

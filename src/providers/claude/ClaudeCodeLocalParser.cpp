@@ -1,5 +1,6 @@
 #include "providers/claude/ClaudeCodeLocalParser.hpp"
 #include "core/JsonParser.hpp"
+#include "core/LocalPathReference.hpp"
 #include "db/StorageService.hpp"
 #include "observation/ObservationPersistenceBridge.hpp"
 #include <cmath>
@@ -258,6 +259,7 @@ std::vector<UsageEvent> ClaudeCodeLocalParser::toUsageEvents(const ClaudeCodeLoc
     }
 
     const std::string sourceRunId = std::string(kParserVersion) + "|" + result.lastComputedDate;
+    const std::string reference = localPathReference(result.statsCachePath);
 
     for (const auto& day : result.dailyModelTokens) {
         const std::time_t dayTime = parseDateToUnixTime(day.date);
@@ -275,7 +277,7 @@ std::vector<UsageEvent> ClaudeCodeLocalParser::toUsageEvents(const ClaudeCodeLoc
             event.costMinorUnits = 0;
             event.sourceType = "local";
             event.sourceRunId = sourceRunId;
-            event.rawReference = result.statsCachePath;
+            event.rawReference = reference;
             events.push_back(std::move(event));
         }
     }
@@ -294,7 +296,7 @@ std::vector<UsageEvent> ClaudeCodeLocalParser::toUsageEvents(const ClaudeCodeLoc
             event.costMinorUnits = static_cast<long long>(model.costUsd * 10000.0);
             event.sourceType = "local";
             event.sourceRunId = sourceRunId;
-            event.rawReference = result.statsCachePath;
+            event.rawReference = reference;
             events.push_back(std::move(event));
         }
     }
@@ -309,6 +311,7 @@ std::vector<ActivityEvent> ClaudeCodeLocalParser::toActivityEvents(const ClaudeC
     }
 
     const std::string sourceRunId = std::string(kParserVersion) + "|" + result.lastComputedDate;
+    const std::string reference = localPathReference(result.statsCachePath);
 
     for (const auto& day : result.dailyActivity) {
         const std::time_t dayTime = parseDateToUnixTime(day.date);
@@ -328,7 +331,7 @@ std::vector<ActivityEvent> ClaudeCodeLocalParser::toActivityEvents(const ClaudeC
         event.surfaceKey = "stats-cache";
         event.windowTitleHint = result.defaultModel;
         event.confidence = ActivityConfidence::LocalExact;
-        event.rawReference = result.statsCachePath + "|date=" + day.date;
+        event.rawReference = reference;
         events.push_back(std::move(event));
     }
 

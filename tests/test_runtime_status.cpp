@@ -1,5 +1,6 @@
 #include <catch_amalgamated.hpp>
 
+#include <string>
 #include <vector>
 
 #include "core/RuntimeStatus.hpp"
@@ -28,12 +29,13 @@ TEST_CASE("RuntimeStatus describes offline entry and recovery transitions", "[ru
 }
 
 TEST_CASE("RuntimeStatus parses and formats runtime timestamps across supported formats", "[runtime_status]") {
-    const std::time_t utcFormat = parseRuntimeTimestamp("2026-04-18 00:00:00 UTC");
-    const std::time_t isoFormat = parseRuntimeTimestamp("2026-04-18T00:00:00Z");
+    constexpr std::time_t midnightUtc = 1776470400; // 2026-04-18T00:00:00Z
+    const std::string utc = "2026-04-18 00:00:00 UTC";
+    const std::string iso = "2026-04-18T00:00:00Z";
 
-    REQUIRE(utcFormat > 0);
-    CHECK(utcFormat == isoFormat);
+    CHECK(parseRuntimeTimestamp(utc) == midnightUtc);
+    CHECK(parseRuntimeTimestamp(iso) == midnightUtc);
 
-    CHECK(formatRuntimeTimeAgo("2026-04-18 00:00:00 UTC", utcFormat + 120) == "2 mins ago");
-    CHECK(formatRuntimeTimeAgo("2026-04-18T00:00:00Z", isoFormat + 7200) == "2 hours ago");
+    CHECK(formatRuntimeTimeAgo(utc, midnightUtc + 120) == "2 mins ago");
+    CHECK(formatRuntimeTimeAgo(iso, midnightUtc + 7200) == "2 hours ago");
 }

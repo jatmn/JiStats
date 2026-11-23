@@ -5,7 +5,7 @@ is_native_ci_input() {
         docs/fixtures/*) return 0 ;;
         docs/*.md | README.md | AGENTS.md | CONTRIBUTING.md | SECURITY.md | LICENSE | .gitignore)
             return 1 ;;
-        scripts/pullfrog-command-check.mjs | scripts/pullfrog-review-check.mjs | scripts/pullfrog-review-check.test.mjs)
+        scripts/pullfrog-command-check.mjs | scripts/pullfrog-command-check.test.mjs | scripts/pullfrog-review-check.mjs | scripts/pullfrog-review-check.test.mjs)
             # The independent Pullfrog checks workflow runs the authorization suite.
             return 1 ;;
         *) return 0 ;;
