@@ -305,8 +305,12 @@ jobs:
         run: |
           set -eu
           echo "Event=$EVENT detection=$DETECT build=$BUILD Portable=$PORTABLE cross=$LINUX Windows=$WINDOWS"
-          if [[ $EVENT == pull_request && $DETECT == success && $BUILD == false ]]; then
-            [[ $PORTABLE == skipped && $LINUX == skipped && $WINDOWS == skipped ]]
-            exit
+          if [[ $EVENT == pull_request ]]; then
+            [[ $DETECT == success ]]
+            if [[ $BUILD == false ]]; then
+              [[ $PORTABLE == skipped && $LINUX == skipped && $WINDOWS == skipped ]]
+              exit
+            fi
+            [[ $BUILD == true ]]
           fi
           [[ $PORTABLE == success && $LINUX == success && $WINDOWS == success ]]
