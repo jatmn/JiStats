@@ -4,9 +4,12 @@ set -euo pipefail
 if [[ ${1:-} == --pre-push ]]; then
     start=$EPOCHREALTIME
     target=${JISTATS_PR_BASE:-origin/main}
+    declare -A verified=()
     check_push() {
         local revision=$1 base
         if [[ $revision =~ ^0+$ ]]; then return 0; fi
+        if [[ ${verified[$revision]+present} ]]; then return 0; fi
+        verified[$revision]=1
         base=$(git merge-base "$target" "$revision") || return 1
         JISTATS_PUSH_CHECK=1 bash "$0" "$base" "$revision"
     }
