@@ -160,23 +160,57 @@ jobs:
       CCACHE_COMPILERCHECK: content
       CCACHE_NODIRECT: 'true'
     steps:
-      - name: Install MinGW-w64 and ImageMagick in parallel with checkout and cache restore
-        id: toolchain
+      - name: Identify MinGW packages
+        id: packages
         if: vars.JISTATS_LINUX_BUILD_RUNNER == ''
         run: |
           set -euo pipefail
+          source /etc/os-release
+          packages=(g++-mingw-w64-x86-64-posix imagemagick ccache)
+          if ! command -v ninja >/dev/null; then
+            packages+=(ninja-build)
+          fi
+          versions=$(LC_ALL=C apt-cache policy "${packages[@]}" | sed -n '/^[^ ]/p; /Candidate: /p')
+          fingerprint=$(printf '%s\n' "${ImageVersion:-}" "${packages[*]}" "$versions" | sha256sum | cut -d ' ' -f1)
+          prefix="jistats-mingw-apt-v1-$VERSION_CODENAME-$RUNNER_ARCH-"
+          {
+            echo "key=$prefix$fingerprint"
+            echo "prefix=$prefix"
+            echo "names=${packages[*]}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Restore MinGW package archives
+        id: apt-cache
+        if: steps.packages.outputs.key != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/jistats-apt/*.deb
+          key: ${{ steps.packages.outputs.key }}
+          restore-keys: ${{ steps.packages.outputs.prefix }}
+      - name: Install MinGW-w64 and ImageMagick in parallel with checkout and cache restore
+        id: toolchain
+        if: steps.packages.outputs.key != ''
+        env:
+          PACKAGES: ${{ steps.packages.outputs.names }}
+        run: |
+          set -euo pipefail
           setup_dir=$(mktemp -d "$RUNNER_TEMP/jistats-toolchain.XXXXXXXX")
+          read -ra packages <<< "$PACKAGES"
           exec {setup_lock}>"$setup_dir/install.lock"
           flock -x "$setup_lock"
           (
             trap 'printf "%s\n" "$?" > "$setup_dir/install.status"' EXIT
-            packages=(g++-mingw-w64-x86-64-posix imagemagick ccache)
-            if ! command -v ninja >/dev/null; then
-              packages+=(ninja-build)
+            # APT's _apt user can traverse its archive directory on hosted runners.
+            shopt -s nullglob
+            cached=("$RUNNER_TEMP/jistats-apt"/*.deb)
+            if (( ${#cached[@]} )); then
+              sudo cp -- "${cached[@]}" /var/cache/apt/archives/
             fi
             # The hosted VM is discarded after this job. Its toolchain needs
             # neither crash-recovery flushes nor a daemon restart scan.
-            install=(sudo env NEEDRESTART_SUSPEND=1 apt-get -o Dpkg::Options::=--force-unsafe-io install -y --no-install-recommends)
+            install=(sudo env NEEDRESTART_SUSPEND=1 apt-get
+              -o Dpkg::Options::=--force-unsafe-io
+              -o APT::Keep-Downloaded-Packages=true
+              install -y --no-install-recommends)
             if ! "${install[@]}" "${packages[@]}"; then
               sudo apt-get update
               "${install[@]}" "${packages[@]}"
@@ -279,6 +313,29 @@ jobs:
           # A Windows-only retry needs the same inputs throughout the 30-day rerun window.
           retention-days: 30
           overwrite: true
+      - name: Prepare MinGW package archives for caching
+        id: seed-packages
+        if: >-
+          github.event_name == 'push' && github.ref_name == github.event.repository.default_branch &&
+          steps.toolchain.outputs.directory != '' && steps.apt-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get autoclean
+          shopt -s nullglob
+          archives=(/var/cache/apt/archives/*.deb)
+          if (( ${#archives[@]} )); then
+            cache_dir="$RUNNER_TEMP/jistats-apt"
+            mkdir -p "$cache_dir"
+            rm -f -- "$cache_dir"/*.deb
+            cp -- "${archives[@]}" "$cache_dir/"
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Seed MinGW package archives
+        if: steps.seed-packages.outputs.ready == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/jistats-apt/*.deb
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
   windows-tests:
     name: Windows tests (shard ${{ matrix.shard }})

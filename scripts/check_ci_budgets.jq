@@ -19,7 +19,8 @@ def setup_step:
     | any(
         "set up job", "run actions/checkout", "check out the tested",
         "checkout trusted", "install ", "run actions/download-artifact",
-        "initialize codeql", "fetch c++ dependency", "restore compiler results";
+        "initialize codeql", "fetch c++ dependency", "restore compiler results",
+        "identify mingw packages", "restore mingw package archives";
         . as $prefix | $name | startswith($prefix)
     );
 
