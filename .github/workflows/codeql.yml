@@ -3,7 +3,7 @@ name: CodeQL analysis
 on:
   merge_group:
   pull_request:
-    branches: [main, 'release/**']
+    branches: [main, 'release/**', bench/combined-ci-dr]
   push:
     branches: [main, 'release/**']
   schedule:

@@ -3,7 +3,7 @@ name: Lint
 on:
   merge_group:
   pull_request:
-    branches: [main, 'release/**']
+    branches: [main, 'release/**', bench/combined-ci-dr]
 
 concurrency:
   group: lint-${{ github.event.pull_request.number || github.ref }}

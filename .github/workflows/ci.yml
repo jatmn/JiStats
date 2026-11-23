@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, 'release/**']
+    branches: [main, 'release/**', bench/combined-ci-dr]
   merge_group:
   push:
     branches: [main, 'release/**']
