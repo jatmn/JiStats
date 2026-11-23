@@ -179,6 +179,8 @@ jobs:
       # Run from the checkout root so the suite can read the test fixtures.
       - name: Run Windows suite and diagnose intermittent restart stalls
         env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
           REPEAT_OFFLINE_NOTICE_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.repeat_offline_notice_tests }}
         shell: pwsh
         run: |
