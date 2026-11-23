@@ -2032,6 +2032,9 @@ public:
         if (context.match != nullptr) {
             return context.match;
         }
+        if (!context.hasTaskbarRect) {
+            return nullptr;
+        }
 
         EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
             auto* context = reinterpret_cast<Context*>(lParam);
@@ -2041,7 +2044,7 @@ public:
                 hwnd == context->self->taskbarWindow) {
                 return TRUE;
             }
-            if (!IsWindowVisible(hwnd) || !isLikelyTrafficMonitorWindow(hwnd)) {
+            if (!IsWindowVisible(hwnd)) {
                 return TRUE;
             }
 
@@ -2056,11 +2059,10 @@ public:
                 windowRect.right,
                 windowRect.bottom};
 
-            int score = rectWidth(candidate);
-            if (context->hasTaskbarRect && rectsIntersect(candidate, context->taskbarRect)) {
-                score += 100000;
+            if (!rectsIntersect(candidate, context->taskbarRect) || !isLikelyTrafficMonitorWindow(hwnd)) {
+                return TRUE;
             }
-            score += candidate.left;
+            const int score = rectWidth(candidate) + candidate.left;
 
             if (score > context->bestScore) {
                 context->bestScore = score;

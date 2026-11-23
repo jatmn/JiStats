@@ -116,6 +116,11 @@ class TaskbarWindowFixture {
 
     static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
         if (message == kAddTrayAnchor) {
+            // TrafficMonitor may also have a desktop window far above or below the taskbar.
+            if (CreateWindowExW(WS_EX_NOACTIVATE, L"STATIC", L"TrafficMonitor", WS_POPUP | WS_VISIBLE, 64, 200, 140, 36,
+                                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr) == nullptr) {
+                return FALSE;
+            }
             return CreateWindowExW(0, L"TrayNotifyWnd", L"", WS_CHILD | WS_VISIBLE, 420, 0, 180, 48, hwnd, nullptr,
                                    GetModuleHandleW(nullptr), nullptr) != nullptr;
         }
@@ -740,13 +745,15 @@ TEST_CASE("TaskbarPresenter recreates and repositions a lost surface without a r
         waitForSurface([&](const RECT& bounds) { return EqualRect(&initialBounds, &bounds) != 0; });
     REQUIRE(replacement != nullptr);
     REQUIRE(taskbar.addTrayAnchor());
-    REQUIRE(waitForSurface([&](const RECT& bounds) { return bounds.left < initialBounds.left; }) == replacement);
+    RECT trayAnchor{};
+    REQUIRE(GetWindowRect(FindWindowExW(taskbar.get(), nullptr, L"TrayNotifyWnd", nullptr), &trayAnchor) != 0);
+    REQUIRE(waitForSurface([&](const RECT& bounds) { return bounds.right == trayAnchor.left + 2; }) == replacement);
 
     REQUIRE(SendMessageTimeoutW(replacement, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 2000, &result) != 0);
     REQUIRE_FALSE(IsWindow(replacement));
     REQUIRE(presenter.isInitialized());
     presenter.replaceMetrics({makeMetrics("openai", 25, 100)});
-    REQUIRE(waitForSurface([&](const RECT& bounds) { return bounds.left < initialBounds.left; }) != nullptr);
+    REQUIRE(waitForSurface([&](const RECT& bounds) { return bounds.right == trayAnchor.left + 2; }) != nullptr);
     const auto metrics = presenter.getCurrentMetrics();
     REQUIRE(metrics.size() == 1);
     CHECK(metrics[0].providerKey == "openai");
