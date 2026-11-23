@@ -1649,6 +1649,62 @@ TEST_CASE("AppController applies a custom Analysis edit alongside a Settings cha
     CHECK(settings.getString("ui.analysis_custom_range_start_utc") == "2026-04-01T00:00:00Z");
 }
 
+TEST_CASE("AppController skips new quota requests after an opt-out during refresh", "[app][runtime][polling]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, false, true);
+    TempTestDirectory emptyProviderHome("jistats-opt-out-provider-home");
+    ScopedEnvironmentVariable codexHome("CODEX_HOME", emptyProviderHome.path().string());
+    ScopedEnvironmentVariable claudeHome("CLAUDE_CONFIG_DIR", emptyProviderHome.path().string());
+
+    const auto now = std::time(nullptr);
+    std::promise<void> releaseFirst;
+    auto first = std::make_shared<ControlledQuotaProviderAdapter>(
+        "claude_code", "Claude Code", makeQuotaResponse(now, 0, 100, "local", "claude_code_local"),
+        releaseFirst.get_future().share(), 2);
+    auto openai = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 20, 100, "interval", "openai_subscription_codex_local"));
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(first);
+    providers->addProvider(openai);
+
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+    REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+
+    HWND checkbox = nullptr;
+    REQUIRE(waitForCondition([&]() {
+        checkbox = GetDlgItem(FindWindowW(L"JiStatsPreferencesWindow", nullptr), 1102);
+        return checkbox != nullptr && SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }));
+    const int fetchedBeforeOptOut = openai->getQuotaFetchCount();
+    REQUIRE(fetchedBeforeOptOut > 0);
+
+    auto underway = std::async(std::launch::async, [&]() { app.refreshRuntimeForTesting(); });
+    const bool heldBeforeOpenAI =
+        waitForCondition([&]() { return first->getQuotaFetchCount() > first->getCompletedQuotaFetchCount(); });
+    auto competing = std::async(std::launch::async, [&]() { app.refreshRuntimeForTesting(); });
+
+    SendMessageW(checkbox, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(GetParent(checkbox), WM_COMMAND, MAKEWPARAM(1102, BN_CLICKED), reinterpret_cast<LPARAM>(checkbox));
+    releaseFirst.set_value();
+    underway.get();
+    competing.get();
+    app.shutdown();
+
+    CHECK(heldBeforeOpenAI);
+    CHECK(openai->getQuotaFetchCount() == fetchedBeforeOptOut);
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    SettingsService settings(storage);
+    CHECK(settings.getBool("runtime.openai_subscription_tracking_enabled") == false);
+}
+
 TEST_CASE("AppController dashboard shell menu opens settings help and about windows", "[app][shell]") {
     auto providerManager = std::make_shared<ProviderManager>();
     ScopedTrayTestHandler handler([](TrayController::TestOperation,

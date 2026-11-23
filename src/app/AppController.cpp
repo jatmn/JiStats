@@ -3843,6 +3843,7 @@ public:
     std::atomic<unsigned> subscriptionWatchMask{0};
     std::condition_variable interactionWorkCv;
     std::optional<DashboardPreferences> pendingInteractionPreferences;
+    std::optional<DashboardPreferences> activeInteractionPreferences;
     std::optional<AnalysisScopeState> pendingAnalysisScope;
     bool pendingProviderDiscoveryRefresh = false;
     bool pendingPersistedActivityRefresh = false;
@@ -4027,6 +4028,7 @@ public:
                     break;
                 }
                 preferences = pendingInteractionPreferences;
+                activeInteractionPreferences = preferences;
                 analysisScope = pendingAnalysisScope;
                 requiresProviderDiscoveryRefresh = pendingProviderDiscoveryRefresh;
                 requiresPersistedActivityRefresh = pendingPersistedActivityRefresh;
@@ -4039,6 +4041,10 @@ public:
             if (preferences.has_value()) {
                 const auto effectivePreferences =
                     refreshProviderRuntimeState(std::time(nullptr), true, true, &*preferences, analysisScope);
+                {
+                    std::lock_guard<std::mutex> lock(interactionWorkMutex);
+                    activeInteractionPreferences.reset();
+                }
                 runScheduledExportIfDue(std::time(nullptr));
                 refreshWatcherCv.notify_all();
 #ifdef JISTATS_ENABLE_TEST_HOOKS
@@ -4152,14 +4158,26 @@ public:
         return pollState.response;
     }
 
-    std::vector<QuotaResponse> fetchQuotaResponses(
-        const std::vector<std::shared_ptr<IProviderAdapter>>& providers,
-        std::time_t now,
-        QuotaRefresh& refresh) {
+    bool hasProviderOptOutInProgress(const std::string& providerKey) {
+        // A Settings request can be waiting for the refresh lock with the old opt-in still on disk.
+        std::lock_guard<std::mutex> lock(interactionWorkMutex);
+        return (activeInteractionPreferences &&
+                !isProviderTrackingEnabled(*activeInteractionPreferences, providerKey)) ||
+               (pendingInteractionPreferences &&
+                !isProviderTrackingEnabled(*pendingInteractionPreferences, providerKey));
+    }
+
+    std::vector<QuotaResponse> fetchQuotaResponses(std::vector<std::shared_ptr<IProviderAdapter>>& providers,
+                                                   std::time_t now, QuotaRefresh& refresh) {
         std::vector<QuotaResponse> responses;
         responses.reserve(providers.size());
-        for (const auto& provider : providers) {
+        for (auto nextProvider = providers.begin(); nextProvider != providers.end();) {
+            const auto& provider = *nextProvider;
             const auto key = provider->getProviderKey();
+            if (hasProviderOptOutInProgress(key)) {
+                nextProvider = providers.erase(nextProvider);
+                continue;
+            }
             if (refresh.deferNewSubscriptions && (key == "grok" || key == "cursor")) {
                 QuotaResponse pending;
                 pending.unavailable = true;
@@ -4168,6 +4186,7 @@ public:
             } else {
                 responses.push_back(fetchQuotaWithDirectApiBudget(provider, now, refresh));
             }
+            ++nextProvider;
         }
         return responses;
     }
@@ -6293,6 +6312,10 @@ public:
                 continue;
             }
 
+            if (hasProviderOptOutInProgress(provider.providerKey)) {
+                continue;
+            }
+
             // Attempt provider-side backfill for this provider's gap window
             UsageResponse usageResp = adapter->fetchUsage(recoveryStart, now);
             std::string backfillOutcome = usageResp.success ? "no_data" : "fetch_failed";
@@ -6625,7 +6648,7 @@ public:
         refresh.providerApiKeys.clear();
 #ifdef JISTATS_ENABLE_TEST_HOOKS
         if (testProviderManager) {
-            const auto providers = testProviderManager->getEnabledProviders();
+            auto providers = testProviderManager->getEnabledProviders();
             const auto quotaResponses = fetchQuotaResponses(providers, now, refresh);
             persistQuotaSnapshots(providers, quotaResponses, now);
             DashboardViewModel viewModel =
@@ -6639,7 +6662,7 @@ public:
         applyProviderDiscoveryStatusToViewModel(viewModel);
         return viewModel;
 #else
-        const auto providers = providerManager.getEnabledProviders();
+        auto providers = providerManager.getEnabledProviders();
         const auto quotaResponses = fetchQuotaResponses(providers, now, refresh);
         persistQuotaSnapshots(providers, quotaResponses, now);
         DashboardViewModel viewModel =
