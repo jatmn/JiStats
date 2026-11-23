@@ -41,6 +41,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          bash scripts/check_native_ci_selection.sh
+          source scripts/native_ci_input.sh
           build=true
           files="$RUNNER_TEMP/jistats-changed-files"
           # Selection is safe only when the target branch enforces a merge queue.
@@ -53,20 +55,7 @@ jobs:
             git diff --no-ext-diff --no-renames --name-only -z "$GITHUB_SHA^1" "$GITHUB_SHA" -- > "$files"; then
             build=false
             while IFS= read -r -d '' file; do
-              case "$file" in
-                # Keep all files in test payload directories as build inputs.
-                docs/fixtures/kimi/synthetic_local_runtime/* | docs/fixtures/openai/chatgpt-export-redacted/*)
-                  ;;
-                *.md)
-                  continue ;;
-                docs/fixtures/* | .github/workflows/ci.yml)
-                  ;;
-                docs/*)
-                  continue ;;
-                # Keep the existing PR-only exemption for non-build metadata and scripts.
-                .github/* | scripts/* | LICENSE | .gitignore | .clang-format | .clang-tidy | assets/logo.png)
-                  continue ;;
-              esac
+              is_native_ci_input "$file" || continue
               build=true
               printf -v reason '%q' "$file"
               break
