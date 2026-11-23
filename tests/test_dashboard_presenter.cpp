@@ -932,7 +932,6 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
 
     presenter.updateViewModel(model);
 
-    presenter.setVisible(true);
     const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
     REQUIRE(dashboard != nullptr);
     const HWND tabs = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
@@ -941,6 +940,7 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
     REQUIRE(viewport != nullptr);
     const HWND providers = FindWindowExW(viewport, nullptr, WC_LISTVIEWW, nullptr);
     REQUIRE(providers != nullptr);
+    REQUIRE(waitForCondition([&]() { return IsWindowVisible(dashboard) && ListView_GetItemCount(providers) > 0; }));
 
     RECT overviewTab{};
     REQUIRE(TabCtrl_GetItemRect(tabs, 0, &overviewTab));
@@ -952,6 +952,7 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
     input.cbSize = sizeof(input);
     REQUIRE(GetGUIThreadInfo(GetWindowThreadProcessId(tabs, nullptr), &input));
     REQUIRE(input.hwndFocus == tabs);
+    const std::uint64_t syncCount = presenter.getViewModelSyncCountForTesting();
 
     REQUIRE(PostMessageW(tabs, WM_KEYDOWN, VK_RIGHT, 0));
     REQUIRE(waitForCondition([&]() { return TabCtrl_GetCurSel(tabs) == 1 && IsWindowVisible(providers); }));
@@ -969,6 +970,7 @@ TEST_CASE("DashboardPresenter switches pages with arrow keys and populates the d
     const HWND analysis = FindWindowW(L"JiStatsAnalysisWindow", nullptr);
     REQUIRE(analysis != nullptr);
     CHECK(GetWindow(analysis, GW_OWNER) == dashboard);
+    CHECK(presenter.getViewModelSyncCountForTesting() == syncCount);
     const auto analysisRect = presenter.getAnalysisWindowRectForTesting();
     CHECK(analysisRect[2] > analysisRect[0]);
     CHECK(analysisRect[3] > analysisRect[1]);

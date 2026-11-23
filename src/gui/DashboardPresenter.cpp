@@ -1262,6 +1262,7 @@ public:
     HWND preferencesCloseButton = nullptr;
     std::string miniMaxFeedbackMessage;
     bool threadReady = false;
+    bool viewModelSyncPending = false;
     bool dashboardHighContrast = false;
     HFONT titleFont = nullptr;
     HFONT bodyFont = nullptr;
@@ -1275,6 +1276,14 @@ public:
     int overviewScroll = 0;
     int wheelDelta = 0;
     size_t quotaRowCount = 0;
+    struct OverviewLayout {
+        std::wstring offlineNoticeMessage;
+        bool offlineNoticeVisible = false;
+        bool offlineRetryAvailable = false;
+        int openAiModelRows = 0;
+        int hicapModelRows = 0;
+    };
+    OverviewLayout overviewLayout;
     HICON appIconLarge = nullptr;
     HICON appIconSmall = nullptr;
     HMENU mainMenu = nullptr;
@@ -2014,6 +2023,22 @@ public:
         analysisPresenter->layout(bounds);
     }
 
+    void initializeAnalysisControls(HWND hwnd) {
+        if (analysisPresenter == nullptr) {
+            return;
+        }
+
+        AnalysisViewModel model;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            model = viewModel.analysis;
+        }
+        analysisPresenter->init(hwnd);
+        analysisPresenter->setVisible(true);
+        analysisPresenter->updateViewModel(model);
+        layoutAnalysisWindowControls(hwnd);
+    }
+
     void openAnalysisWindow(bool bringToFront = true) {
         HWND existing = nullptr;
         {
@@ -2082,13 +2107,13 @@ public:
 
     void activateMainPage(int index) {
         selectedMainTab = index;
+        layoutMainControls();
         if (selectedMainTab == 2) {
             openAnalysisWindow(true);
         }
-        syncViewModelToControls();
     }
 
-    void syncMainTabVisibility(const DashboardViewModel& model) {
+    void syncMainTabVisibility() {
         const bool overview = selectedMainTab == 0;
         const HWND overviewControls[] = {appGroup,
                                          connectionLabel,
@@ -2114,9 +2139,9 @@ public:
         for (HWND control : overviewControls) {
             ShowWindow(control, overview ? SW_SHOWNA : SW_HIDE);
         }
-        ShowWindow(offlineRetryButton, overview && model.offlineRetryAvailable ? SW_SHOWNA : SW_HIDE);
+        ShowWindow(offlineRetryButton, overview && overviewLayout.offlineRetryAvailable ? SW_SHOWNA : SW_HIDE);
         for (HWND control : {offlineNoticeTitle, offlineNoticeMessage, offlineDismissButton}) {
-            ShowWindow(control, overview && model.offlineNoticeVisible ? SW_SHOWNA : SW_HIDE);
+            ShowWindow(control, overview && overviewLayout.offlineNoticeVisible ? SW_SHOWNA : SW_HIDE);
         }
         for (size_t index = 0; index < kMaxUsageRows; ++index) {
             const int flag = overview && index < quotaRowCount ? SW_SHOWNA : SW_HIDE;
@@ -2129,10 +2154,6 @@ public:
         }
         for (HWND control : {analysisLaunchTitle, analysisLaunchInfo, analysisLaunchButton}) {
             ShowWindow(control, selectedMainTab == 2 ? SW_SHOWNA : SW_HIDE);
-        }
-
-        if (analysisPresenter != nullptr) {
-            analysisPresenter->setVisible(analysisWindow != nullptr);
         }
     }
 
@@ -3057,7 +3078,7 @@ public:
         ensureUsageTooltip();
     }
 
-    void layoutMainControls(const DashboardViewModel& model) {
+    void layoutMainControls() {
         if (dashboardViewport == nullptr) {
             return;
         }
@@ -3080,7 +3101,7 @@ public:
         MoveWindow(dashboardViewport, 0, viewportTop, width, viewportHeight, FALSE);
 
         if (selectedMainTab == 0) {
-            layoutOverview(model, width, viewportHeight);
+            layoutOverview(width, viewportHeight);
         } else {
             ShowScrollBar(dashboardViewport, SB_VERT, FALSE);
             const int cardWidth = width - margin * 2;
@@ -3098,11 +3119,11 @@ public:
             MoveWindow(analysisLaunchInfo, left, px(57), innerWidth, std::max(0, buttonTop - px(68)), FALSE);
             MoveWindow(analysisLaunchButton, left, buttonTop, px(200), px(32), FALSE);
         }
-        syncMainTabVisibility(model);
+        syncMainTabVisibility();
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
-    void layoutOverview(const DashboardViewModel& model, int width, int height) {
+    void layoutOverview(int width, int height) {
         const auto px = [this](int value) { return scaledPixels(value); };
         const int left = px(24);
         const int gap = px(14);
@@ -3112,8 +3133,8 @@ public:
         const int innerLeft = left + inset;
         const int statusColumns = innerWidth >= px(720) ? 4 : 2;
         const int statusHeight = (4 / statusColumns) * px(48);
-        const bool notice = model.offlineNoticeVisible;
-        const bool retry = model.offlineRetryAvailable;
+        const bool notice = overviewLayout.offlineNoticeVisible;
+        const bool retry = overviewLayout.offlineRetryAvailable;
         const int actionWidth = notice && retry ? px(204) : px(102);
         const int noticeTextWidth = innerWidth - actionWidth - px(24);
         int noticeHeight = px(40);
@@ -3121,8 +3142,8 @@ public:
             HDC dc = GetDC(dashboardViewport);
             HGDIOBJ oldFont = SelectObject(dc, dashboardBodyFont);
             RECT measured{0, 0, noticeTextWidth, 0};
-            const auto text = utf8ToWide(model.offlineNoticeMessage);
-            DrawTextW(dc, text.c_str(), -1, &measured, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+            DrawTextW(dc, overviewLayout.offlineNoticeMessage.c_str(), -1, &measured,
+                      DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
             SelectObject(dc, oldFont);
             ReleaseDC(dashboardViewport, dc);
             noticeHeight = std::max(px(62), px(34) + static_cast<int>(measured.bottom));
@@ -3134,12 +3155,9 @@ public:
         const int summaryBlockHeight = summaryColumns == 3 ? summaryHeight : 2 * summaryHeight + gap;
         const int throughputHeight = px(194) + summaryBlockHeight;
         const bool twoColumns = cardWidth >= px(830);
-        const auto summaryTextHeight = [&](const AnalysisProviderModelUsageChart& chart) {
-            const int count = chart.hasData ? static_cast<int>(std::min<size_t>(chart.series.size(), 6)) : 0;
-            return px(std::max(34, (count + 1) * 16 + 4));
-        };
-        int openAiSummaryHeight = summaryTextHeight(model.analysis.openAiCodexModelUsage);
-        int hicapSummaryHeight = summaryTextHeight(model.analysis.hicapCodexModelUsage);
+        const auto summaryTextHeight = [&](int rows) { return px(std::max(34, (rows + 1) * 16 + 4)); };
+        int openAiSummaryHeight = summaryTextHeight(overviewLayout.openAiModelRows);
+        int hicapSummaryHeight = summaryTextHeight(overviewLayout.hicapModelRows);
         if (twoColumns) {
             openAiSummaryHeight = hicapSummaryHeight = std::max(openAiSummaryHeight, hicapSummaryHeight);
         }
@@ -3304,7 +3322,7 @@ public:
                                        SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
         }
         if (positions == nullptr || !EndDeferWindowPos(positions)) {
-            layoutMainControls(copyViewModel());
+            layoutMainControls();
             return;
         }
 
@@ -3915,7 +3933,13 @@ public:
             utf8ToWide(model.offlineNoticeTitle.empty()
                 ? "Connection Lost"
                 : model.offlineNoticeTitle));
-        setWindowText(offlineNoticeMessage, utf8ToWide(model.offlineNoticeMessage));
+        const auto modelRows = [](const AnalysisProviderModelUsageChart& chart) {
+            return chart.hasData ? static_cast<int>(std::min<size_t>(chart.series.size(), 6)) : 0;
+        };
+        overviewLayout = {utf8ToWide(model.offlineNoticeMessage), model.offlineNoticeVisible,
+                          model.offlineRetryAvailable, modelRows(model.analysis.openAiCodexModelUsage),
+                          modelRows(model.analysis.hicapCodexModelUsage)};
+        setWindowText(offlineNoticeMessage, overviewLayout.offlineNoticeMessage);
         setWindowText(
             recoveryValue,
             utf8ToWide(model.recoveryStatusSummary.empty()
@@ -3941,7 +3965,7 @@ public:
                                                                      : localizeDisplayTimestamp(model.lastUpdateTime));
         setWindowText(updatedValue, updatedTooltipBody);
         syncUsageProgress(model);
-        layoutMainControls(model);
+        layoutMainControls();
         populateProviderList(model);
         if (analysisPresenter != nullptr && analysisWindow != nullptr) {
             analysisPresenter->updateViewModel(model.analysis);
@@ -3954,7 +3978,9 @@ public:
         }
         SendMessageW(statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(statusText.c_str()));
 
-        syncPreferencesWindowState();
+        if (preferencesWindow != nullptr) {
+            syncPreferencesWindowState();
+        }
         syncShellDialogContent(DashboardShellDialog::Help);
         syncShellDialogContent(DashboardShellDialog::About);
     }
@@ -3971,26 +3997,15 @@ public:
         }
     }
 
-    void requestViewModelSync() {
-        HWND hwnd = nullptr;
-        HWND prefs = nullptr;
-        bool shouldSyncMainWindow = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            hwnd = window;
-            prefs = preferencesWindow;
-            shouldSyncMainWindow =
-                visible ||
-                analysisWindow != nullptr ||
-                helpDialog.window != nullptr ||
-                aboutDialog.window != nullptr;
-        }
+    // Call with mutex held.
+    bool shouldSyncMainWindow() const {
+        return visible || analysisWindow != nullptr || helpDialog.window != nullptr || aboutDialog.window != nullptr;
+    }
 
-        if (shouldSyncMainWindow && hwnd != nullptr) {
-            PostMessageW(hwnd, WM_JISTATS_SYNC_VIEWMODEL, 0, 0);
-        }
-        if (prefs != nullptr) {
-            PostMessageW(prefs, WM_JISTATS_SYNC_PREFERENCES, 0, 0);
+    void requestViewModelSync() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (window != nullptr && !viewModelSyncPending && (shouldSyncMainWindow() || preferencesWindow != nullptr)) {
+            viewModelSyncPending = PostMessageW(window, WM_JISTATS_SYNC_VIEWMODEL, 0, 0) != FALSE;
         }
     }
 
@@ -5324,19 +5339,14 @@ public:
 
     LRESULT handleAnalysisMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         switch (msg) {
-        case WM_CREATE:
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                analysisWindow = hwnd;
+            case WM_CREATE: {
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    analysisWindow = hwnd;
+                }
+                initializeAnalysisControls(hwnd);
+                return 0;
             }
-            if (analysisPresenter != nullptr) {
-                analysisPresenter->init(hwnd);
-                analysisPresenter->setVisible(true);
-            }
-            syncAnalysisLauncherState(copyViewModel());
-            layoutAnalysisWindowControls(hwnd);
-            syncViewModelToControls();
-            return 0;
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
             info->ptMinTrackSize.x = kAnalysisMinWidth;
@@ -5382,12 +5392,7 @@ public:
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_JISTATS_ATTACH_ANALYSIS:
-            if (analysisPresenter != nullptr) {
-                analysisPresenter->init(hwnd);
-                analysisPresenter->setVisible(true);
-                layoutAnalysisWindowControls(hwnd);
-                syncViewModelToControls();
-            }
+            initializeAnalysisControls(hwnd);
             return 0;
         case WM_EXITSIZEMOVE:
             persistAnalysisWindowPlacement(hwnd);
@@ -5539,7 +5544,7 @@ public:
             const auto& bounds = *reinterpret_cast<const RECT*>(lParam);
             SetWindowPos(hwnd, nullptr, bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
-            layoutMainControls(copyViewModel());
+            layoutMainControls();
             return 0;
         }
         case WM_SETTINGCHANGE:
@@ -5568,7 +5573,7 @@ public:
                 }
                 return 0;
             }
-            layoutMainControls(copyViewModel());
+            layoutMainControls();
             return 0;
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
@@ -5736,9 +5741,20 @@ public:
             SetDCBrushColor(dc, background);
             return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
         }
-        case WM_JISTATS_SYNC_VIEWMODEL:
-            syncViewModelToControls();
+        case WM_JISTATS_SYNC_VIEWMODEL: {
+            bool syncMainWindow;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                viewModelSyncPending = false;
+                syncMainWindow = shouldSyncMainWindow();
+            }
+            if (syncMainWindow) {
+                syncViewModelToControls();
+            } else if (preferencesWindow != nullptr) {
+                syncPreferencesWindowState();
+            }
             return 0;
+        }
         case WM_JISTATS_ATTACH_ANALYSIS:
             if (analysisWindow != nullptr && analysisPresenter != nullptr) {
                 PostMessageW(analysisWindow, WM_JISTATS_ATTACH_ANALYSIS, 0, 0);
@@ -7013,6 +7029,7 @@ public:
         window = nullptr;
         preferencesWindow = nullptr;
         analysisWindow = nullptr;
+        viewModelSyncPending = false;
         clearShellDialogState(DashboardShellDialog::Help);
         clearShellDialogState(DashboardShellDialog::About);
         visible = false;

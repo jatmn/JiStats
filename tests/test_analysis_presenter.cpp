@@ -440,7 +440,15 @@ TEST_CASE("AnalysisPresenter uses vertical scrolling instead of over-compressing
     CHECK(presenter.getScrollOffsetForTesting() > 0);
 
     const RECT provenanceAfter = presenter.getSectionBoundsForTesting("provenance");
-    CHECK(provenanceAfter.top < provenanceBefore.top);
+    CHECK(provenanceBefore.top - provenanceAfter.top == presenter.getScrollOffsetForTesting());
+    CHECK(provenanceBefore.bottom - provenanceAfter.bottom == presenter.getScrollOffsetForTesting());
+
+    REQUIRE(presenter.handleVScroll(SB_BOTTOM));
+    CHECK(presenter.getScrollOffsetForTesting() ==
+          presenter.getContentHeightForTesting() - presenter.getViewportHeightForTesting());
+    REQUIRE(presenter.handleVScroll(SB_TOP));
+    const RECT provenanceRestored = presenter.getSectionBoundsForTesting("provenance");
+    CHECK(EqualRect(&provenanceRestored, &provenanceBefore));
 
     presenter.shutdown();
 }

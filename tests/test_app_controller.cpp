@@ -1520,6 +1520,47 @@ TEST_CASE("AppController tray show dashboard action does not toggle visibility o
     app.shutdown();
 }
 
+TEST_CASE("AppController tray navigation stays responsive during a runtime refresh", "[app][tray][navigation]") {
+    auto providerManager = std::make_shared<ProviderManager>();
+    ScopedTrayTestHandler handler([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                     std::string&) -> std::optional<bool> { return true; });
+
+    TempTestDatabase dbPath;
+    AppController app;
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setDisableTaskbarForTesting(true);
+    app.setProviderManagerForTesting(providerManager);
+    REQUIRE(app.init(true));
+
+    std::promise<void> reachedPublication;
+    auto publicationReached = reachedPublication.get_future();
+    std::promise<void> releasePublication;
+    auto publicationReleased = releasePublication.get_future().share();
+    app.setBeforeRuntimePublicationForTesting([&reachedPublication, publicationReleased]() {
+        reachedPublication.set_value();
+        publicationReleased.wait();
+    });
+
+    auto refresh = std::async(std::launch::async, [&app]() { app.refreshRuntimeForTesting(); });
+    const bool refreshBlocked = publicationReached.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    auto openDashboard = std::async(std::launch::async, [&app]() {
+        return app.dispatchTrayEventForTesting(TrayController::TestEvent::MenuShowDashboard);
+    });
+    const bool trayResponsive = openDashboard.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    const bool helpOpenedDuringRefresh =
+        app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::HelpViewHelp) &&
+        waitForCondition([&app]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Help); });
+
+    releasePublication.set_value();
+    refresh.get();
+    CHECK(openDashboard.get());
+    CHECK(refreshBlocked);
+    CHECK(trayResponsive);
+    CHECK(helpOpenedDuringRefresh);
+    CHECK(app.isDashboardVisibleForTesting());
+    app.shutdown();
+}
+
 TEST_CASE("AppController dashboard shell menu opens settings help and about windows", "[app][shell]") {
     auto providerManager = std::make_shared<ProviderManager>();
     ScopedTrayTestHandler handler([](TrayController::TestOperation,

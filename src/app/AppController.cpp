@@ -3845,6 +3845,7 @@ public:
     std::optional<DashboardPreferences> pendingInteractionPreferences;
     bool pendingInteractionRequiresRuntimeRefresh = false;
     bool pendingProviderDiscoveryRefresh = false;
+    bool pendingPersistedActivityRefresh = false;
     std::vector<std::thread> miniMaxValidationThreads;
     std::chrono::milliseconds openAICodexRefreshPollInterval{
         std::chrono::duration_cast<std::chrono::milliseconds>(kOpenAICodexRefreshPollInterval)};
@@ -3990,29 +3991,43 @@ public:
         interactionWorkCv.notify_all();
     }
 
+    void requestPersistedActivityRefresh() {
+        {
+            std::lock_guard<std::mutex> lock(interactionWorkMutex);
+            if (shuttingDown.load()) {
+                return;
+            }
+            pendingPersistedActivityRefresh = true;
+        }
+        interactionWorkCv.notify_one();
+    }
+
     void runInteractionWorkLoop() {
         while (true) {
             std::optional<DashboardPreferences> preferences;
             bool requiresRuntimeRefresh = false;
             bool requiresProviderDiscoveryRefresh = false;
+            bool requiresPersistedActivityRefresh = false;
             {
                 std::unique_lock<std::mutex> lock(interactionWorkMutex);
                 interactionWorkCv.wait(lock, [this]() {
-                    return shuttingDown.load() ||
-                        pendingInteractionPreferences.has_value() ||
-                        pendingProviderDiscoveryRefresh;
+                    return shuttingDown.load() || pendingInteractionPreferences.has_value() ||
+                           pendingProviderDiscoveryRefresh || pendingPersistedActivityRefresh;
                 });
                 if (shuttingDown.load() &&
                     !pendingInteractionPreferences.has_value() &&
                     !pendingProviderDiscoveryRefresh) {
+                    pendingPersistedActivityRefresh = false;
                     break;
                 }
                 preferences = pendingInteractionPreferences;
                 requiresRuntimeRefresh = pendingInteractionRequiresRuntimeRefresh;
                 requiresProviderDiscoveryRefresh = pendingProviderDiscoveryRefresh;
+                requiresPersistedActivityRefresh = pendingPersistedActivityRefresh;
                 pendingInteractionPreferences.reset();
                 pendingInteractionRequiresRuntimeRefresh = false;
                 pendingProviderDiscoveryRefresh = false;
+                pendingPersistedActivityRefresh = false;
             }
 
             if (preferences.has_value() && requiresRuntimeRefresh) {
@@ -4036,6 +4051,9 @@ public:
             if (preferences.has_value()) {
                 syncPresentedPreferences(*preferences);
                 savePreferences(*preferences);
+            }
+            if (preferences.has_value() ||
+                (requiresPersistedActivityRefresh && !shuttingDown.load() && shouldRefreshAnalysisSurface())) {
                 refreshPersistedActivityPresenters(std::time(nullptr));
             }
 
@@ -7228,9 +7246,7 @@ bool AppController::init(bool launchInBackground) {
         pImpl->dashboardPresenter.setPreferencesOpenedCallback([this]() {
             pImpl->requestProviderDiscoveryRefresh();
         });
-        pImpl->dashboardPresenter.setPeriodicRefreshCallback([this]() {
-            pImpl->refreshPersistedActivityPresenters(std::time(nullptr));
-        });
+        pImpl->dashboardPresenter.setPeriodicRefreshCallback([this]() { pImpl->requestPersistedActivityRefresh(); });
         pImpl->analysisPresenter.setScopeChangedCallback(
             [this](const AnalysisScopeState& state) {
                 DashboardPreferences preferences = pImpl->dashboardPresenter.getViewModel().preferences;
@@ -7248,15 +7264,12 @@ bool AppController::init(bool launchInBackground) {
         if (!pImpl->headlessForTesting) {
 #endif
         if (pImpl->trayController.init()) {
-            // Set up tray menu callbacks
-            pImpl->trayController.setOnShowDashboardCallback([this]() {
+            const auto showDashboard = [this]() {
                 pImpl->dashboardPresenter.setVisible(true);
-                pImpl->refreshPersistedActivityPresenters(std::time(nullptr));
-            });
-            pImpl->trayController.setOnPreferencesCallback([this]() {
-                pImpl->dashboardPresenter.setVisible(true);
-                pImpl->refreshPersistedActivityPresenters(std::time(nullptr));
-            });
+                pImpl->requestPersistedActivityRefresh();
+            };
+            pImpl->trayController.setOnShowDashboardCallback(showDashboard);
+            pImpl->trayController.setOnPreferencesCallback(showDashboard);
             pImpl->trayController.setOnRetryNowCallback([this]() {
                 pImpl->dashboardPresenter.requestOfflineRetry();
             });
@@ -7266,14 +7279,8 @@ bool AppController::init(bool launchInBackground) {
             pImpl->trayController.setOnExitCallback([this]() {
                 requestShutdown();
             });
-            pImpl->taskbarPresenter.setOnShowDashboardCallback([this]() {
-                pImpl->dashboardPresenter.setVisible(true);
-                pImpl->refreshPersistedActivityPresenters(std::time(nullptr));
-            });
-            pImpl->taskbarPresenter.setOnPreferencesCallback([this]() {
-                pImpl->dashboardPresenter.setVisible(true);
-                pImpl->refreshPersistedActivityPresenters(std::time(nullptr));
-            });
+            pImpl->taskbarPresenter.setOnShowDashboardCallback(showDashboard);
+            pImpl->taskbarPresenter.setOnPreferencesCallback(showDashboard);
             pImpl->taskbarPresenter.setOnRetryNowCallback([this]() {
                 pImpl->dashboardPresenter.requestOfflineRetry();
             });

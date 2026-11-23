@@ -2396,7 +2396,7 @@ public:
                 workspaceGuideHeight,
                 TRUE);
             updateVerticalScroll(totalHeight, static_cast<int>(provenanceRect.bottom - bounds.top) + padding);
-            applyCurrentScrollOffset();
+            offsetControls(-scrollOffset);
             return;
         }
 
@@ -2711,7 +2711,7 @@ public:
             workspaceGuideHeight,
             TRUE);
         updateVerticalScroll(totalHeight, static_cast<int>(provenanceRect.bottom - bounds.top) + padding);
-        applyCurrentScrollOffset();
+        offsetControls(-scrollOffset);
     }
 
     bool isStyledTextCell(HWND control) const {
@@ -3484,21 +3484,23 @@ private:
         }
 
         const int clamped = std::clamp(newOffset, 0, maxScrollOffset());
-        if (clamped == scrollOffset) {
+        const int offset = scrollOffset - clamped;
+        if (offset == 0) {
             return false;
         }
 
         scrollOffset = clamped;
-        layout(lastLayoutBounds);
-        if (parent != nullptr) {
-            InvalidateRect(parent, nullptr, TRUE);
-            UpdateWindow(parent);
-        }
+        offsetControls(offset);
+        SCROLLINFO info{};
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_POS;
+        info.nPos = scrollOffset;
+        SetScrollInfo(parent, SB_VERT, &info, TRUE);
         return true;
     }
 
-    void applyCurrentScrollOffset() const {
-        if (parent == nullptr || scrollOffset == 0) {
+    void offsetControls(int offset) const {
+        if (parent == nullptr || offset == 0) {
             return;
         }
 
@@ -3521,15 +3523,10 @@ private:
                 continue;
             }
             RECT rect = windowRectRelativeToParent(parent, hwnd);
-            SetWindowPos(
-                hwnd,
-                nullptr,
-                rect.left,
-                rect.top - scrollOffset,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowPos(hwnd, nullptr, rect.left, rect.top + offset, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
         }
+        RedrawWindow(parent, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
     AnalysisScopeState normalizeScope(const AnalysisScopeState& state) const {

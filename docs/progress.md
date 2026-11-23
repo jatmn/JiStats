@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- Dashboard history refreshes run on the interaction worker. Tab switching reuses the loaded controls, and Analysis scrolls without repeating layout. The MinGW desktop smoke under Wine used an exclusive SQLite lock across the one-minute refresh and verified that the candidate window kept answering messages. Bundled-SQLite Linux tests, the MinGW build, and the Windows test suite under Wine cover the change. Native Windows 11 desktop verification remains open. [Runtime](reference/runtime.md) · [Dashboard](reference/presentation.md)
+
 - Codex Analysis preserves enclosing timestamps when matching recorded requests to estimated counter intervals. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 467 Windows cases passed under Wine.
 
 - Codex Analysis retains distinct legacy counter readings when tallying prompts and per-minute growth across estimated resets. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 466 Windows cases passed under Wine.
