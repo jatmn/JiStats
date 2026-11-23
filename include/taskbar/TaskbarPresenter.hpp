@@ -104,7 +104,10 @@ public:
     
     // Get current metrics
     std::vector<TaskbarMetrics> getCurrentMetrics() const;
-    
+
+    // The presenter can accept metrics while the shell surface is being recovered.
+    bool isInitialized() const;
+
     // Check if taskbar integration is available
     bool isAvailable() const;
     

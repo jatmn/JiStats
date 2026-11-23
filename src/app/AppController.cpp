@@ -6649,7 +6649,7 @@ public:
             if (!disableTaskbarForTesting)
 #endif
             {
-                if (taskbarPresenter.isAvailable()) {
+                if (taskbarPresenter.isInitialized()) {
                     taskbarPresenter.replaceMetrics(buildRuntimeTaskbarMetrics(now, viewModel));
                 }
             }

@@ -332,19 +332,19 @@ std::wstring processImageNameLowerForWindow(HWND hwnd) {
 
 class TaskbarPresenter::Impl {
 public:
-    bool initialized = false;
-    bool available = false;
-    std::string lastError;
-    std::vector<TaskbarMetrics> currentMetrics;
-    std::mutex mutex;
-    bool overlayEnabled = true;
-    std::function<void()> onShowDashboardCallback;
-    std::function<void()> onPreferencesCallback;
-    std::function<void()> onRetryNowCallback;
-    std::function<void()> onDismissOfflineNoticeCallback;
-    std::function<void()> onExitCallback;
-    bool offlineRetryAvailable = false;
-    bool offlineDismissAvailable = false;
+  std::atomic<bool> initialized{false};
+  bool available = false;
+  std::string lastError;
+  std::vector<TaskbarMetrics> currentMetrics;
+  std::mutex mutex;
+  bool overlayEnabled = true;
+  std::function<void()> onShowDashboardCallback;
+  std::function<void()> onPreferencesCallback;
+  std::function<void()> onRetryNowCallback;
+  std::function<void()> onDismissOfflineNoticeCallback;
+  std::function<void()> onExitCallback;
+  bool offlineRetryAvailable = false;
+  bool offlineDismissAvailable = false;
 #ifdef JISTATS_ENABLE_TEST_HOOKS
     std::uint64_t refreshRequestCountForTesting = 0;
 #endif
@@ -2421,7 +2421,6 @@ public:
                 POINT topLeft{tmRect.left, tmRect.top};
                 ScreenToClient(taskbarWindow, &topLeft);
                 x = std::max(kTaskbarMinimumX, std::min(x, static_cast<int>(topLeft.x) - width - 2));
-                JISTATS_LOG_INFO(LogCategory::Taskbar, "Found TrafficMonitor, positioning embedded surface to the left");
             }
 
             const int taskbarHeight = std::max(0, static_cast<int>(clientRect.bottom) - static_cast<int>(clientRect.top));
@@ -2450,7 +2449,6 @@ public:
                 GetWindowRect(trafficMonitor, &tmRect);
                 // Position to the LEFT of TrafficMonitor
                 x = std::min(x, static_cast<int>(tmRect.left - width - kTaskbarOuterGap));
-                JISTATS_LOG_INFO(LogCategory::Taskbar, "Found TrafficMonitor, positioning to the left");
             }
             
             y = static_cast<int>(taskbarRect.top) +
@@ -2519,6 +2517,8 @@ public:
                         ensureSurfaceWindow();
                     } else {
                         setHeartbeatTimerInterval(hwnd, kOverlayHeartbeatSlowIntervalMs);
+                        // The tray and adjacent windows may finish reattaching after the overlay.
+                        updateSurfaceWindow();
                         ensureSurfaceVisible();
                     }
                 }
@@ -2997,6 +2997,10 @@ void TaskbarPresenter::setProgress(double percentage, ProgressState state) {
 std::vector<TaskbarMetrics> TaskbarPresenter::getCurrentMetrics() const {
     std::lock_guard<std::mutex> lock(pImpl->mutex);
     return pImpl->currentMetrics;
+}
+
+bool TaskbarPresenter::isInitialized() const {
+    return pImpl->initialized.load();
 }
 
 bool TaskbarPresenter::isAvailable() const {
