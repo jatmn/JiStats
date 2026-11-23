@@ -121,14 +121,23 @@ jobs:
           path: .ccache
           key: bench-dr-native-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           restore-keys: bench-dr-native-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
-      - name: Run Pullfrog authorization tests
-        run: node --test scripts/pullfrog-review-check.test.mjs
-      - name: Run portable tests with bundled SQLite
+      - name: Run portable tests with bundled SQLite and Pullfrog authorization
         run: |
-          ccache --zero-stats
-          cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON
-          cmake --build build-linux --parallel "$(nproc)"
-          ctest --test-dir build-linux --output-on-failure
+          set -euo pipefail
+          node --test scripts/pullfrog-review-check.test.mjs > "$RUNNER_TEMP/pullfrog-authorization.log" 2>&1 &
+          authorization_pid=$!
+          portable_status=0
+          (
+            ccache --zero-stats &&
+              cmake -S . -B build-linux -G Ninja -DJISTATS_BUILD_TESTS=ON &&
+              cmake --build build-linux --parallel "$(nproc)" &&
+              ctest --test-dir build-linux --output-on-failure
+          ) || portable_status=$?
+          authorization_status=0
+          wait "$authorization_pid" || authorization_status=$?
+          cat "$RUNNER_TEMP/pullfrog-authorization.log"
+          if (( portable_status != 0 )); then exit "$portable_status"; fi
+          exit "$authorization_status"
       - name: Report compiler cache hits and misses
         run: ccache --show-stats --verbose
       - name: Seed compiler results for pull requests
@@ -153,39 +162,35 @@ jobs:
       CCACHE_COMPILERCHECK: content
       CCACHE_NODIRECT: 'true'
     steps:
+      - name: Install MinGW-w64 and ImageMagick in parallel with checkout and cache restore
+        id: toolchain
+        if: vars.JISTATS_LINUX_BUILD_RUNNER == ''
+        run: |
+          set -euo pipefail
+          setup_dir=$(mktemp -d "$RUNNER_TEMP/jistats-toolchain.XXXXXXXX")
+          exec {setup_lock}>"$setup_dir/install.lock"
+          flock -x "$setup_lock"
+          (
+            trap 'printf "%s\n" "$?" > "$setup_dir/install.status"' EXIT
+            packages=(g++-mingw-w64-x86-64-posix imagemagick ccache)
+            if ! command -v ninja >/dev/null; then
+              packages+=(ninja-build)
+            fi
+            # The hosted VM is discarded after this job. Its toolchain needs
+            # neither crash-recovery flushes nor a daemon restart scan.
+            install=(sudo env NEEDRESTART_SUSPEND=1 apt-get -o Dpkg::Options::=--force-unsafe-io install -y --no-install-recommends)
+            if ! "${install[@]}" "${packages[@]}"; then
+              sudo apt-get update
+              "${install[@]}" "${packages[@]}"
+            fi
+          ) </dev/null > "$setup_dir/install.log" 2>&1 &
+          # The installer inherits the lock and releases it after writing its status.
+          exec {setup_lock}>&-
+          echo "directory=$setup_dir" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           filter: blob:none
           persist-credentials: false
-      - name: Install MinGW-w64 and ImageMagick
-        if: vars.JISTATS_LINUX_BUILD_RUNNER == ''
-        run: |
-          set -euo pipefail
-          # Populate the build's usual _deps directory while apt installs the compiler.
-          deps_dir="$PWD/build-mingw/_deps"
-          cmake -S cmake/prefetch -B "$RUNNER_TEMP/jistats-prefetch" \
-            -DFETCHCONTENT_BASE_DIR="$deps_dir" &
-          prefetch_pid=$!
-          packages=(g++-mingw-w64-x86-64-posix imagemagick ccache)
-          if ! command -v ninja >/dev/null; then
-            packages+=(ninja-build)
-          fi
-          # The hosted VM is discarded after this job. Skip crash-recovery
-          # flushes while unpacking without changing package verification.
-          install=(sudo apt-get -o Dpkg::Options::=--force-unsafe-io install -y --no-install-recommends)
-          install_status=0
-          if ! "${install[@]}" "${packages[@]}"; then
-            (sudo apt-get update && "${install[@]}" "${packages[@]}") || install_status=$?
-          fi
-          wait "$prefetch_pid"
-          if (( install_status != 0 )); then exit "$install_status"; fi
-          echo "JISTATS_PREFETCHED_DEPS_DIR=$deps_dir" >> "$GITHUB_ENV"
-      - name: Identify compiler packages for the cache
-        run: |
-          # GCC invokes separate assembler and compiler backends. Include their
-          # installed package versions even when the driver binary is unchanged.
-          dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' 'mingw-w64*' > "$RUNNER_TEMP/compiler-packages"
-          echo "CCACHE_EXTRAFILES=$RUNNER_TEMP/compiler-packages" >> "$GITHUB_ENV"
       - name: Restore compiler results
         id: compiler-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -193,6 +198,30 @@ jobs:
           path: .ccache
           key: bench-dr-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           restore-keys: bench-dr-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install the pinned CMake dependencies and wait for MinGW
+        if: ${{ !cancelled() && steps.toolchain.outputs.directory != '' }}
+        env:
+          SETUP_DIR: ${{ steps.toolchain.outputs.directory }}
+        run: |
+          set -euo pipefail
+          deps_dir="$PWD/build-mingw/_deps"
+          cmake -S cmake/prefetch -B "$RUNNER_TEMP/jistats-prefetch" \
+            -DFETCHCONTENT_BASE_DIR="$deps_dir" &
+          prefetch_pid=$!
+          flock -x "$SETUP_DIR/install.lock" true
+          cat "$SETUP_DIR/install.log"
+          prefetch_status=0
+          wait "$prefetch_pid" || prefetch_status=$?
+          read -r install_status < "$SETUP_DIR/install.status"
+          if (( install_status != 0 )); then exit "$install_status"; fi
+          if (( prefetch_status != 0 )); then exit "$prefetch_status"; fi
+          echo "JISTATS_PREFETCHED_DEPS_DIR=$deps_dir" >> "$GITHUB_ENV"
+      - name: Identify compiler packages for the cache
+        run: |
+          # GCC invokes separate assembler and compiler backends. Include their
+          # installed package versions even when the driver binary is unchanged.
+          dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' 'mingw-w64*' > "$RUNNER_TEMP/compiler-packages"
+          echo "CCACHE_EXTRAFILES=$RUNNER_TEMP/compiler-packages" >> "$GITHUB_ENV"
       - name: Check the default build and enable the MiniMax CLI and tests
         shell: bash
         run: |
