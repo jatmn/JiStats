@@ -166,10 +166,16 @@ jobs:
           cmake -S cmake/prefetch -B "$RUNNER_TEMP/jistats-prefetch" \
             -DFETCHCONTENT_BASE_DIR="$deps_dir" &
           prefetch_pid=$!
-          packages=(g++-mingw-w64-x86-64-posix imagemagick ninja-build ccache)
+          packages=(g++-mingw-w64-x86-64-posix imagemagick ccache)
+          if ! command -v ninja >/dev/null; then
+            packages+=(ninja-build)
+          fi
+          # The hosted VM is discarded after this job. Skip crash-recovery
+          # flushes while unpacking without changing package verification.
+          install=(sudo apt-get -o Dpkg::Options::=--force-unsafe-io install -y --no-install-recommends)
           install_status=0
-          if ! sudo apt-get install -y --no-install-recommends "${packages[@]}"; then
-            (sudo apt-get update && sudo apt-get install -y --no-install-recommends "${packages[@]}") || install_status=$?
+          if ! "${install[@]}" "${packages[@]}"; then
+            (sudo apt-get update && "${install[@]}" "${packages[@]}") || install_status=$?
           fi
           wait "$prefetch_pid"
           if (( install_status != 0 )); then exit "$install_status"; fi
