@@ -1324,6 +1324,13 @@ public:
     std::wstring scheduledExportTooltipBody;
     std::wstring updatedTooltipBody;
     StorageService placementStorage;
+    std::optional<RECT> savedAnalysisWindowRect;
+    std::thread placementWriter;
+    std::mutex placementMutex;
+    std::condition_variable placementCv;
+    bool stopPlacementWriter = false;
+    std::optional<RECT> pendingMainPlacement;
+    std::optional<RECT> pendingAnalysisPlacement;
 
     static constexpr UINT WM_JISTATS_SYNC_VIEWMODEL = WM_APP + 32;
     static constexpr UINT WM_JISTATS_SYNC_PREFERENCES = WM_APP + 33;
@@ -1434,10 +1441,6 @@ public:
     }
 
     std::optional<RECT> loadSavedMainWindowRect() {
-        if (!ensurePlacementStorage()) {
-            return std::nullopt;
-        }
-
         SettingsService settings(placementStorage);
         const auto x = settings.getInt(kWindowPosXKey);
         const auto y = settings.getInt(kWindowPosYKey);
@@ -1489,10 +1492,6 @@ public:
     }
 
     std::optional<RECT> loadSavedAnalysisWindowRect() {
-        if (!ensurePlacementStorage()) {
-            return std::nullopt;
-        }
-
         SettingsService settings(placementStorage);
         const auto x = settings.getInt(kAnalysisWindowPosXKey);
         const auto y = settings.getInt(kAnalysisWindowPosYKey);
@@ -1505,18 +1504,11 @@ public:
             return std::nullopt;
         }
 
-        RECT rect{*x, *y, *x + *width, *y + *height};
-#ifdef _WIN32
-        RECT workArea{};
-        if (tryGetMonitorWorkArea(rect, workArea)) {
-            clampRectToWorkArea(rect, workArea);
-        }
-#endif
-        return rect;
+        return RECT{*x, *y, *x + *width, *y + *height};
     }
 
     void persistMainWindowPlacement(HWND hwnd) {
-        if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd) || !ensurePlacementStorage()) {
+        if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd)) {
             return;
         }
 
@@ -1535,15 +1527,11 @@ public:
             return;
         }
 
-        SettingsService settings(placementStorage);
-        settings.setInt(kWindowPosXKey, rect.left);
-        settings.setInt(kWindowPosYKey, rect.top);
-        settings.setInt(kWindowWidthKey, rect.right - rect.left);
-        settings.setInt(kWindowHeightKey, rect.bottom - rect.top);
+        queuePlacementSave(pendingMainPlacement, rect);
     }
 
     void persistAnalysisWindowPlacement(HWND hwnd) {
-        if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd) || !ensurePlacementStorage()) {
+        if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd)) {
             return;
         }
 
@@ -1557,11 +1545,61 @@ public:
             return;
         }
 
+        savedAnalysisWindowRect = rect;
+        queuePlacementSave(pendingAnalysisPlacement, rect);
+    }
+
+    void queuePlacementSave(std::optional<RECT>& pendingPlacement, const RECT& rect) {
+        {
+            std::lock_guard<std::mutex> lock(placementMutex);
+            pendingPlacement = rect;
+        }
+        placementCv.notify_one();
+    }
+
+    void savePlacement(const std::optional<RECT>& rect, const char* xKey, const char* yKey, const char* widthKey,
+                       const char* heightKey) {
+        if (!rect || !ensurePlacementStorage() ||
+            !placementStorage.beginTransaction(StorageService::TransactionMode::Immediate)) {
+            return;
+        }
         SettingsService settings(placementStorage);
-        settings.setInt(kAnalysisWindowPosXKey, rect.left);
-        settings.setInt(kAnalysisWindowPosYKey, rect.top);
-        settings.setInt(kAnalysisWindowWidthKey, rect.right - rect.left);
-        settings.setInt(kAnalysisWindowHeightKey, rect.bottom - rect.top);
+        if (!(settings.setInt(xKey, rect->left) && settings.setInt(yKey, rect->top) &&
+              settings.setInt(widthKey, rect->right - rect->left) &&
+              settings.setInt(heightKey, rect->bottom - rect->top) && placementStorage.commitTransaction())) {
+            placementStorage.rollbackTransaction();
+        }
+    }
+
+    void runPlacementWriter() {
+        for (;;) {
+            std::optional<RECT> mainPlacement;
+            std::optional<RECT> analysisPlacement;
+            {
+                std::unique_lock<std::mutex> lock(placementMutex);
+                placementCv.wait(
+                    lock, [this]() { return stopPlacementWriter || pendingMainPlacement || pendingAnalysisPlacement; });
+                if (!pendingMainPlacement && !pendingAnalysisPlacement) {
+                    return;
+                }
+                mainPlacement = pendingMainPlacement;
+                analysisPlacement = pendingAnalysisPlacement;
+                pendingMainPlacement.reset();
+                pendingAnalysisPlacement.reset();
+            }
+            savePlacement(mainPlacement, kWindowPosXKey, kWindowPosYKey, kWindowWidthKey, kWindowHeightKey);
+            savePlacement(analysisPlacement, kAnalysisWindowPosXKey, kAnalysisWindowPosYKey, kAnalysisWindowWidthKey,
+                          kAnalysisWindowHeightKey);
+        }
+    }
+
+    void joinPlacementWriter() {
+        {
+            std::lock_guard<std::mutex> lock(placementMutex);
+            stopPlacementWriter = true;
+        }
+        placementCv.notify_one();
+        placementWriter.join();
     }
 
     void centerWindowOnOwner(HWND hwnd, HWND owner) {
@@ -2056,8 +2094,12 @@ public:
         }
 
         RECT rect{};
-        if (const auto savedRect = loadSavedAnalysisWindowRect()) {
-            rect = *savedRect;
+        if (savedAnalysisWindowRect) {
+            rect = *savedAnalysisWindowRect;
+            RECT workArea{};
+            if (tryGetMonitorWorkArea(rect, workArea)) {
+                clampRectToWorkArea(rect, workArea);
+            }
         } else {
             rect.left = CW_USEDEFAULT;
             rect.top = CW_USEDEFAULT;
@@ -5398,7 +5440,6 @@ public:
             persistAnalysisWindowPlacement(hwnd);
             return 0;
         case WM_CLOSE:
-            persistAnalysisWindowPlacement(hwnd);
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
@@ -6913,7 +6954,7 @@ public:
         });
     }
 
-    void runUiThread() {
+    void runUiThread(const std::optional<RECT>& savedRect) {
         initializeCommonControls();
         ensureAppIcons();
         HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -6957,7 +6998,7 @@ public:
         RegisterClassW(&shellDialogClass);
 
         RECT bounds{0, 0, MulDiv(kDefaultWidth, GetDpiForSystem(), 96), MulDiv(kDefaultHeight, GetDpiForSystem(), 96)};
-        if (const auto savedRect = loadSavedMainWindowRect()) {
+        if (savedRect) {
             bounds = *savedRect;
         } else {
             RECT workArea{};
@@ -7058,10 +7099,16 @@ bool DashboardPresenter::init() {
     }
 
 #ifdef _WIN32
+    std::optional<RECT> savedMainRect;
+    pImpl->savedAnalysisWindowRect.reset();
+    if (pImpl->ensurePlacementStorage()) {
+        savedMainRect = pImpl->loadSavedMainWindowRect();
+        pImpl->savedAnalysisWindowRect = pImpl->loadSavedAnalysisWindowRect();
+    }
+    pImpl->stopPlacementWriter = false;
+    pImpl->placementWriter = std::thread([this]() { pImpl->runPlacementWriter(); });
     pImpl->threadReady = false;
-    pImpl->uiThread = std::thread([this]() {
-        pImpl->runUiThread();
-    });
+    pImpl->uiThread = std::thread([this, savedMainRect]() { pImpl->runUiThread(savedMainRect); });
 
     std::unique_lock<std::mutex> lock(pImpl->mutex);
     pImpl->readyCv.wait(lock, [this]() {
@@ -7104,6 +7151,9 @@ int DashboardPresenter::waitForExit() {
     std::lock_guard<std::mutex> joinLock(pImpl->threadJoinMutex);
     if (pImpl->uiThread.joinable() && pImpl->uiThread.get_id() != std::this_thread::get_id()) {
         pImpl->uiThread.join();
+    }
+    if (!pImpl->uiThread.joinable() && pImpl->placementWriter.joinable()) {
+        pImpl->joinPlacementWriter();
     }
 #endif
     pImpl->joinOpenAIImportThreads();
