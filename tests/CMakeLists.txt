@@ -38,6 +38,7 @@ if(WIN32)
         test_dashboard_presenter.cpp
         test_tray_controller.cpp
         test_app_controller.cpp
+        test_app_controller_offline_notice.cpp
         test_app_observation_persistence.cpp
         test_analysis_presenter.cpp
         test_analysis_query_engine.cpp
