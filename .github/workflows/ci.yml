@@ -34,7 +34,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 2
-          filter: blob:none
           persist-credentials: false
       - name: Check whether the change can affect the build or tests
         id: filter
@@ -89,7 +88,7 @@ jobs:
     needs: changes
     if: >-
       ${{ !cancelled() && (github.event_name != 'pull_request' ||
-          (needs.changes.result == 'success' && needs.changes.outputs.build == 'true')) }}
+          needs.changes.result != 'success' || needs.changes.outputs.build != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

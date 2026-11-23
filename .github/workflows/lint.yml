@@ -25,7 +25,6 @@ jobs:
           persist-credentials: false
           # The pull_request checkout is a merge commit. Its first parent is the base.
           fetch-depth: ${{ github.event_name == 'merge_group' && '0' || '2' }}
-          filter: blob:none
       - name: Check first-party C and C++ formatting
         run: bash scripts/check_changed_format.sh "$BASE"
       - name: Lint GitHub Actions workflows
