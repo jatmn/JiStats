@@ -150,9 +150,7 @@ jobs:
         with:
           path: .ccache
           key: jistats-ccache-native-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
-          restore-keys: |
-            jistats-ccache-native-v1-${{ runner.os }}-${{ runner.arch }}-
-            jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
+          restore-keys: jistats-ccache-native-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Run portable tests with bundled SQLite
         run: |
           ccache --zero-stats
