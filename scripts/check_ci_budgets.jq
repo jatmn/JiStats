@@ -23,6 +23,9 @@ def setup_step:
         . as $prefix | $name | startswith($prefix)
     );
 
+def windows_suite:
+    select(.name == "Run Windows suite and diagnose intermittent restart stalls");
+
 def job_checks:
     if .conclusion == "skipped" then
         {line: "- \(.name): skipped in source workflow"}
@@ -35,13 +38,23 @@ def job_checks:
         timing(.name; elapsed; 35),
         ([.steps[] | select(.conclusion != "cancelled" and .conclusion != "skipped")] as $steps
         | timing("Setup"; ([$steps[] | select(setup_step) | elapsed] | add // 0); 15),
-          ($steps[] | select(.name == "Run Windows suite and diagnose intermittent restart stalls")
+          ($steps[] | windows_suite
            | timing("Windows suite step"; elapsed; 30)))
     end;
 
+def windows_shard_check:
+    [.[] | .jobs[]
+     | select(.name | test("^Windows tests \\(shard [0-9]+\\)$"))
+     | .steps[]? | windows_suite | select(.conclusion == "success")] as $suites
+    | if ($suites | length) > 1 then
+        ([$suites[].completed_at | fromdateiso8601] | max) as $last
+        | ([$suites[].started_at | fromdateiso8601] | min) as $first
+        | timing("Windows suite span across shards in this attempt"; $last - $first; 30)
+      else empty end;
+
 # Emit each check before evaluating the next one. The final null marks the end
 # of the check stream and lets the audit return its aggregate budget status.
-foreach ((.[] | .jobs[] | job_checks), null) as $check (
+foreach ((.[] | .jobs[] | job_checks), windows_shard_check, null) as $check (
     {seen: false, failed: false};
     {seen: (.seen or ($check != null)), failed: (.failed or $check.failed)};
     if $check != null then $check.line

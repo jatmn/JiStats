@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Return success when a changed path can affect the native build or tests.
 is_native_ci_input() {
     case "$1" in

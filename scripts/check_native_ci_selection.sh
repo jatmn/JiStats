@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=scripts/native_ci_input.sh
 source "$(dirname "$0")/native_ci_input.sh"
 
 # These paths exercise separate production routes. They remain build inputs

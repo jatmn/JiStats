@@ -21,6 +21,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  WINDOWS_SHARD_COUNT: '3'
+
 jobs:
   changes:
     name: Detect build changes
@@ -100,10 +103,21 @@ jobs:
         with:
           filter: blob:none
           persist-credentials: false
-      - name: Install ccache and fingerprint the native toolchain
+      - name: Install ccache
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ccache
+          set -euo pipefail
+          ccache_dir="$RUNNER_TEMP/jistats-ccache"
+          mkdir -p "$ccache_dir"
+          # ccache 4.12.3 Linux x86-64 release.
+          gh api -H 'Accept: application/octet-stream' \
+            repos/ccache/ccache/releases/assets/352204150 > "$ccache_dir/ccache.tar.xz"
+          echo "a99aa455873c978f6905f07e3176cfdf48bb610990c23ce0e1b718da0f38faa7  $ccache_dir/ccache.tar.xz" |
+            sha256sum --check
+          tar -xJf "$ccache_dir/ccache.tar.xz" -C "$ccache_dir" --strip-components=1 \
+            ccache-4.12.3-linux-x86_64/ccache
+          echo "$ccache_dir" >> "$GITHUB_PATH"
           # GCC invokes separate assembler and compiler backends. Include their
           # installed package versions even when the driver binary is unchanged.
           dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' > "$RUNNER_TEMP/compiler-packages"
@@ -146,6 +160,31 @@ jobs:
       CCACHE_COMPILERCHECK: content
       CCACHE_NODIRECT: 'true'
     steps:
+      - name: Install MinGW-w64 and ImageMagick in parallel with checkout and cache restore
+        id: toolchain
+        if: vars.JISTATS_LINUX_BUILD_RUNNER == ''
+        run: |
+          set -euo pipefail
+          setup_dir=$(mktemp -d "$RUNNER_TEMP/jistats-toolchain.XXXXXXXX")
+          exec {setup_lock}>"$setup_dir/install.lock"
+          flock -x "$setup_lock"
+          (
+            trap 'printf "%s\n" "$?" > "$setup_dir/install.status"' EXIT
+            packages=(g++-mingw-w64-x86-64-posix imagemagick ccache)
+            if ! command -v ninja >/dev/null; then
+              packages+=(ninja-build)
+            fi
+            # The hosted VM is discarded after this job. Its toolchain needs
+            # neither crash-recovery flushes nor a daemon restart scan.
+            install=(sudo env NEEDRESTART_SUSPEND=1 apt-get -o Dpkg::Options::=--force-unsafe-io install -y --no-install-recommends)
+            if ! "${install[@]}" "${packages[@]}"; then
+              sudo apt-get update
+              "${install[@]}" "${packages[@]}"
+            fi
+          ) </dev/null > "$setup_dir/install.log" 2>&1 &
+          # The installer inherits the lock and releases it after writing its status.
+          exec {setup_lock}>&-
+          echo "directory=$setup_dir" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           filter: blob:none
@@ -157,17 +196,6 @@ jobs:
         run: bash scripts/check_native_ci_selection.sh
       - name: Run Pullfrog authorization tests
         run: node --test scripts/pullfrog-review-check.test.mjs
-      - name: Install MinGW-w64 and ImageMagick
-        if: vars.JISTATS_LINUX_BUILD_RUNNER == ''
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix imagemagick ninja-build ccache
-      - name: Identify compiler packages for the cache
-        run: |
-          # GCC invokes separate assembler and compiler backends. Include their
-          # installed package versions even when the driver binary is unchanged.
-          dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' 'mingw-w64*' > "$RUNNER_TEMP/compiler-packages"
-          echo "CCACHE_EXTRAFILES=$RUNNER_TEMP/compiler-packages" >> "$GITHUB_ENV"
       - name: Restore compiler results
         id: compiler-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -175,18 +203,51 @@ jobs:
           path: .ccache
           key: jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
           restore-keys: jistats-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install the pinned CMake dependencies and wait for MinGW
+        if: ${{ !cancelled() && steps.toolchain.outputs.directory != '' }}
+        env:
+          SETUP_DIR: ${{ steps.toolchain.outputs.directory }}
+        run: |
+          set -euo pipefail
+          deps_dir="$PWD/build-mingw/_deps"
+          cmake -S cmake/prefetch -B "$RUNNER_TEMP/jistats-prefetch" \
+            -DFETCHCONTENT_BASE_DIR="$deps_dir" &
+          prefetch_pid=$!
+          flock -x "$SETUP_DIR/install.lock" true
+          cat "$SETUP_DIR/install.log"
+          prefetch_status=0
+          wait "$prefetch_pid" || prefetch_status=$?
+          read -r install_status < "$SETUP_DIR/install.status"
+          if (( install_status != 0 )); then exit "$install_status"; fi
+          if (( prefetch_status != 0 )); then exit "$prefetch_status"; fi
+          echo "JISTATS_PREFETCHED_DEPS_DIR=$deps_dir" >> "$GITHUB_ENV"
+      - name: Identify compiler packages for the cache
+        run: |
+          # GCC invokes separate assembler and compiler backends. Include their
+          # installed package versions even when the driver binary is unchanged.
+          dpkg-query -W -f='${binary:Package}=${Version}\n' 'binutils*' 'cpp*' 'g++*' 'gcc*' 'mingw-w64*' > "$RUNNER_TEMP/compiler-packages"
+          echo "CCACHE_EXTRAFILES=$RUNNER_TEMP/compiler-packages" >> "$GITHUB_ENV"
       - name: Check the default build and enable the MiniMax CLI and tests
         shell: bash
         run: |
+          sources=()
+          test_sources=()
+          if [[ -n ${JISTATS_PREFETCHED_DEPS_DIR:-} ]]; then
+            sources=(
+              "-DFETCHCONTENT_SOURCE_DIR_SQLITE=$JISTATS_PREFETCHED_DEPS_DIR/sqlite-src"
+              "-DFETCHCONTENT_SOURCE_DIR_SPDLOG=$JISTATS_PREFETCHED_DEPS_DIR/spdlog-src"
+            )
+            test_sources=("-DFETCHCONTENT_SOURCE_DIR_CATCH2=$JISTATS_PREFETCHED_DEPS_DIR/catch2-src")
+          fi
           cmake -S . -B build-mingw -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64-x86_64.cmake \
-            -DCMAKE_BUILD_TYPE=Debug
+            -DCMAKE_BUILD_TYPE=Debug "${sources[@]}"
           targets=$(ninja -C build-mingw -t targets all)
           if grep -q '^JiStatsMiniMaxCli:' <<< "$targets"; then
             echo "::error::The default Windows build has a MiniMax CLI target"
             exit 1
           fi
-          cmake -S . -B build-mingw -DJISTATS_BUILD_TESTS=ON -DJISTATS_BUILD_MINIMAX_CLI=ON
+          cmake -S . -B build-mingw -DJISTATS_BUILD_TESTS=ON -DJISTATS_BUILD_MINIMAX_CLI=ON "${test_sources[@]}"
       - name: Build the app, MiniMax CLI, and tests
         run: |
           ccache --zero-stats
@@ -199,38 +260,52 @@ jobs:
         with:
           path: .ccache
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
-      - name: Upload the test executable for Windows
+      - name: Prepare Windows test inputs
+        run: |
+          set -euo pipefail
+          [[ $(git rev-parse HEAD) == "$GITHUB_SHA" ]]
+          git archive --format=tar "$GITHUB_SHA" > build-mingw/windows-test-inputs.tar
+          printf '%s\n' "$GITHUB_SHA" > build-mingw/windows-test-revision.txt
+      - name: Upload Windows test inputs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-tests
-          path: build-mingw/bin/JiStatsTests.exe
+          path: |
+            build-mingw/bin/JiStatsTests.exe
+            build-mingw/windows-test-inputs.tar
+            build-mingw/windows-test-revision.txt
+          compression-level: 1
           if-no-files-found: error
-          # A Windows-only retry needs the original binary throughout the 30-day rerun window.
+          # A Windows-only retry needs the same inputs throughout the 30-day rerun window.
           retention-days: 30
           overwrite: true
 
-  ci-passed:
-    name: CI passed
-    needs: [changes, portable, linux-cross]
-    if: ${{ !cancelled() }}
-    runs-on: ${{ needs.linux-cross.result == 'success' && 'windows-latest' || 'ubuntu-latest' }}
+  windows-tests:
+    name: Windows tests (shard ${{ matrix.shard }})
+    needs: linux-cross
+    if: ${{ !cancelled() && needs.linux-cross.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    runs-on: windows-latest
     timeout-minutes: ${{ inputs.repeat_offline_notice_tests && 15 || 5 }}
     steps:
-      - if: needs.linux-cross.result == 'success'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          filter: blob:none
-          persist-credentials: false
-      - if: needs.linux-cross.result == 'success'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: windows-tests
-          path: build-mingw/bin
-      # Run from the checkout root so the suite can read the test fixtures.
+          path: build-mingw
+      - name: Install tested Windows inputs
+        shell: pwsh
+        run: |
+          $revision = (Get-Content -Raw -LiteralPath build-mingw/windows-test-revision.txt).Trim()
+          if ($revision -cne $env:GITHUB_SHA) { throw "Unexpected Windows test revision: $revision" }
+          tar.exe -xf build-mingw/windows-test-inputs.tar
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot extract Windows test inputs.' }
+      # Run from the source root so the suite can read the test fixtures.
       - name: Run Windows suite and diagnose intermittent restart stalls
-        id: windows-tests
-        if: needs.linux-cross.result == 'success'
         env:
+          SHARD: ${{ matrix.shard }}
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
           REPEAT_OFFLINE_NOTICE_TESTS: ${{ github.event_name == 'workflow_dispatch' && inputs.repeat_offline_notice_tests }}
@@ -271,29 +346,42 @@ jobs:
             if ($process.ExitCode -ne 0) { exit $process.ExitCode }
           }
           # Reserve 15 seconds for GDB and 35 seconds for runner setup and cleanup.
-          Invoke-WindowsTests @('*', '--list-tests', '--reporter', 'xml::out=catch-inventory.xml') 250000
-          Invoke-WindowsTests @('*', '--order', 'rand', '--durations', 'yes', '--reporter', 'console', '--reporter', 'xml::out=catch-results.xml') 250000
-          $expected = @(git ls-files -- 'tests/*.cpp')
-          if ($LASTEXITCODE -ne 0 -or !$expected) { throw 'Cannot enumerate the Windows test sources.' }
-          ./scripts/check_test_inventory.ps1 -Inventory catch-inventory.xml -Results catch-results.xml -Output test-file-times.json -ExpectedFiles $expected
-          if ($env:REPEAT_OFFLINE_NOTICE_TESTS -ne 'true') { exit 0 }
+          # All shards use the same seed, including on a full retry.
+          $seed = [uint32](([uint64]$env:GITHUB_RUN_ID % 4294967295) + 1)
+          if ($env:SHARD -eq '0') {
+            Invoke-WindowsTests @('*', '--list-tests', '--reporter', 'xml::out=catch-inventory.xml') 250000
+          }
+          Invoke-WindowsTests @(
+            '*', '--order', 'rand', '--rng-seed', "$seed",
+            '--shard-count', "$env:WINDOWS_SHARD_COUNT", '--shard-index', "$env:SHARD",
+            '--durations', 'yes', '--reporter', 'console', '--reporter', 'xml::out=catch-results.xml'
+          ) 250000
+          if ($env:SHARD -ne '0' -or $env:REPEAT_OFFLINE_NOTICE_TESTS -ne 'true') { exit 0 }
           foreach ($attempt in 1..8) {
             Write-Host "Checking offline notice restart timing, pass $attempt"
             Invoke-WindowsTests @('[offline_notice]', '--reporter', 'compact', '--success') 60000
           }
           exit 0
 
-      - name: Save verified per-file test times
-        if: needs.linux-cross.result == 'success'
+      - name: Save Windows shard reports
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows-test-file-times
-          path: test-file-times.json
+          name: windows-test-report-${{ matrix.shard }}
+          path: |
+            catch-results.xml
+            catch-inventory.xml
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
+          overwrite: true
 
+  ci-passed:
+    name: CI passed
+    needs: [changes, portable, linux-cross, windows-tests]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
       - name: Check job results
-        if: always()
         shell: bash
         env:
           EVENT: ${{ github.event_name }}
@@ -301,7 +389,7 @@ jobs:
           BUILD: ${{ needs.changes.outputs.build }}
           PORTABLE: ${{ needs.portable.result }}
           LINUX: ${{ needs.linux-cross.result }}
-          WINDOWS: ${{ steps.windows-tests.outcome }}
+          WINDOWS: ${{ needs.windows-tests.result }}
         run: |
           set -eu
           echo "Event=$EVENT detection=$DETECT build=$BUILD Portable=$PORTABLE cross=$LINUX Windows=$WINDOWS"
@@ -314,3 +402,32 @@ jobs:
             [[ $BUILD == true ]]
           fi
           [[ $PORTABLE == success && $LINUX == success && $WINDOWS == success ]]
+      - if: needs.windows-tests.result == 'success'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          filter: blob:none
+          persist-credentials: false
+      - if: needs.windows-tests.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: windows-test-report-*
+          path: windows-reports
+      - name: Verify the full Windows test inventory
+        if: needs.windows-tests.result == 'success'
+        shell: pwsh
+        run: |
+          $expected = @(git ls-files -- 'tests/*.cpp')
+          if ($LASTEXITCODE -ne 0 -or !$expected) { throw 'Cannot enumerate the Windows test sources.' }
+          $results = @(0..([int]$env:WINDOWS_SHARD_COUNT - 1) | ForEach-Object {
+            "windows-reports/windows-test-report-$_/catch-results.xml"
+          })
+          ./scripts/check_test_inventory.ps1 -Inventory windows-reports/windows-test-report-0/catch-inventory.xml -Results $results -Output test-file-times.json -ExpectedFiles $expected
+      - name: Save verified per-file test times
+        if: needs.windows-tests.result == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-test-file-times
+          path: test-file-times.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
