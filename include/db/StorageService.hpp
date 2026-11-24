@@ -385,11 +385,9 @@ public:
         int accountId,
         std::time_t periodStartFrom,
         std::time_t periodStartTo);
-    std::vector<PersistedQuotaSnapshot> getQuotaSnapshots(
-        int providerId,
-        int accountId,
-        std::time_t snapshotTimeFrom,
-        std::time_t snapshotTimeTo);
+    std::vector<PersistedQuotaSnapshot>
+    getQuotaSnapshots(int providerId, int accountId, std::time_t snapshotTimeFrom, std::time_t snapshotTimeTo,
+                      std::optional<std::pair<std::time_t, std::time_t>> skipReplayableRollupDays = std::nullopt);
     bool rebuildQuotaSnapshotRollups(
         int providerId,
         int accountId,

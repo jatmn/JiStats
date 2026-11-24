@@ -35,6 +35,6 @@ Version 16 keeps the first saved daily activity row per Claude stats cache and a
 
 Version 17 keeps one Kimi local runtime activity per provider account and task reference. It retains the newest saved terminal state when one exists and the newest unfinished state otherwise. The repair works with the stored rows alone.
 
-Version 18 gives daily quota rollups a sequence of observed billing-window bounds for reset counting in Analysis. Repeated readings of the same bounds share one entry. Rollups saved before the upgrade retain their within-day counts and lack cross-day evidence until rebuilt from raw snapshots.
+Version 18 gives daily quota rollups a sequence of observed billing-window bounds for reset counting in Analysis. Repeated readings of the same bounds share one entry. Rollups saved before the upgrade retain their within-day counts. Analysis can recover cross-day evidence by replaying retained raw snapshots when the full day remains available.
 
 Use `019` for the next numbered SQL migration in [`db_migrations/`](../../db_migrations/). The loader discovers later files relative to the working directory. Advance `schema_version` in the same transaction as the schema change. When a release includes a later migration, verify its discovery during actual [packaged startup and sign-in](../validation/desktop.md#dashboard-and-background-checks).

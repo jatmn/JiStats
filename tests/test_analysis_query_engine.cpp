@@ -1680,6 +1680,7 @@ TEST_CASE("AnalysisQueryEngine prefers daily quota rollups for long-range quota 
                 .execute("UPDATE quota_snapshot_rollups_daily SET observed_billing_windows = NULL "
                          "WHERE rollup_period_start_utc = '2026-04-10T00:00:00Z';")
                 .success());
+    REQUIRE(storage.execute("DELETE FROM quota_snapshots WHERE snapshot_time_utc LIKE '2026-04-10%';").success());
     const auto legacy = engine.buildViewModel(dashboard, preferences, now);
     REQUIRE(legacy.quotaTrendSeries.size() == 1);
     CHECK(legacy.quotaTrendSeries.front().resetCount == 2);
@@ -1769,6 +1770,156 @@ TEST_CASE("AnalysisQueryEngine preserves observed quota resets across rebuilt UT
     REQUIRE(startAfterMidnight.quotaTrendSeries.size() == 1);
     REQUIRE(startAfterMidnight.quotaTrendSeries.front().points.size() == 1);
     CHECK(startAfterMidnight.quotaTrendSeries.front().resetCount == secondDayResets);
+}
+
+TEST_CASE("Analysis counts rollup resets only inside the selected partial UTC days",
+          "[analysis][query_engine][quota_rollup_boundary]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    const int providerId = requireProviderId(storage, "grok");
+    const int accountId = ensureRuntimeAccountId(storage, "grok", "Grok");
+    const auto insert = [&](const char* time, const char* start, const char* end) {
+        REQUIRE(
+            storage
+                .execute("INSERT INTO quota_snapshots (provider_id, account_id, snapshot_time_utc, window_start_utc, "
+                         "window_end_utc, used_value, limit_value, confidence_tier, quota_dimension) "
+                         "VALUES (?, ?, ?, ?, ?, 40, 100, 'high', 'percent');",
+                         {std::to_string(providerId), std::to_string(accountId), time, start, end})
+                .success());
+    };
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("grok", "Grok", "grok.runtime_status")};
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "grok";
+    preferences.analysisSelectedAccountId = "grok.runtime_status";
+    const auto firstDay = makeUtcTime(2026, 4, 1);
+    const auto now = makeUtcTime(2026, 4, 20, 12);
+    const char* currentStart = "2026-04-01T12:00:00Z";
+    const char* currentEnd = "2026-04-30T12:00:00Z";
+    const char* partialDay = "2026-04-01";
+    SECTION("Current quota window starts after a recorded morning reset boundary") {
+        preferences.analysisDateRangePreset = AnalysisDateRangePreset::CurrentQuotaWindow;
+        insert("2026-04-01T08:00:00Z", "2026-03-02T12:00:00Z", currentStart);
+        insert("2026-04-01T13:00:00Z", currentStart, currentEnd);
+        insert("2026-04-02T13:00:00Z", currentStart, currentEnd);
+    }
+    SECTION("The current day has a later observation outside the selected end") {
+        preferences.analysisDateRangePreset = AnalysisDateRangePreset::ThisMonth;
+        partialDay = "2026-04-20";
+        insert("2026-04-01T13:00:00Z", currentStart, currentEnd);
+        insert("2026-04-20T08:00:00Z", currentStart, currentEnd);
+        insert("2026-04-20T13:00:00Z", "2026-04-20T12:30:00Z", "2026-05-19T12:00:00Z");
+    }
+
+    AnalysisQueryEngine engine(storage);
+    const auto raw = engine.buildViewModel(dashboard, preferences, now);
+    REQUIRE(raw.scope.dateRangePreset == preferences.analysisDateRangePreset);
+    REQUIRE(raw.quotaTrendSeries.size() == 1);
+    CHECK(raw.quotaTrendSeries.front().resetCount == 0);
+
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, firstDay, now));
+    const auto checkRollups = [&]() {
+        const auto analysis = engine.buildViewModel(dashboard, preferences, now);
+        REQUIRE(analysis.quotaTrendSeries.size() == 1);
+        const auto& series = analysis.quotaTrendSeries.front();
+        REQUIRE(series.points.size() == 2);
+        CHECK(series.points[0].dailyRollup);
+        CHECK(series.points[1].dailyRollup);
+        CHECK_FALSE(series.points[0].resetPoint);
+        CHECK_FALSE(series.points[1].resetPoint);
+        CHECK(series.resetCount == 0);
+    };
+    checkRollups();
+    REQUIRE(storage.execute("DELETE FROM quota_snapshots WHERE substr(snapshot_time_utc, 1, 10) = ?;", {partialDay})
+                .success());
+    checkRollups();
+}
+
+TEST_CASE("Analysis uses retained raw reset evidence for legacy and unrolled quota days",
+          "[analysis][query_engine][quota_rollup_boundary]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    const int providerId = requireProviderId(storage, "grok");
+    const int accountId = ensureRuntimeAccountId(storage, "grok", "Grok");
+    const auto insert = [&](const char* time, const char* start, const char* end, const char* dimension = "percent") {
+        REQUIRE(
+            storage
+                .execute("INSERT INTO quota_snapshots (provider_id, account_id, snapshot_time_utc, window_start_utc, "
+                         "window_end_utc, used_value, limit_value, confidence_tier, quota_dimension) "
+                         "VALUES (?, ?, ?, ?, ?, 40, 100, 'high', ?);",
+                         {std::to_string(providerId), std::to_string(accountId), time, start, end, dimension})
+                .success());
+    };
+    insert("2026-04-01T14:00:00Z", "2026-04-01T12:00:00Z", "2026-04-02T12:00:00Z");
+    insert("2026-04-02T14:00:00Z", "2026-04-02T12:00:00Z", "2026-04-03T12:00:00Z");
+    insert("2026-04-03T14:00:00Z", "2026-04-03T12:00:00Z", "2026-04-04T12:00:00Z");
+    const auto firstDay = makeUtcTime(2026, 4, 1);
+    const auto secondDay = makeUtcTime(2026, 4, 2);
+    const auto thirdDay = makeUtcTime(2026, 4, 3);
+    const auto now = makeUtcTime(2026, 4, 20);
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("grok", "Grok", "grok.runtime_status")};
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "grok";
+    preferences.analysisSelectedAccountId = "grok.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = firstDay;
+    preferences.analysisCustomRangeEndUtc = now;
+    AnalysisQueryEngine engine(storage);
+    const auto raw = engine.buildViewModel(dashboard, preferences, now);
+    REQUIRE(raw.quotaTrendSeries.size() == 1);
+    CHECK(raw.quotaTrendSeries.front().resetCount == 2);
+
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, firstDay, firstDay));
+    std::size_t expectedSeries = 1;
+    std::size_t expectedDailyPoints = 2;
+    const auto reopenWithLegacyRollups = [&]() {
+        REQUIRE(storage
+                    .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
+                             "DELETE FROM schema_version WHERE version = 18;")
+                    .success());
+        storage.close();
+        REQUIRE(storage.init(tempDb.path()));
+    };
+    SECTION("The v17 upgrade retains raw readings for the previously rolled-up day") {
+        reopenWithLegacyRollups();
+        REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, secondDay, secondDay));
+        expectedDailyPoints = 3;
+    }
+    SECTION("A legacy day keeps its saved count when some raw readings have expired") {
+        insert("2026-04-01T15:00:00Z", "2026-04-02T12:00:00Z", "2026-04-03T12:00:00Z");
+        REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, firstDay, firstDay));
+        reopenWithLegacyRollups();
+        REQUIRE(
+            storage.execute("DELETE FROM quota_snapshots WHERE snapshot_time_utc = '2026-04-01T14:00:00Z';").success());
+        REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, secondDay, secondDay));
+        expectedDailyPoints = 3;
+    }
+    SECTION("The middle day is retained only as raw history") {}
+    SECTION("A rollup for another dimension does not hide the middle day's raw reset evidence") {
+        insert("2026-04-02T15:00:00Z", "2026-04-02T10:00:00Z", "2026-04-02T16:00:00Z", "requests");
+        REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, secondDay, secondDay));
+        REQUIRE(storage
+                    .execute("DELETE FROM quota_snapshot_rollups_daily WHERE quota_dimension = 'percent' "
+                             "AND rollup_period_start_utc = '2026-04-02T00:00:00Z';")
+                    .success());
+        expectedSeries = 2;
+    }
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, thirdDay, thirdDay));
+
+    const auto mixed = engine.buildViewModel(dashboard, preferences, now);
+    REQUIRE(mixed.quotaTrendSeries.size() == expectedSeries);
+    const auto series = std::find_if(mixed.quotaTrendSeries.begin(), mixed.quotaTrendSeries.end(),
+                                     [](const auto& entry) { return entry.quotaDimension == "percent"; });
+    REQUIRE(series != mixed.quotaTrendSeries.end());
+    REQUIRE(series->points.size() == expectedDailyPoints);
+    CHECK(series->points.back().dailyRollup);
+    CHECK(series->points.back().resetPoint);
+    CHECK(series->resetCount == 2);
 }
 
 TEST_CASE("AnalysisQueryEngine resolves current quota window from the latest scoped quota snapshot", "[analysis][query_engine][analysis_query_engine]") {

@@ -8,7 +8,7 @@ Open the dedicated Analysis workspace from the dashboard. The provider, account,
 
 [AnalysisPresenter](../../src/gui/AnalysisPresenter.cpp) owns the display. [AnalysisQueryEngine](../../src/reporting/AnalysisQueryEngine.cpp) resolves the persisted scope used for Analysis and HTML reporting. Providers and accounts remain selectable while they have retained daily usage rollups. Activity shows the retained daily total and identifies records without hourly detail.
 
-Quota rollups preserve observed window changes across UTC days within the selected range. Older rollups keep their saved within-day counts. Rebuilding them from raw snapshots restores the boundary evidence when the underlying data is available.
+Quota rollups preserve observed window changes across UTC days within the selected range. Analysis reads retained snapshots for partial days and days whose reset evidence is unavailable in a rollup. A full legacy day keeps its saved within-day count when too few snapshots remain to replay it.
 
 ## Exports
 

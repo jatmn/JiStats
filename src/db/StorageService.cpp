@@ -2328,11 +2328,10 @@ std::vector<PersistedUsageRollup> StorageService::getUsageRollups(
     return rollups;
 }
 
-std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
-    int providerId,
-    int accountId,
-    std::time_t snapshotTimeFrom,
-    std::time_t snapshotTimeTo) {
+std::vector<PersistedQuotaSnapshot>
+StorageService::getQuotaSnapshots(int providerId, int accountId, std::time_t snapshotTimeFrom,
+                                  std::time_t snapshotTimeTo,
+                                  std::optional<std::pair<std::time_t, std::time_t>> skipReplayableRollupDays) {
     std::vector<PersistedQuotaSnapshot> snapshots;
     if (!isOpen() ||
         providerId <= 0 ||
@@ -2343,7 +2342,7 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
         return snapshots;
     }
 
-    QueryResult result = execute(
+    std::string sql =
         "SELECT qs.id, qs.provider_id, qs.account_id, qs.plan_id, qs.snapshot_time_utc, "
         "qs.window_start_utc, qs.window_end_utc, qs.used_value, qs.limit_value, qs.remaining_value, "
         "qs.confidence_tier, qs.quota_dimension, qs.is_reconciled, COALESCE(qs.basis_summary, ''), qs.created_at_utc, "
@@ -2351,10 +2350,25 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
         "qs.snapshot_subsecond_ns "
         "FROM quota_snapshots qs "
         "LEFT JOIN plans pl ON pl.id = qs.plan_id AND pl.account_id = qs.account_id "
-        "WHERE qs.provider_id = ? AND qs.account_id = ? AND qs.snapshot_time_utc >= ? AND qs.snapshot_time_utc <= ? "
-        "ORDER BY qs.snapshot_time_utc ASC, qs.snapshot_subsecond_ns ASC, qs.id ASC;",
-        {std::to_string(providerId), std::to_string(accountId), toUtcIsoString(snapshotTimeFrom),
-         toUtcIsoString(snapshotTimeTo)});
+        "WHERE qs.provider_id = ? AND qs.account_id = ? AND qs.snapshot_time_utc >= ? AND qs.snapshot_time_utc <= ?";
+    std::vector<std::string> params{std::to_string(providerId), std::to_string(accountId),
+                                    toUtcIsoString(snapshotTimeFrom), toUtcIsoString(snapshotTimeTo)};
+    if (skipReplayableRollupDays) {
+        // Limit to missing reset evidence without transferring raw samples represented by complete daily rollups.
+        sql += " AND NOT EXISTS (SELECT 1 FROM quota_snapshot_rollups_daily r "
+               "WHERE r.provider_id = qs.provider_id AND r.account_id = qs.account_id "
+               "AND r.plan_bucket_id = COALESCE(qs.plan_id, 0) "
+               "AND r.quota_dimension = CASE "
+               "WHEN pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB "
+               "'openai_subscription_codex_local:*' "
+               "THEN 'percent' ELSE COALESCE(NULLIF(qs.quota_dimension, ''), 'requests') END "
+               "AND r.rollup_period_start_utc = substr(qs.snapshot_time_utc, 1, 10) || 'T00:00:00Z' "
+               "AND r.rollup_period_start_utc BETWEEN ? AND ? AND r.observed_billing_windows IS NOT NULL)";
+        params.push_back(toUtcIsoString(skipReplayableRollupDays->first));
+        params.push_back(toUtcIsoString(skipReplayableRollupDays->second));
+    }
+    sql += " ORDER BY qs.snapshot_time_utc ASC, qs.snapshot_subsecond_ns ASC, qs.id ASC;";
+    QueryResult result = execute(sql, params);
     if (!result.success()) {
         pImpl->lastError = "Failed to query quota snapshots";
         return snapshots;
