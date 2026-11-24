@@ -3810,7 +3810,30 @@ TEST_CASE("AppController startup hydration shows persisted quota state while liv
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
-    REQUIRE(app.init());
+    std::atomic<bool> sampling{false};
+    std::promise<void> releaseSample;
+    auto released = releaseSample.get_future().share();
+    app.setBeforeCodexRolloutSampleForTesting([&]() {
+        if (!sampling.exchange(true)) {
+            released.wait_for(std::chrono::seconds(5));
+        }
+    });
+
+    auto startup = std::async(std::launch::async, [&]() { return app.init(); });
+    const bool sampleHeld = waitForCondition([&]() { return sampling.load(); }, std::chrono::seconds(2));
+    const bool initFinished = startup.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    const auto beforeSampling = app.getDashboardViewModelForTesting();
+    const int fetchesBeforeSample = provider->getQuotaFetchCount();
+    releaseSample.set_value();
+
+    REQUIRE(startup.get());
+    CHECK(sampleHeld);
+    CHECK(initFinished);
+    CHECK(fetchesBeforeSample == 0);
+    const auto* cached = findProviderStatus(beforeSampling, "openai");
+    REQUIRE(cached != nullptr);
+    REQUIRE_FALSE(cached->quotas.empty());
+    CHECK(cached->quotas.front().used == 60);
     REQUIRE(waitForCondition([&provider]() {
         return provider->getQuotaFetchCount() > 0;
     }, std::chrono::seconds(5)));

@@ -4578,7 +4578,7 @@ public:
         }
     }
 
-    void applyProviderPreferences(const DashboardPreferences& preferences) {
+    void applyProviderPreferences(const DashboardPreferences& preferences, bool deferCodexRolloutBaseline = false) {
         applyOpenAIPreferenceToProviderManager(preferences.openaiSubscriptionTrackingEnabled);
         applyMiniMaxPreferenceToProviderManager(preferences.miniMaxSubscriptionTrackingEnabled);
         applyClaudeCodePreferenceToProviderManager(preferences.claudeCodeEnabled);
@@ -4590,7 +4590,8 @@ public:
         }
         const unsigned subscriptionMask = (preferences.grokSubscriptionTrackingEnabled ? 1u : 0u) |
                                           (preferences.cursorSubscriptionTrackingEnabled ? 2u : 0u);
-        const bool watchCodexRollouts = preferences.openaiSubscriptionTrackingEnabled && resolveOpenAIRuntimeAdapter();
+        const bool watchCodexRollouts = !deferCodexRolloutBaseline && preferences.openaiSubscriptionTrackingEnabled &&
+                                        resolveOpenAIRuntimeAdapter();
         std::unique_lock<std::mutex> lock(refreshWatcherMutex);
         const bool codexWatchChanged = openAICodexWatcherEnabled != watchCodexRollouts;
         if (codexWatchChanged) {
@@ -7625,8 +7626,6 @@ bool AppController::init(bool launchInBackground) {
         pImpl->providerManager.addProvider(kimiAdapter);
 #endif
 #endif
-        pImpl->applyProviderPreferences(loadedPreferences);
-
         bool usedPersistedStartupHydration = false;
         bool executedStartupCatchUp = false;
         DashboardViewModel viewModel;
@@ -7635,7 +7634,10 @@ bool AppController::init(bool launchInBackground) {
                 pImpl->buildPersistedStartupHydrationViewModel(now, loadedPreferences)) {
             viewModel = *hydratedViewModel;
             usedPersistedStartupHydration = true;
+            // The deferred refresh primes the watcher before it fetches live quota.
+            pImpl->applyProviderPreferences(loadedPreferences, true);
         } else {
+            pImpl->applyProviderPreferences(loadedPreferences);
             pImpl->runProviderDiscovery();
             pImpl->importEnabledLocalProviderActivity(loadedPreferences);
             Impl::QuotaRefresh refresh{++pImpl->quotaRefreshGeneration, {}, {}, true};
