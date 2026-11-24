@@ -3777,19 +3777,24 @@ TEST_CASE("AppController preserves the latest same-second Codex balance across r
         rollout.close();
         REQUIRE(rollout.good());
     };
-    enum class ReplayCase { Fractional, WholeSecond, Legacy };
+    enum class ReplayCase { Fractional, WholeSecond, SameTimestamp, Legacy };
     auto replayCase = ReplayCase::Fractional;
     SECTION("Fractional readings preserve a return to an earlier balance") {}
     SECTION("Whole-second reading replays after a fractional reading") {
         replayCase = ReplayCase::WholeSecond;
+    }
+    SECTION("Two balances at an identical timestamp replay without changing their order") {
+        replayCase = ReplayCase::SameTimestamp;
     }
     SECTION("A precise replay upgrades legacy copies before an earlier reading arrives") {
         replayCase = ReplayCase::Legacy;
     }
 
     const bool wholeSecond = replayCase == ReplayCase::WholeSecond;
-    const auto expectedLatest = wholeSecond ? 60 : 75;
-    writeReading(25, wholeSecond ? "" : ".100", 1);
+    const bool sameTimestamp = replayCase == ReplayCase::SameTimestamp;
+    const bool startsAtZero = wholeSecond || sameTimestamp;
+    const auto expectedLatest = startsAtZero ? 60 : 75;
+    writeReading(25, wholeSecond ? "" : (sameTimestamp ? ".000" : ".100"), 1);
     auto providers = std::make_shared<ProviderManager>();
     providers->addProvider(std::make_shared<OpenAIAdapter>());
     AppController app;
@@ -3816,9 +3821,16 @@ TEST_CASE("AppController preserves the latest same-second Codex balance across r
         writeReading(40, ".050", 3);
         app.refreshRuntimeForTesting();
     } else {
-        writeReading(40, ".200", 3);
+        writeReading(40, sameTimestamp ? "" : ".200", 3);
         app.refreshRuntimeForTesting();
-        if (wholeSecond) {
+        if (sameTimestamp) {
+            writeReading(25, ".000", 7);
+            app.refreshRuntimeForTesting();
+            writeReading(40, "", 8);
+            app.refreshRuntimeForTesting();
+            writeReading(25, ".000", 9);
+            app.refreshRuntimeForTesting();
+        } else if (wholeSecond) {
             writeReading(25, "", 9);
             app.refreshRuntimeForTesting();
             app.refreshRuntimeForTesting();
@@ -3840,8 +3852,13 @@ TEST_CASE("AppController preserves the latest same-second Codex balance across r
     const auto snapshots =
         storage.execute("SELECT remaining_value, snapshot_subsecond_ns FROM quota_snapshots ORDER BY id;");
     REQUIRE(snapshots.success());
-    CHECK(snapshots.rowCount() == (wholeSecond ? 2 : 3));
-    CHECK(snapshots.getString(0, 1) == (wholeSecond ? "0" : "100000000"));
+    CHECK(snapshots.rowCount() == (startsAtZero ? 2 : 3));
+    CHECK(snapshots.getString(0, 1) == (startsAtZero ? "0" : "100000000"));
+    if (sameTimestamp) {
+        CHECK(snapshots.getString(1, 1) == "0");
+        CHECK(snapshots.getInt(0, 0) == 75);
+        CHECK(snapshots.getInt(1, 0) == 60);
+    }
     if (replayCase == ReplayCase::Legacy) {
         CHECK(snapshots.getString(1, 1) == "100000000");
     }

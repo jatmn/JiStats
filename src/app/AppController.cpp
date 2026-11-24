@@ -3371,7 +3371,7 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
     sql += limit > 0 ? "?" : "NULL";
     sql += ", ?, ?, ?, ?, ?, NULLIF(?, '')";
     if (codexReading) {
-        // Use the dimension/time index to find the preceding observation in this window.
+        // Match exact capture times and balances using the dimension/time index.
         // On legacy replay, promote the matching run together so its stored copies still count as one.
         sql += ", replay.id FROM (SELECT 1) LEFT JOIN ("
                "    WITH candidates AS ("
@@ -3385,19 +3385,16 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
                "        AND ((window_start_utc = ? AND window_end_utc = ?) OR "
                "             (quota_dimension = 'requests' AND window_start_utc = ? AND window_end_utc = ?)) "
                "        AND (snapshot_subsecond_ns IS NULL OR snapshot_subsecond_ns <= CAST(NULLIF(?, '') AS INTEGER))"
-               "    ), latest AS ("
-               "        SELECT id, snapshot_subsecond_ns, same_balance FROM candidates "
-               "        ORDER BY snapshot_subsecond_ns DESC, id DESC LIMIT 1"
                "    ) "
-               "    SELECT candidate.id FROM latest JOIN candidates candidate "
-               "    ON candidate.id = latest.id OR ("
-               "        latest.snapshot_subsecond_ns IS NULL AND candidate.snapshot_subsecond_ns IS NULL "
-               "        AND candidate.same_balance AND candidate.id > COALESCE(("
-               "            SELECT MAX(id) FROM candidates WHERE snapshot_subsecond_ns IS NULL AND NOT same_balance"
-               "        ), 0)"
-               "    ) "
-               "    WHERE latest.same_balance "
-               "      AND (latest.snapshot_subsecond_ns IS NULL OR latest.snapshot_subsecond_ns = CAST(? AS INTEGER)) "
+               "    SELECT id FROM candidates "
+               "    WHERE snapshot_subsecond_ns = CAST(NULLIF(?, '') AS INTEGER) AND same_balance "
+               "    UNION ALL "
+               "    SELECT id FROM candidates "
+               "    WHERE snapshot_subsecond_ns IS NULL AND same_balance "
+               "      AND NOT EXISTS (SELECT 1 FROM candidates WHERE snapshot_subsecond_ns IS NOT NULL) "
+               "      AND id > COALESCE(("
+               "          SELECT MAX(id) FROM candidates WHERE snapshot_subsecond_ns IS NULL AND NOT same_balance"
+               "      ), 0) "
                ") replay ON TRUE WHERE TRUE "
                "ON CONFLICT(id) DO UPDATE SET snapshot_subsecond_ns = excluded.snapshot_subsecond_ns "
                "WHERE quota_snapshots.snapshot_subsecond_ns IS NULL AND excluded.snapshot_subsecond_ns IS NOT NULL;";
