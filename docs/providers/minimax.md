@@ -28,4 +28,6 @@ For standalone readiness, capture, and diagnostics commands, add `-DJISTATS_BUIL
 
 Keep native capture and diagnostics output outside any JiStats source checkout. Both the desktop capture command and the standalone CLI reject paths inside a source tree, including when the executable was built elsewhere.
 
+Capture and diagnostic exports check that the JSON file closes successfully before reporting a completed write. A write error identifies the output path.
+
 The option defaults to `OFF`. Enabling it builds `JiStatsMiniMaxCli.exe` alongside the desktop app, and `cmake --install` installs it to the install prefix's `bin/` directory. The desktop MiniMax integration is available in either configuration. `JISTATS_BUILD_TESTS` controls the tests independently.
