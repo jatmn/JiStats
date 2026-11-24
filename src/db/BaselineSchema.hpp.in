@@ -25,6 +25,9 @@ inline constexpr char kKimiTaskDedupSql[] =
 inline constexpr char kQuotaWindowObservationsSql[] =
     R"jistats_sql(@JISTATS_QUOTA_WINDOW_OBSERVATIONS_SQL@)jistats_sql";
 
+inline constexpr char kCredentialValidationSql[] =
+    R"jistats_sql(@JISTATS_CREDENTIAL_VALIDATION_SQL@)jistats_sql";
+
 // Use the same DDL for fresh and historical version 12 databases.
 inline constexpr std::string_view kBaselineSchema(kBaselineSchemaSql);
 inline constexpr auto kRecoveryAndExportStart = kBaselineSchema.find("-- Recovery and export metadata");

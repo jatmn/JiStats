@@ -99,6 +99,8 @@ struct PersistedCredentialProfile {
     std::time_t lastValidatedAt = 0;
     std::string createdAtUtc;
     std::string updatedAtUtc;
+    std::string validationState = "unknown";
+    std::string lastValidationError;
 };
 
 enum class UsageRollupResolution {

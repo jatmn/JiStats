@@ -1170,7 +1170,9 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     REQUIRE(storage
                 .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
                          "DELETE FROM schema_version WHERE version >= 13;"
-                         "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
+                         "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;"
+                         "ALTER TABLE credential_profiles DROP COLUMN last_validation_error;"
+                         "ALTER TABLE credential_profiles DROP COLUMN validation_state;")
                 .success());
     storage.close();
 
@@ -1201,7 +1203,7 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     CHECK(stage == std::future_status::timeout);
     CHECK_FALSE(app.getDashboardViewModelForTesting().startupPending);
     REQUIRE(storage.init(dbPath.path()));
-    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 18);
+    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 19);
 #else
     requireSqlite();
 #endif
@@ -2322,7 +2324,10 @@ TEST_CASE("AppController shows the accepted MiniMax account name after saving a 
     app.shutdown();
 }
 
-TEST_CASE("AppController surfaces MiniMax validation failures through the settings shell", "[app][shell][minimax]") {
+TEST_CASE("AppController restores the last completed MiniMax validation after restart", "[app][shell][minimax]") {
+    requireSqlite();
+    const std::string expectedState = GENERATE("invalid", "unreachable", "valid");
+    CAPTURE(expectedState);
     TempTestDatabase dbPath;
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
@@ -2339,7 +2344,16 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
-    app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+    std::string expectedStoredError;
+    if (expectedState == "invalid") {
+        app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+        expectedStoredError = "MiniMax subscription key rejected";
+    } else if (expectedState == "unreachable") {
+        app.setMiniMaxValidationResponseForTesting(false, 0, "", "Synthetic private transport detail");
+        expectedStoredError = "Could not reach MiniMax to validate this credential";
+    } else {
+        app.setMiniMaxValidationResponseForTesting(true, 200, R"({"base_resp":{"status_code":0}})", "");
+    }
     REQUIRE(app.init());
     REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
     REQUIRE(waitForCondition([&app]() {
@@ -2363,21 +2377,61 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
     validate.action = DashboardMiniMaxCredentialAction::Validate;
     validate.planKey = "token_plan";
     REQUIRE(app.submitMiniMaxCredentialActionForTesting(validate));
-    REQUIRE(waitForCondition([&app]() {
-        return app.getMiniMaxValidationStateForTesting("token_plan") ==
-            std::optional<std::string>("invalid");
-    }, std::chrono::milliseconds(4000)));
+    REQUIRE(waitForCondition(
+        [&app, &expectedState]() {
+            return app.getMiniMaxValidationStateForTesting("token_plan") == std::optional<std::string>(expectedState);
+        },
+        std::chrono::milliseconds(4000)));
 
     app.refreshRuntimeForTesting();
 
     const DashboardViewModel viewModel = app.getDashboardViewModelForTesting();
     const auto summary = findMiniMaxSummary(viewModel, "token_plan");
     REQUIRE(summary.has_value());
-    CHECK(summary->validationState == "invalid");
-    CHECK(summary->lastValidationError == "MiniMax subscription key rejected");
+    CHECK(summary->validationState == expectedState);
+    if (expectedState == "invalid") {
+        CHECK(summary->lastValidationError == "MiniMax subscription key rejected");
+    }
     CHECK(summary->lastValidatedAtLabel.find("UTC") != std::string::npos);
-
     app.shutdown();
+
+    AppController restarted;
+    restarted.setDisableTaskbarForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    restarted.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(restarted.init());
+    const auto restored = findMiniMaxSummary(restarted.getDashboardViewModelForTesting(), "token_plan");
+    REQUIRE(restored.has_value());
+    CHECK(restored->hasPersistedProfile);
+    CHECK(restored->validationState == expectedState);
+    CHECK(restored->lastValidationError == expectedStoredError);
+    CHECK(restored->lastValidatedAtLabel == summary->lastValidatedAtLabel);
+
+    if (expectedState == "invalid") {
+        REQUIRE(restarted.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+        REQUIRE(waitForCondition([&restarted]() {
+            return restarted.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences);
+        }));
+        save.secret = "sk-tp-replacement";
+        REQUIRE(restarted.submitMiniMaxCredentialActionForTesting(save));
+        REQUIRE(waitForCondition([&restarted]() {
+            return restarted.getDashboardStatusTextForTesting() == "Stored MiniMax Token Plan credential.";
+        }));
+    }
+    restarted.shutdown();
+
+    if (expectedState == "invalid") {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        const auto record = storage.execute("SELECT validation_state, last_validation_error, "
+                                            "last_validated_at_utc IS NULL FROM credential_profiles;");
+        REQUIRE(record.success());
+        REQUIRE(record.rowCount() == 1);
+        CHECK(record.getString(0, 0) == "unknown");
+        CHECK(record.getString(0, 1).empty());
+        CHECK(record.getBool(0, 2));
+    }
 }
 
 TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the masked secret field", "[app][shell][minimax]") {

@@ -772,6 +772,7 @@ bool MiniMaxAdapter::storeSubscriptionCredential(
     }
 
     normalized.validationState = "pending";
+    normalized.lastValidatedAt = 0;
     normalized.lastValidationError.clear();
     pImpl->subscriptionProfile = normalized;
     pImpl->apiKey.clear();

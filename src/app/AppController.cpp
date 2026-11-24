@@ -3573,6 +3573,29 @@ std::string normalizeMiniMaxValidationError(const std::string& error) {
     return error;
 }
 
+std::string miniMaxValidationErrorForStorage(const MiniMaxSubscriptionCredentialProfile& profile) {
+    if (profile.validationState == "valid") {
+        return {};
+    }
+
+    // Persist only known UI diagnoses. Platform or transport error details can contain private data.
+    constexpr const char* safeErrors[] = {
+        "Stored MiniMax credential is missing from Windows Credential Manager",
+        "This credential does not match the selected MiniMax subscription surface",
+        "MiniMax subscription key rejected",
+        "MiniMax subscription validation failed with a provider error",
+        "MiniMax subscription validation response has no numeric status code",
+        "MiniMax validation endpoint is temporarily unavailable",
+    };
+    for (const auto* safeError : safeErrors) {
+        if (profile.lastValidationError == safeError) {
+            return safeError;
+        }
+    }
+    return profile.validationState == "unreachable" ? "Could not reach MiniMax to validate this credential"
+                                                    : "MiniMax credential validation failed";
+}
+
 std::string lastValidatedLabel(std::time_t timestamp) {
     return timestamp > 0 ? formatTimeUtc(timestamp) : "";
 }
@@ -5949,9 +5972,9 @@ public:
                 account.accountDisplayName);
             profile.profileName = persisted->profileName;
             profile.secretRef = persisted->secretRef;
-            profile.validationState = "unknown";
+            profile.validationState = persisted->validationState;
             profile.lastValidatedAt = persisted->lastValidatedAt;
-            profile.lastValidationError.clear();
+            profile.lastValidationError = persisted->lastValidationError;
             updateMiniMaxCredentialProfile(planKey, profile);
         }
 
@@ -6057,7 +6080,13 @@ public:
         persisted.credentialType = profile.credentialType.empty()
             ? "subscription_key"
             : profile.credentialType;
-        persisted.lastValidatedAt = profile.lastValidatedAt;
+        if (profile.lastValidatedAt > 0 &&
+            (profile.validationState == "valid" || profile.validationState == "invalid" ||
+             profile.validationState == "unreachable")) {
+            persisted.lastValidatedAt = profile.lastValidatedAt;
+            persisted.validationState = profile.validationState;
+            persisted.lastValidationError = miniMaxValidationErrorForStorage(profile);
+        }
 
         if (!storageService.upsertCredentialProfile(persisted)) {
             error = storageService.getLastError();
