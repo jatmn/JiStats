@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <windows.h>
 
 #include "providers/openai/OpenAIAdapter.hpp"
 #include "temp_test_directory.hpp"
@@ -480,6 +481,51 @@ TEST_CASE("OpenAI fetchQuota maps the newest local Codex rollout snapshot into q
     CHECK(quota.windowType == "interval");
     CHECK(quota.providerSurface == "openai_subscription_codex_local");
     CHECK(quota.rawResponse.empty());
+}
+
+TEST_CASE("OpenAI fetchQuota reuses unchanged rollouts and rechecks a growing older session",
+          "[openai][quota][codex]") {
+    TempFixtureDirectory codexHomeRoot;
+    ScopedEnvironmentVariable codexHome("CODEX_HOME", codexHomeRoot.path().string());
+    const std::string older =
+        R"json({"timestamp":"2025-04-18T20:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":11,"window_minutes":300,"resets_at":1745006400},"secondary":null}}})json";
+    const std::string newer =
+        R"json({"timestamp":"2025-04-18T21:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":28,"window_minutes":300,"resets_at":1745009457},"secondary":null}}})json";
+    const std::string appended =
+        R"json({"timestamp":"2025-04-18T22:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":40,"window_minutes":300,"resets_at":1745013000},"secondary":null}}})json";
+    const auto olderPath = codexHomeRoot.makeFile("sessions/older/rollout-old.jsonl", older);
+    const auto newerPath = codexHomeRoot.makeFile("sessions/newer/rollout-new.jsonl", newer);
+    OpenAIAdapter adapter;
+
+    const auto initial = adapter.fetchQuota();
+    REQUIRE(initial.success);
+    CHECK(initial.used == 28);
+    {
+        // Deny a fresh read of the winning file while allowing filesystem metadata requests.
+        const HANDLE openFile = CreateFileW(newerPath.c_str(), GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                            FILE_ATTRIBUTE_NORMAL, nullptr);
+        REQUIRE(openFile != INVALID_HANDLE_VALUE);
+        const std::unique_ptr<void, decltype(&CloseHandle)> file(openFile, CloseHandle);
+        const auto unchanged = adapter.fetchQuota();
+        REQUIRE(unchanged.success);
+        CHECK(unchanged.used == 28);
+        CHECK(unchanged.snapshotTime == initial.snapshotTime);
+    }
+
+    {
+        std::ofstream stream(olderPath, std::ios::app | std::ios::binary);
+        stream << '\n' << appended << '\n';
+        REQUIRE(stream.good());
+    }
+    const auto updated = adapter.fetchQuota();
+    REQUIRE(updated.success);
+    CHECK(updated.used == 40);
+    CHECK(updated.snapshotTime > initial.snapshotTime);
+
+    REQUIRE(std::filesystem::remove(olderPath));
+    const auto fallback = adapter.fetchQuota();
+    REQUIRE(fallback.success);
+    CHECK(fallback.used == 28);
 }
 
 TEST_CASE("OpenAI fetchQuota selects the latest subsecond reading in one Codex rollout", "[openai][quota][codex]") {

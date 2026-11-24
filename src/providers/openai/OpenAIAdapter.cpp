@@ -9,9 +9,11 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <set>
+#include <unordered_map>
 
 namespace JiStats {
 
@@ -467,6 +469,38 @@ bool shouldReplaceCodexSnapshot(
     return candidate.sourcePath > current.sourcePath;
 }
 
+struct RolloutFileVersion {
+    std::filesystem::file_time_type modified;
+    std::uintmax_t size;
+
+    bool operator==(const RolloutFileVersion& other) const {
+        return modified == other.modified && size == other.size;
+    }
+};
+
+std::optional<RolloutFileVersion> readRolloutFileVersion(const std::filesystem::path& path) {
+    std::error_code error;
+    const auto modified = std::filesystem::last_write_time(path, error);
+    if (error) {
+        return std::nullopt;
+    }
+    const auto size = std::filesystem::file_size(path, error);
+    if (error) {
+        return std::nullopt;
+    }
+    return RolloutFileVersion{modified, size};
+}
+
+struct CachedRolloutQuota {
+    RolloutFileVersion version;
+    CodexRateLimitSnapshot snapshot;
+    bool seen;
+};
+
+using RolloutQuotaCache = std::unordered_map<std::filesystem::path, CachedRolloutQuota>;
+
+CodexRateLimitSnapshot readLatestRolloutQuota(const std::string& directoryPath, RolloutQuotaCache* cache);
+
 std::string tryGetEnvironmentVariable(const char* name) {
     if (!name || *name == '\0') {
         return {};
@@ -569,6 +603,8 @@ bool tryMapCodexSnapshotToQuotaResponse(
 // Private implementation (PImpl) for OpenAIAdapter
 struct OpenAIAdapter::Impl {
     bool enabled_ = true;
+    std::mutex rolloutQuotaMutex;
+    RolloutQuotaCache rolloutQuotaCache;
     // Future: store API key, organization, endpoints, etc.
 };
 
@@ -594,15 +630,16 @@ UsageResponse OpenAIAdapter::fetchUsage(std::time_t from, std::time_t to) {
 QuotaResponse OpenAIAdapter::fetchQuota() {
     QuotaResponse q;
     const std::string rolloutDirectory = resolveCodexRolloutDirectoryImpl();
+    std::lock_guard<std::mutex> lock(pImpl->rolloutQuotaMutex);
     if (rolloutDirectory.empty()) {
+        pImpl->rolloutQuotaCache.clear();
         q.success = false;
         q.error = "Unable to determine the local Codex rollout directory";
         q.snapshotTime = std::time(nullptr);
         return q;
     }
 
-    const CodexRateLimitSnapshot snapshot =
-        parseLatestCodexRateLimitSnapshotFromRolloutDirectory(rolloutDirectory);
+    const CodexRateLimitSnapshot snapshot = readLatestRolloutQuota(rolloutDirectory, &pImpl->rolloutQuotaCache);
     if (!snapshot.success) {
         q.success = false;
         q.error = snapshot.error;
@@ -682,10 +719,12 @@ std::vector<UsageEvent> OpenAIAdapter::parseFixtureFile(const std::string& fileP
     return events;
 }
 
-CodexRateLimitSnapshot OpenAIAdapter::parseCodexRateLimitFixtureFile(const std::string& filePath) {
+namespace {
+
+CodexRateLimitSnapshot readRolloutQuota(const std::string& filePath, std::optional<std::size_t>& bytesRead) {
     CodexRateLimitSnapshot snapshot;
 
-    std::ifstream in(filePath);
+    std::ifstream in(filePath, std::ios::binary);
     if (!in.is_open()) {
         snapshot.error = "Failed to open Codex rate-limit fixture";
         return snapshot;
@@ -694,6 +733,9 @@ CodexRateLimitSnapshot OpenAIAdapter::parseCodexRateLimitFixtureFile(const std::
     std::stringstream buffer;
     buffer << in.rdbuf();
     const std::string content = buffer.str();
+    if (!buffer.bad()) {
+        bytesRead = content.size();
+    }
 
     JsonValue root;
     if (JsonParser::parse(content, root)) {
@@ -749,8 +791,7 @@ CodexRateLimitSnapshot OpenAIAdapter::parseCodexRateLimitFixtureFile(const std::
     return snapshot;
 }
 
-CodexRateLimitSnapshot OpenAIAdapter::parseLatestCodexRateLimitSnapshotFromRolloutDirectory(
-    const std::string& directoryPath) {
+CodexRateLimitSnapshot readLatestRolloutQuota(const std::string& directoryPath, RolloutQuotaCache* cache) {
     CodexRateLimitSnapshot latestSnapshot;
 
     if (directoryPath.empty()) {
@@ -761,6 +802,9 @@ CodexRateLimitSnapshot OpenAIAdapter::parseLatestCodexRateLimitSnapshotFromRollo
     std::error_code ec;
     const std::filesystem::path root(directoryPath);
     if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
+        if (cache != nullptr) {
+            cache->clear();
+        }
         latestSnapshot.error = "Codex rollout directory does not exist";
         return latestSnapshot;
     }
@@ -788,17 +832,47 @@ CodexRateLimitSnapshot OpenAIAdapter::parseLatestCodexRateLimitSnapshotFromRollo
         }
 
         ++rolloutFileCount;
-        CodexRateLimitSnapshot candidate =
-            parseCodexRateLimitFixtureFile(it->path().string());
-        if (!candidate.success) {
+        const auto& path = it->path();
+        CodexRateLimitSnapshot parsed;
+        const CodexRateLimitSnapshot* candidate = &parsed;
+        std::optional<std::size_t> bytesRead;
+        if (cache == nullptr) {
+            parsed = readRolloutQuota(path.string(), bytesRead);
+        } else {
+            const auto version = readRolloutFileVersion(path);
+            auto cached = cache->find(path);
+            if (cached != cache->end() && version == cached->second.version) {
+                cached->second.seen = true;
+                candidate = &cached->second.snapshot;
+            } else {
+                parsed = readRolloutQuota(path.string(), bytesRead);
+                // Cache only complete reads of files that remained stable while being read.
+                if (version && bytesRead == version->size && readRolloutFileVersion(path) == version) {
+                    cached = cache->insert_or_assign(path, CachedRolloutQuota{*version, std::move(parsed), true}).first;
+                    candidate = &cached->second.snapshot;
+                }
+            }
+        }
+        if (!candidate->success) {
             ++failedSnapshotCount;
-            lastFailureError = candidate.error;
+            lastFailureError = candidate->error;
             lastFailurePath = it->path().filename().string();
             continue;
         }
 
-        if (shouldReplaceCodexSnapshot(candidate, latestSnapshot)) {
-            latestSnapshot = std::move(candidate);
+        if (shouldReplaceCodexSnapshot(*candidate, latestSnapshot)) {
+            latestSnapshot = *candidate;
+        }
+    }
+
+    if (cache != nullptr) {
+        for (auto entry = cache->begin(); entry != cache->end();) {
+            if (entry->second.seen) {
+                entry->second.seen = false;
+                ++entry;
+            } else {
+                entry = cache->erase(entry);
+            }
         }
     }
 
@@ -821,6 +895,18 @@ CodexRateLimitSnapshot OpenAIAdapter::parseLatestCodexRateLimitSnapshotFromRollo
     }
 
     return latestSnapshot;
+}
+
+} // namespace
+
+CodexRateLimitSnapshot OpenAIAdapter::parseCodexRateLimitFixtureFile(const std::string& filePath) {
+    std::optional<std::size_t> bytesRead;
+    return readRolloutQuota(filePath, bytesRead);
+}
+
+CodexRateLimitSnapshot
+OpenAIAdapter::parseLatestCodexRateLimitSnapshotFromRolloutDirectory(const std::string& directoryPath) {
+    return readLatestRolloutQuota(directoryPath, nullptr);
 }
 
 std::vector<CodexTokenUsageSnapshot>
