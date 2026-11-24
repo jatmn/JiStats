@@ -12,6 +12,8 @@ Replay the [Claude fixtures](../fixtures/claude/) with [the Claude parser tests]
 
 An activity day counts once per cache and account across cache revisions.
 
+The local aggregate requires a recorded token or message counter. An explicit zero is a valid measurement. When both counters are missing or invalid, the aggregate is unavailable.
+
 ## Kimi Code
 
 [KimiAdapter](../../src/providers/kimi/KimiAdapter.cpp) reads selected configuration and runtime metadata under `~/.kimi`. An existing root can indicate the client is installed before session activity is available. The local path reports activity from approved session, task, and notification metadata. Those records carry no token usage.

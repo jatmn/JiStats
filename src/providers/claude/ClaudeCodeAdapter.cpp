@@ -85,17 +85,24 @@ QuotaResponse ClaudeCodeAdapter::fetchQuota() {
         return response;
     }
 
+    if (!result.totalMessages && !result.hasModelTokenCounts) {
+        pImpl->lastError = "Claude stats-cache has no aggregate activity counters";
+        response.error = pImpl->lastError;
+        response.unavailable = true;
+        return response;
+    }
+
     response.success = true;
     response.snapshotTime = result.parsedAt;
     response.providerSurface = ClaudeCodeLocalParser::kProviderSurface;
     response.windowType = "local_aggregate";
 
-    // Use total tokens as the "used" metric when available; fall back to total messages.
+    // Prefer a positive token total, then the message count. A measured token total can also be zero.
     long long totalTokens = 0;
     for (const auto& model : result.modelUsage) {
         totalTokens += model.inputTokens + model.outputTokens + model.cacheReadInputTokens + model.cacheCreationInputTokens;
     }
-    response.used = totalTokens > 0 ? totalTokens : result.totalMessages;
+    response.used = totalTokens > 0 ? totalTokens : result.totalMessages.value_or(0);
 
     // Local files do not contain limit/remaining; keep them at 0 to signal unknown.
     response.limit = 0;
