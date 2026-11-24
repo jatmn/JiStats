@@ -2637,7 +2637,7 @@ TEST_CASE("AppController coordinates MiniMax credential changes across instances
         REQUIRE(retry.has_value());
         CHECK(retry->validationState == "unreachable");
         CHECK(retry->lastValidatedAtLabel.empty());
-        CHECK(retry->lastValidationError.find("Retry validation") != std::string::npos);
+        CHECK(retry->lastValidationError == "Profile busy. Retry validation.");
 
         REQUIRE(check.init(dbPath.path()));
         const auto stored = check.execute("SELECT validation_state FROM credential_profiles;");

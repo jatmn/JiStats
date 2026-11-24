@@ -5926,8 +5926,7 @@ public:
                 if (storageAvailable && !profileLock.ownsLock()) {
                     validatedProfile.validationState = "unreachable";
                     validatedProfile.lastValidatedAt = 0;
-                    validatedProfile.lastValidationError =
-                        "Could not save the MiniMax validation result because the profile is busy. Retry validation.";
+                    validatedProfile.lastValidationError = "Profile busy. Retry validation.";
                 } else if (!validation.matchesCredential(*adapter)) {
                     validatedProfile.validationState = "unknown";
                     validatedProfile.lastValidatedAt = 0;
