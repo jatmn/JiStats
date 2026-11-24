@@ -3358,36 +3358,49 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
         }
     }
 
+    const bool codexReading = kind == QuotaSnapshotKind::CodexPercentage;
     std::string sql =
         "INSERT INTO quota_snapshots ("
         "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
         "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled, "
-        "snapshot_subsecond_ns) ";
+        "snapshot_subsecond_ns";
+    sql += codexReading ? ", id) " : ") ";
     sql += percentageReading ? "SELECT ?, ?, " : "VALUES (?, ?, ";
     sql += planId.has_value() ? "?" : "NULL";
     sql += ", ?, ?, ?, ?, ";
     sql += limit > 0 ? "?" : "NULL";
     sql += ", ?, ?, ?, ?, ?, NULLIF(?, '')";
-    if (kind == QuotaSnapshotKind::CodexPercentage) {
-        // Bound the lookup to this capture second with the existing dimension/time index.
-        sql += " WHERE NOT EXISTS ("
-               "SELECT 1 FROM ("
-               "    SELECT used_value, limit_value, remaining_value, snapshot_subsecond_ns FROM quota_snapshots "
-               "    WHERE provider_id = ? AND account_id = ? AND plan_id = ? AND snapshot_time_utc = ? "
-               "    AND quota_dimension IN ('percent', 'requests') "
-               "    AND ((window_start_utc = ? AND window_end_utc = ?) OR "
-               "         (quota_dimension = 'requests' AND window_start_utc = ? AND window_end_utc = ?)) ";
-        if (snapshotSubsecondNs) {
-            sql += "AND (snapshot_subsecond_ns <= ? OR snapshot_subsecond_ns IS NULL) ";
-        }
-        sql += "    ORDER BY snapshot_subsecond_ns DESC, id DESC LIMIT 1"
-               ") WHERE used_value = CAST(? AS INTEGER) AND COALESCE(limit_value, 0) = CAST(? AS INTEGER) "
-               "AND COALESCE(remaining_value, limit_value - used_value, 0) = CAST(? AS INTEGER)";
-        if (snapshotSubsecondNs) {
-            // A whole-second legacy reading can match until an earlier precise reading establishes ordering.
-            sql += " AND (snapshot_subsecond_ns = ? OR snapshot_subsecond_ns IS NULL)";
-        }
-        sql += ");";
+    if (codexReading) {
+        // Use the dimension/time index to find the preceding observation in this window.
+        // On legacy replay, promote the matching run together so its stored copies still count as one.
+        sql += ", replay.id FROM (SELECT 1) LEFT JOIN ("
+               "    WITH candidates AS ("
+               "        SELECT id, snapshot_subsecond_ns, "
+               "               used_value = CAST(? AS INTEGER) AND COALESCE(limit_value, 0) = CAST(? AS INTEGER) "
+               "               AND COALESCE(remaining_value, limit_value - used_value, 0) = CAST(? AS INTEGER) "
+               "                   AS same_balance "
+               "        FROM quota_snapshots "
+               "        WHERE provider_id = ? AND account_id = ? AND plan_id = ? AND snapshot_time_utc = ? "
+               "        AND quota_dimension IN ('percent', 'requests') "
+               "        AND ((window_start_utc = ? AND window_end_utc = ?) OR "
+               "             (quota_dimension = 'requests' AND window_start_utc = ? AND window_end_utc = ?)) "
+               "        AND (snapshot_subsecond_ns IS NULL OR snapshot_subsecond_ns <= CAST(NULLIF(?, '') AS INTEGER))"
+               "    ), latest AS ("
+               "        SELECT id, snapshot_subsecond_ns, same_balance FROM candidates "
+               "        ORDER BY snapshot_subsecond_ns DESC, id DESC LIMIT 1"
+               "    ) "
+               "    SELECT candidate.id FROM latest JOIN candidates candidate "
+               "    ON candidate.id = latest.id OR ("
+               "        latest.snapshot_subsecond_ns IS NULL AND candidate.snapshot_subsecond_ns IS NULL "
+               "        AND candidate.same_balance AND candidate.id > COALESCE(("
+               "            SELECT MAX(id) FROM candidates WHERE snapshot_subsecond_ns IS NULL AND NOT same_balance"
+               "        ), 0)"
+               "    ) "
+               "    WHERE latest.same_balance "
+               "      AND (latest.snapshot_subsecond_ns IS NULL OR latest.snapshot_subsecond_ns = CAST(? AS INTEGER)) "
+               ") replay ON TRUE WHERE TRUE "
+               "ON CONFLICT(id) DO UPDATE SET snapshot_subsecond_ns = excluded.snapshot_subsecond_ns "
+               "WHERE quota_snapshots.snapshot_subsecond_ns IS NULL AND excluded.snapshot_subsecond_ns IS NOT NULL;";
     } else if (percentageReading) {
         sql += " WHERE NOT EXISTS (SELECT 1 FROM quota_snapshots WHERE provider_id = ? AND account_id = ? "
                "AND plan_id = ? AND snapshot_time_utc = ?);";
@@ -3404,26 +3417,35 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
     }
     const auto windowStartUtc = windowStart > 0 ? formatTimeUtcIso(windowStart) : std::string{};
     const auto windowEndUtc = windowEnd > 0 ? formatTimeUtcIso(windowEnd) : std::string{};
-    params.push_back(formatTimeUtcIso(snapshotTime));
+    const auto snapshotTimeUtc = formatTimeUtcIso(snapshotTime);
+    const auto subsecond = snapshotSubsecondNs ? std::to_string(*snapshotSubsecondNs) : std::string{};
+    const auto usedText = std::to_string(std::max<long long>(0, used));
+    const auto remainingText = std::to_string(std::max<long long>(0, remaining));
+    params.push_back(snapshotTimeUtc);
     params.push_back(windowStartUtc);
     params.push_back(windowEndUtc);
-    params.push_back(std::to_string(std::max<long long>(0, used)));
+    params.push_back(usedText);
     if (limit > 0) {
         params.push_back(std::to_string(limit));
     }
     params.push_back(confidenceTier.empty() ? "Unknown" : confidenceTier);
     params.push_back(basisSummary);
     params.push_back(percentageReading ? "percent" : "requests");
-    params.push_back(std::to_string(std::max<long long>(0, remaining)));
+    params.push_back(remainingText);
     params.push_back("0");
-    params.push_back(snapshotSubsecondNs ? std::to_string(*snapshotSubsecondNs) : std::string{});
+    params.push_back(subsecond);
+    if (codexReading) {
+        params.push_back(usedText);
+        params.push_back(std::to_string(std::max<long long>(0, limit)));
+        params.push_back(remainingText);
+    }
     if (percentageReading) {
         params.push_back(std::to_string(providerId));
         params.push_back(std::to_string(accountId));
         params.push_back(std::to_string(*planId));
-        params.push_back(formatTimeUtcIso(snapshotTime));
+        params.push_back(snapshotTimeUtc);
     }
-    if (kind == QuotaSnapshotKind::CodexPercentage) {
+    if (codexReading) {
         // Older Codex rows used the capture time when the rollout omitted its window.
         const auto legacyEnd = windowEnd > 0 ? windowEnd : snapshotTime;
         const auto legacyStart = windowStart > 0 ? windowStart : legacyEnd;
@@ -3431,15 +3453,8 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
         params.push_back(windowEndUtc);
         params.push_back(formatTimeUtcIso(legacyStart));
         params.push_back(formatTimeUtcIso(legacyEnd));
-        if (snapshotSubsecondNs) {
-            params.push_back(std::to_string(*snapshotSubsecondNs));
-        }
-        params.push_back(std::to_string(std::max<long long>(0, used)));
-        params.push_back(std::to_string(std::max<long long>(0, limit)));
-        params.push_back(std::to_string(std::max<long long>(0, remaining)));
-        if (snapshotSubsecondNs) {
-            params.push_back(std::to_string(*snapshotSubsecondNs));
-        }
+        params.push_back(subsecond);
+        params.push_back(subsecond);
     }
 
     QueryResult insert = storage.execute(sql, params);

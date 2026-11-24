@@ -29,6 +29,6 @@ JiStats rejects development databases at versions 1 through 11 without modifying
 
 Version 14 keeps the first stored imported ChatGPT activity row for each conversation/message reference. The delete and schema version update commit together.
 
-Version 15 adds nullable source timestamp precision to raw quota snapshots. Existing rows keep their original whole-second timestamps and values.
+Version 15 adds nullable source timestamp precision to raw quota snapshots. Existing rows keep their original whole-second timestamps and values. A matching Codex replay can fill in precision for the stored observation.
 
 Use `016` for the next numbered SQL migration in [`db_migrations/`](../../db_migrations/). The loader discovers later files relative to the working directory. Advance `schema_version` in the same transaction as the schema change. When a release includes a later migration, verify its discovery during actual [packaged startup and sign-in](../validation/desktop.md#dashboard-and-background-checks).

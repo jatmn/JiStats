@@ -3777,12 +3777,19 @@ TEST_CASE("AppController preserves the latest same-second Codex balance across r
         rollout.close();
         REQUIRE(rollout.good());
     };
-    bool hasLegacyReading = false;
-    SECTION("All readings have fractional timestamps") {}
-    SECTION("The first reading was persisted without fractional precision") {
-        hasLegacyReading = true;
+    enum class ReplayCase { Fractional, WholeSecond, Legacy };
+    auto replayCase = ReplayCase::Fractional;
+    SECTION("Fractional readings preserve a return to an earlier balance") {}
+    SECTION("Whole-second reading replays after a fractional reading") {
+        replayCase = ReplayCase::WholeSecond;
     }
-    writeReading(25, hasLegacyReading ? "" : ".100", 1);
+    SECTION("A precise replay upgrades legacy copies before an earlier reading arrives") {
+        replayCase = ReplayCase::Legacy;
+    }
+
+    const bool wholeSecond = replayCase == ReplayCase::WholeSecond;
+    const auto expectedLatest = wholeSecond ? 60 : 75;
+    writeReading(25, wholeSecond ? "" : ".100", 1);
     auto providers = std::make_shared<ProviderManager>();
     providers->addProvider(std::make_shared<OpenAIAdapter>());
     AppController app;
@@ -3790,28 +3797,54 @@ TEST_CASE("AppController preserves the latest same-second Codex balance across r
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providers);
     REQUIRE(app.init());
-    if (hasLegacyReading) {
+    if (replayCase == ReplayCase::Legacy) {
+        StorageService legacyStorage;
+        REQUIRE(legacyStorage.init(dbPath.path()));
+        REQUIRE(
+            legacyStorage
+                .execute("UPDATE quota_snapshots SET snapshot_subsecond_ns = NULL, quota_dimension = 'requests';"
+                         "INSERT INTO quota_snapshots (provider_id, account_id, plan_id, snapshot_time_utc, "
+                         "window_start_utc, window_end_utc, used_value, limit_value, remaining_value, "
+                         "confidence_tier, quota_dimension) "
+                         "SELECT provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, "
+                         "window_end_utc, used_value, limit_value, remaining_value, confidence_tier, quota_dimension "
+                         "FROM quota_snapshots;")
+                .success());
+        legacyStorage.close();
         writeReading(25, ".100", 2);
         app.refreshRuntimeForTesting();
+        writeReading(40, ".050", 3);
+        app.refreshRuntimeForTesting();
+    } else {
+        writeReading(40, ".200", 3);
+        app.refreshRuntimeForTesting();
+        if (wholeSecond) {
+            writeReading(25, "", 9);
+            app.refreshRuntimeForTesting();
+            app.refreshRuntimeForTesting();
+        } else {
+            writeReading(25, ".300", 4);
+            app.refreshRuntimeForTesting();
+            app.refreshRuntimeForTesting();
+            writeReading(40, ".200", 5);
+            app.refreshRuntimeForTesting();
+            writeReading(25, ".100", 6);
+            app.refreshRuntimeForTesting();
+        }
     }
-    writeReading(40, ".200", 3);
-    app.refreshRuntimeForTesting();
-    writeReading(25, ".300", 4);
-    app.refreshRuntimeForTesting();
-    app.refreshRuntimeForTesting();
-    // Reopening an earlier rollout reading must not create a new observation.
-    writeReading(40, ".200", 5);
-    app.refreshRuntimeForTesting();
-    writeReading(25, ".100", 6);
-    app.refreshRuntimeForTesting();
     const auto dashboard = app.getDashboardViewModelForTesting();
     app.shutdown();
 
     StorageService storage;
     REQUIRE(storage.init(dbPath.path()));
-    const auto snapshots = storage.execute("SELECT remaining_value FROM quota_snapshots ORDER BY id;");
+    const auto snapshots =
+        storage.execute("SELECT remaining_value, snapshot_subsecond_ns FROM quota_snapshots ORDER BY id;");
     REQUIRE(snapshots.success());
-    CHECK(snapshots.rowCount() == 3);
+    CHECK(snapshots.rowCount() == (wholeSecond ? 2 : 3));
+    CHECK(snapshots.getString(0, 1) == (wholeSecond ? "0" : "100000000"));
+    if (replayCase == ReplayCase::Legacy) {
+        CHECK(snapshots.getString(1, 1) == "100000000");
+    }
 
     auto scope = dashboard.preferences;
     scope.analysisSelectedProviderId = "openai";
@@ -3819,8 +3852,17 @@ TEST_CASE("AppController preserves the latest same-second Codex balance across r
     AnalysisQueryEngine engine(storage);
     const auto history = engine.buildViewModel(dashboard, scope, capturedAt + 60);
     REQUIRE(history.quotaTrendSeries.size() == 1);
-    CHECK(history.quotaTrendSeries.front().points.size() == 3);
-    CHECK(history.quotaTrendSeries.front().latestRemainingValue == 75);
+    CHECK(history.quotaTrendSeries.front().points.size() == (replayCase == ReplayCase::Fractional ? 3 : 2));
+    CHECK(history.quotaTrendSeries.front().latestRemainingValue == expectedLatest);
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = requireAccountId(storage, providerId, "openai.runtime_status");
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, capturedAt, capturedAt));
+    const auto rollup =
+        storage.execute("SELECT latest_remaining_value, sample_count FROM quota_snapshot_rollups_daily;");
+    REQUIRE(rollup.success());
+    REQUIRE(rollup.rowCount() == 1);
+    CHECK(rollup.getInt(0, 0) == expectedLatest);
+    CHECK(rollup.getInt(0, 1) == (replayCase == ReplayCase::Fractional ? 3 : 2));
     storage.close();
 
     AppController restarted;
@@ -3835,7 +3877,7 @@ TEST_CASE("AppController preserves the latest same-second Codex balance across r
     const auto* openai = findProviderStatus(cached, "openai");
     REQUIRE(openai != nullptr);
     REQUIRE(openai->quotas.size() == 1);
-    CHECK(openai->quotas.front().remaining == 75);
+    CHECK(openai->quotas.front().remaining == expectedLatest);
     releasePublication.set_value();
     restarted.shutdown();
 }
