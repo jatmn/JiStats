@@ -595,11 +595,15 @@ QuotaResponse parseUsagesResponse(const std::string& jsonBody) {
     if (const JsonValue* limit = usage->getMember("limit")) {
         tryParseStringNumber(*limit, weeklyLimit);
     }
-    if (const JsonValue* used = usage->getMember("used")) {
-        tryParseStringNumber(*used, weeklyUsed);
-    }
-    if (const JsonValue* remaining = usage->getMember("remaining")) {
-        tryParseStringNumber(*remaining, weeklyRemaining);
+    const JsonValue* used = usage->getMember("used");
+    const JsonValue* remaining = usage->getMember("remaining");
+    const bool hasWeeklyUsed = used && tryParseStringNumber(*used, weeklyUsed);
+    const bool hasWeeklyRemaining = remaining && tryParseStringNumber(*remaining, weeklyRemaining);
+    const bool hasWeeklyBalance = weeklyLimit > 0 && (hasWeeklyUsed || hasWeeklyRemaining);
+    if (hasWeeklyBalance) {
+        weeklyRemaining = hasWeeklyRemaining ? std::min(weeklyRemaining, weeklyLimit)
+                                             : weeklyLimit - std::min(weeklyUsed, weeklyLimit);
+        weeklyUsed = weeklyLimit - weeklyRemaining;
     }
     if (const JsonValue* resetTime = usage->getMember("resetTime")) {
         if (resetTime->isString()) {
@@ -661,14 +665,25 @@ QuotaResponse parseUsagesResponse(const std::string& jsonBody) {
     response.used = fiveHourUsed;
     response.limit = fiveHourLimit;
     response.remaining = fiveHourRemaining;
-    response.secondaryWindowType = "weekly";
-    response.secondaryWindowStart = weeklyResetTime > 0
-        ? std::max<std::time_t>(0, weeklyResetTime - (7 * 24 * 60 * 60))
-        : 0;
-    response.secondaryWindowEnd = weeklyResetTime;
-    response.secondaryUsed = weeklyUsed;
-    response.secondaryLimit = weeklyLimit;
-    response.secondaryRemaining = weeklyRemaining;
+    if (hasWeeklyBalance) {
+        const auto weeklyStart =
+            weeklyResetTime > 0 ? std::max<std::time_t>(0, weeklyResetTime - (7 * 24 * 60 * 60)) : 0;
+        if (fiveHourLimit <= 0 && fiveHourUsed <= 0 && fiveHourRemaining <= 0) {
+            response.windowType = "weekly";
+            response.windowStart = weeklyStart;
+            response.windowEnd = weeklyResetTime;
+            response.used = weeklyUsed;
+            response.limit = weeklyLimit;
+            response.remaining = weeklyRemaining;
+        } else {
+            response.secondaryWindowType = "weekly";
+            response.secondaryWindowStart = weeklyStart;
+            response.secondaryWindowEnd = weeklyResetTime;
+            response.secondaryUsed = weeklyUsed;
+            response.secondaryLimit = weeklyLimit;
+            response.secondaryRemaining = weeklyRemaining;
+        }
+    }
     response.snapshotTime = std::time(nullptr);
     return response;
 }

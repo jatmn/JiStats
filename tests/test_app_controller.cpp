@@ -3263,6 +3263,67 @@ TEST_CASE("AppController suppresses Kimi local-only quota snapshots and relies o
     app.shutdown();
 }
 
+TEST_CASE("AppController only displays and stores measured Kimi weekly balances", "[app][runtime][kimi]") {
+    requireSqlite();
+
+    std::string payload;
+    std::optional<long long> expectedRemaining;
+    SECTION("a weekly allowance alone leaves the balance unknown") {
+        payload = R"({"usage":{"limit":"100"}})";
+    }
+    SECTION("an explicit zero weekly balance shows exhaustion") {
+        payload = R"({"usage":{"limit":"100","remaining":"0"}})";
+        expectedRemaining = 0;
+    }
+    SECTION("a measured used value establishes the weekly balance") {
+        payload = R"({"usage":{"limit":"100","used":"18"}})";
+        expectedRemaining = 82;
+    }
+
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
+    const auto quota = KimiAdapter::parseUsagesResponseForTesting(payload);
+    REQUIRE(quota.success);
+    auto kimiProvider = makeQuotaProvider("kimi", "Kimi Code", quota, quota.snapshotTime);
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({kimiProvider}));
+    REQUIRE(app.init());
+
+    const auto dashboard = app.getDashboardViewModelForTesting();
+    const auto* status = findProviderStatus(dashboard, "kimi");
+    REQUIRE(status != nullptr);
+    const auto summary = findUsageSummary(app.getDashboardUsageProgressSummariesForTesting(), "Kimi Subscription");
+    app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto snapshots = storage.execute("SELECT p.quota_window, q.used_value, q.limit_value, q.remaining_value "
+                                           "FROM quota_snapshots q JOIN plans p ON q.plan_id = p.id "
+                                           "WHERE q.provider_id = ?;",
+                                           {std::to_string(requireProviderId(storage, "kimi"))});
+    REQUIRE(snapshots.success());
+
+    if (expectedRemaining) {
+        REQUIRE(status->quotas.size() == 1);
+        CHECK(status->quotas.front().windowType == "weekly");
+        CHECK(status->quotas.front().remaining == *expectedRemaining);
+        REQUIRE(summary.has_value());
+        CHECK(summary->percentage == *expectedRemaining);
+        REQUIRE(snapshots.rowCount() == 1);
+        CHECK(snapshots.getString(0, 0) == "weekly");
+        CHECK(snapshots.getInt64(0, 1) == 100 - *expectedRemaining);
+        CHECK(snapshots.getInt64(0, 2) == 100);
+        CHECK(snapshots.getInt64(0, 3) == *expectedRemaining);
+    } else {
+        CHECK(status->quotas.empty());
+        CHECK_FALSE(summary.has_value());
+        CHECK(snapshots.rowCount() == 0);
+    }
+}
+
 TEST_CASE("AppController surfaces Kimi provider-exact quota windows as remaining-first taskbar metrics", "[app][runtime][kimi]") {
     requireSqlite();
 
