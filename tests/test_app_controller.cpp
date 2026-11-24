@@ -3433,6 +3433,75 @@ TEST_CASE("AppController handles long-gap mixed provider recovery outcomes witho
     }
 }
 
+TEST_CASE("AppController catch-up preserves usage rollups outside complete raw history",
+          "[app][runtime][recovery][retention]") {
+    requireSqlite();
+
+    constexpr std::time_t hour = 3600;
+    constexpr std::time_t day = 24 * hour;
+    const std::time_t cutoffOffset = GENERATE(0, 12 * 3600, 12 * 3600 + 30 * 60);
+    const bool clockRolledBack = GENERATE(false, true);
+    CAPTURE(cutoffOffset, clockRolledBack);
+    const std::time_t wallClock = std::time(nullptr);
+    const std::time_t retentionDay = wallClock - wallClock % day + day;
+    const std::time_t retentionRun = retentionDay + cutoffOffset;
+    const std::time_t now = retentionRun - (clockRolledBack ? 2 * day : 0);
+    const std::time_t cutoffDay = retentionDay - 90 * day;
+    const std::time_t cutoff = cutoffDay + cutoffOffset;
+    const std::time_t cutoffHour = cutoff - cutoff % hour;
+    const std::time_t retainedDay = retentionDay - 100 * day;
+    const std::time_t recentDay = retentionDay - 3 * day;
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    seedRuntimeState(dbPath.path(), retainedDay, retainedDay);
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    REQUIRE(SettingsService(storage).setString("retention.last_run_utc", toUtcIso(retentionRun)));
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    const auto seed = [&](std::time_t eventTime, int tokens) {
+        insertUsageEvent(storage, providerId, accountId, toUtcIso(eventTime), "gpt-5", tokens, 0);
+    };
+    seed(retainedDay + 300, 700);
+    seed(cutoff - 300, 50);
+    seed(cutoff, 11);
+    seed(recentDay + 300, 3);
+    REQUIRE(storage.rebuildUsageRollups(UsageRollupResolution::Daily, providerId, accountId, retainedDay, now));
+    REQUIRE(storage.rebuildUsageRollups(UsageRollupResolution::Hourly, providerId, accountId, retainedDay, now));
+    REQUIRE(storage.deleteUsageEventsOlderThan(cutoff));
+    CHECK(storage.getUsageEvents(providerId, accountId, retainedDay, cutoff - 1).empty());
+    seed(cutoff + 300, 23);
+    seed(recentDay + 600, 7);
+    storage.close();
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setCurrentTimeForTesting(now);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now)}));
+    REQUIRE(app.init());
+    REQUIRE(waitForCondition([&]() {
+        const auto runtime = app.getPersistedRuntimeStateForTesting();
+        return runtime && runtime->recoveryMarker.empty();
+    }));
+    app.shutdown();
+
+    REQUIRE(storage.init(dbPath.path()));
+    const auto bucketTokens = [&](UsageRollupResolution resolution, std::time_t bucketStart) {
+        const auto rollups = storage.getUsageRollups(resolution, providerId, accountId, bucketStart, bucketStart);
+        CHECK(rollups.size() == 1);
+        return rollups.empty() ? 0LL : rollups.front().totalTokens;
+    };
+    CHECK(bucketTokens(UsageRollupResolution::Daily, retainedDay) == 700);
+    CHECK(bucketTokens(UsageRollupResolution::Daily, cutoffDay) == (cutoff == cutoffDay ? 34 : 61));
+    CHECK(bucketTokens(UsageRollupResolution::Hourly, cutoffHour) == (cutoff == cutoffHour ? 34 : 61));
+    CHECK(bucketTokens(UsageRollupResolution::Daily, recentDay) == 10);
+    CHECK(bucketTokens(UsageRollupResolution::Hourly, recentDay) == 10);
+}
+
 TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout snapshot changes",
           "[app][runtime][openai][codex]") {
     requireSqlite();
