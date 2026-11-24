@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
@@ -314,22 +315,39 @@ std::string sampleKimiUsagesResponse() {
 } // namespace
 
 TEST_CASE("WinHTTP requests report the configured receive timeout", "[http][timeout]") {
-    const std::string method = GENERATE("GET", "POST");
+    constexpr unsigned int timeoutMs = 5000;
+    constexpr auto withheldResponse = std::chrono::seconds(9);
     ScopedWinsock winsock;
-    LocalHttpSequenceServer server({{method, "/slow", 200, "{}", "application/json", std::chrono::milliseconds(750)}});
-    HttpClient client;
-    client.setTimeout(100);
+    LocalHttpSequenceServer getServer({{"GET", "/slow", 200, "{}", "application/json", withheldResponse}});
+    LocalHttpSequenceServer postServer({{"POST", "/slow", 200, "{}", "application/json", withheldResponse}});
+    HttpClient getClient;
+    HttpClient postClient;
+    getClient.setTimeout(timeoutMs);
+    postClient.setTimeout(timeoutMs);
 
-    const auto url = server.baseUrl() + "/slow";
-    const HttpResponse response = method == "GET" ? client.get(url) : client.post(url, "{}");
+    bool getResponseStarted = false;
+    auto get = std::async(std::launch::async, [&]() {
+        auto response = getClient.get(getServer.baseUrl() + "/slow");
+        getResponseStarted = getServer.responseStarted();
+        return response;
+    });
+    const auto postResponse = postClient.post(postServer.baseUrl() + "/slow", "{}");
+    const bool postResponseStarted = postServer.responseStarted();
+    const auto getResponse = get.get();
 
-    CHECK(server.handledRequestCount() == 1);
-    CHECK(server.failure().empty());
-    CHECK_FALSE(server.responseStarted());
-    CHECK_FALSE(response.success);
-    CHECK(response.statusCode == 0);
-    CHECK(response.error == "Failed to receive response: request timed out");
-    CHECK(client.getLastError() == response.error);
+    const auto checkTimeout = [](const char* method, const LocalHttpSequenceServer& server, const HttpClient& client,
+                                 const HttpResponse& response, bool responseStarted) {
+        CAPTURE(method);
+        CHECK(server.handledRequestCount() == 1);
+        CHECK(server.failure().empty());
+        CHECK_FALSE(responseStarted);
+        CHECK_FALSE(response.success);
+        CHECK(response.statusCode == 0);
+        CHECK(response.error == "Failed to receive response: request timed out");
+        CHECK(client.getLastError() == response.error);
+    };
+    checkTimeout("GET", getServer, getClient, getResponse, getResponseStarted);
+    checkTimeout("POST", postServer, postClient, postResponse, postResponseStarted);
 }
 
 TEST_CASE("Kimi parser reads bounded synthetic fixture snapshots", "[kimi][fixtures]") {
