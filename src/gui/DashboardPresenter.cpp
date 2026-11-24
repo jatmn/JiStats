@@ -1331,6 +1331,7 @@ public:
     std::wstring scheduledExportTooltipBody;
     std::wstring updatedTooltipBody;
     StorageService placementStorage;
+    RECT initialMainWindowRect{}; // Read and written by the UI thread.
     std::optional<RECT> savedAnalysisWindowRect;
     std::optional<RECT> initialAnalysisFallbackRect;
     std::thread placementWriter;
@@ -1351,6 +1352,7 @@ public:
     static constexpr UINT WM_JISTATS_MINIMAX_ACTION_COMPLETE = WM_APP + 40;
     static constexpr UINT WM_JISTATS_OFFLINE_RETRY_COMPLETE = WM_APP + 41;
     static constexpr UINT WM_JISTATS_OFFLINE_DISMISS_COMPLETE = WM_APP + 42;
+    static constexpr UINT WM_JISTATS_RESTORE_MAIN_PLACEMENT = WM_APP + 43;
     static constexpr int kMenuFileSettingsId = 1001;
     static constexpr int kMenuFileImportOpenAIId = 1002;
     static constexpr int kMenuFileExportHtmlId = 1010;
@@ -1431,7 +1433,7 @@ public:
 
     void seedDefaultsIfNeeded() {
         std::lock_guard<std::mutex> lock(mutex);
-        if (!viewModel.lastUpdateTime.empty()) {
+        if (viewModel.startupPending || !viewModel.lastUpdateTime.empty()) {
             return;
         }
 
@@ -4071,7 +4073,15 @@ public:
                 : ("JiStats | v" + model.appVersion);
             setWindowText(window, utf8ToWide(title));
         }
-        setWindowText(connectionValue, utf8ToWide(runtimeStateLabel(model.runtimeState)));
+        setWindowText(connectionValue,
+                      utf8ToWide(model.startupPending ? "Starting..." : runtimeStateLabel(model.runtimeState)));
+        if (const HMENU menu = GetMenu(window)) {
+            const UINT availability = MF_BYCOMMAND | (model.startupPending ? MF_GRAYED : MF_ENABLED);
+            EnableMenuItem(menu, kMenuFileSettingsId, availability);
+            EnableMenuItem(menu, kMenuFileImportOpenAIId, availability);
+            EnableMenuItem(menu, kMenuFileExportHtmlId, availability);
+        }
+        EnableWindow(historyButton, !model.startupPending);
         setWindowText(
             offlineNoticeTitle,
             utf8ToWide(model.offlineNoticeTitle.empty()
@@ -5875,6 +5885,17 @@ public:
             }
             return 0;
         }
+        case WM_JISTATS_RESTORE_MAIN_PLACEMENT: {
+            RECT current{};
+            if (!IsIconic(hwnd) && !IsZoomed(hwnd) && GetWindowRect(hwnd, &current) &&
+                EqualRect(&current, &initialMainWindowRect)) {
+                const auto& saved = *reinterpret_cast<const RECT*>(lParam);
+                SetWindowPos(hwnd, nullptr, saved.left, saved.top, saved.right - saved.left, saved.bottom - saved.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+                fitInitialDashboardBounds(hwnd);
+            }
+            return 0;
+        }
         case WM_JISTATS_ATTACH_ANALYSIS:
             if (analysisWindow != nullptr && analysisPresenter != nullptr) {
                 PostMessageW(analysisWindow, WM_JISTATS_ATTACH_ANALYSIS, 0, 0);
@@ -5927,7 +5948,9 @@ public:
                     }
                 }
                 if (shouldHide) {
-                    persistMainWindowPlacement(hwnd);
+                    if (!copyViewModel().startupPending) {
+                        persistMainWindowPlacement(hwnd);
+                    }
                     closeAuxiliaryWindows();
                     ShowWindow(hwnd, SW_HIDE);
                     return 0;
@@ -5937,7 +5960,9 @@ public:
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
-            persistMainWindowPlacement(hwnd);
+            if (!copyViewModel().startupPending) {
+                persistMainWindowPlacement(hwnd);
+            }
             KillTimer(hwnd, kDashboardChartRefreshTimerId);
             dismissUsageTooltip();
             if (usageTooltip != nullptr && IsWindow(usageTooltip)) {
@@ -7083,6 +7108,7 @@ public:
         }
 
         applyWindowIcons(hwnd);
+        GetWindowRect(hwnd, &initialMainWindowRect);
         ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);
         UpdateWindow(hwnd);
 
@@ -7144,7 +7170,7 @@ DashboardPresenter::~DashboardPresenter() {
     shutdown();
 }
 
-bool DashboardPresenter::init() {
+bool DashboardPresenter::init(bool deferPlacement) {
     if (pImpl->initialized) {
         return true;
     }
@@ -7158,11 +7184,13 @@ bool DashboardPresenter::init() {
 #ifdef _WIN32
     std::optional<RECT> savedMainRect;
     pImpl->savedAnalysisWindowRect.reset();
-    if (pImpl->ensurePlacementStorage()) {
-        savedMainRect = pImpl->loadSavedMainWindowRect();
+    if (!deferPlacement) {
+        if (pImpl->ensurePlacementStorage()) {
+            savedMainRect = pImpl->loadSavedMainWindowRect();
+        }
+        pImpl->stopPlacementWriter = false;
+        pImpl->placementWriter = std::thread([this]() { pImpl->runPlacementWriter(); });
     }
-    pImpl->stopPlacementWriter = false;
-    pImpl->placementWriter = std::thread([this]() { pImpl->runPlacementWriter(); });
     pImpl->threadReady = false;
     pImpl->uiThread = std::thread([this, savedMainRect]() { pImpl->runUiThread(savedMainRect); });
 
@@ -7179,6 +7207,29 @@ bool DashboardPresenter::init() {
 #else
     pImpl->lastError = "Dashboard presenter is only implemented on Windows";
     return false;
+#endif
+}
+
+void DashboardPresenter::restoreStartupPlacement() {
+#ifdef _WIN32
+    if (pImpl->placementWriter.joinable()) {
+        return;
+    }
+
+    if (pImpl->ensurePlacementStorage()) {
+        if (const auto saved = pImpl->loadSavedMainWindowRect()) {
+            HWND hwnd;
+            {
+                std::lock_guard<std::mutex> lock(pImpl->mutex);
+                hwnd = pImpl->window;
+            }
+            if (hwnd != nullptr) {
+                SendMessageW(hwnd, Impl::WM_JISTATS_RESTORE_MAIN_PLACEMENT, 0, reinterpret_cast<LPARAM>(&*saved));
+            }
+        }
+    }
+    pImpl->stopPlacementWriter = false;
+    pImpl->placementWriter = std::thread([this]() { pImpl->runPlacementWriter(); });
 #endif
 }
 

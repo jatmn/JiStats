@@ -46,7 +46,8 @@ public:
     ~DashboardPresenter();
     
     // Initialize the dashboard
-    bool init();
+    bool init(bool deferPlacement = false);
+    void restoreStartupPlacement();
 
     // Shutdown the dashboard
     void shutdown();
@@ -269,6 +270,7 @@ struct DashboardViewModel {
     std::string lastUpdateTime;
     bool isOnline = true;
     RuntimeState runtimeState = RuntimeState::Unknown;
+    bool startupPending = false;
     DashboardPreferences preferences;
     std::uint64_t completedPreferencesRequest = 0;
     std::uint64_t failedPreferencesRequest = 0;

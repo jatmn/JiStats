@@ -21,6 +21,10 @@
 #include <windows.h>
 #include <sddl.h>
 
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+#include <sqlite3.h>
+#endif
+
 #include "app/AppController.hpp"
 #include "app/TrayController.hpp"
 #include "core/Logger.hpp"
@@ -934,6 +938,94 @@ TEST_CASE("AppController honors launch-in-background startup mode", "[app][start
     CHECK_FALSE(app.isDashboardVisibleForTesting());
 
     app.shutdown();
+}
+
+TEST_CASE("AppController shows the dashboard and tray while startup quota is pending", "[app][startup][shell]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    const auto now = std::time(nullptr);
+    std::promise<void> releaseQuota;
+    auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 20, 100, "interval", "openai_subscription_codex_local"),
+        releaseQuota.get_future().share());
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(provider);
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+
+    auto startup = std::async(std::launch::async, [&]() { return app.init(true); });
+    const bool fetchPending =
+        waitForCondition([&]() { return provider->getQuotaFetchCount() > provider->getCompletedQuotaFetchCount(); });
+    const auto starting = app.getDashboardViewModelForTesting();
+    const auto trayStarting = app.getTrayStateForTesting();
+    const bool hiddenAtLaunch = !app.isDashboardVisibleForTesting();
+    const bool trayShowHandled = app.dispatchTrayEventForTesting(TrayController::TestEvent::MenuShowDashboard);
+    const bool dashboardShown = waitForCondition([&]() { return app.isDashboardVisibleForTesting(); });
+    releaseQuota.set_value();
+
+    REQUIRE(startup.get());
+    CHECK(fetchPending);
+    CHECK(starting.startupPending);
+    CHECK(starting.providers.empty());
+    CHECK(trayStarting.initialized);
+    CHECK(trayStarting.status == TrayStatus::Syncing);
+    CHECK(trayStarting.tooltip.find("Starting") != std::string::npos);
+    CHECK(hiddenAtLaunch);
+    CHECK(trayShowHandled);
+    CHECK(dashboardShown);
+    const auto ready = app.getDashboardViewModelForTesting();
+    CHECK_FALSE(ready.startupPending);
+    const auto* openai = findProviderStatus(ready, "openai");
+    REQUIRE(openai != nullptr);
+    REQUIRE_FALSE(openai->quotas.empty());
+    CHECK(openai->quotas.front().used == 20);
+}
+
+TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds startup", "[app][startup][shell]") {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    TempTestDatabase dbPath;
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    REQUIRE(storage.execute("PRAGMA main.journal_mode = WAL;").getString(0, 0) == "wal");
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
+    storage.close();
+
+    sqlite3* raw = nullptr;
+    const int opened = sqlite3_open_v2(dbPath.path().c_str(), &raw, SQLITE_OPEN_READONLY, nullptr);
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> reader(raw, sqlite3_close);
+    REQUIRE(opened == SQLITE_OK);
+    REQUIRE(sqlite3_exec(reader.get(), "BEGIN; SELECT MAX(version) FROM schema_version;", nullptr, nullptr, nullptr) ==
+            SQLITE_OK);
+
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    auto startup = std::async(std::launch::async, [&]() { return app.init(); });
+    const bool visibleWithReader = waitForCondition([]() {
+        const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+        return dashboard != nullptr && IsWindowVisible(dashboard) != FALSE;
+    });
+    const auto starting = app.getDashboardViewModelForTesting();
+    const auto stage = startup.wait_for(std::chrono::milliseconds(150));
+    reader.reset();
+
+    REQUIRE(startup.get());
+    CHECK(visibleWithReader);
+    CHECK(starting.startupPending);
+    CHECK(stage == std::future_status::timeout);
+    CHECK_FALSE(app.getDashboardViewModelForTesting().startupPending);
+    REQUIRE(storage.init(dbPath.path()));
+    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 13);
+#else
+    requireSqlite();
+#endif
 }
 
 TEST_CASE("AppController explains a rejected database during background startup", "[app][startup]") {

@@ -6,6 +6,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 - The Claude upgrade now shares a single five-second lock-wait budget across SQLite and the outer checkpoint retry loop. The normal connection timeout is restored when the checkpoint finishes. A bundled-SQLite probe held a WAL reader open while two instances attempted the upgrade and reproduced the previous 9.2-second wait. [PR #62 review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672838396)
 
+- The dashboard and tray now show startup progress while storage opens or the first provider refresh is pending. Wine controller tests held a version 12 WAL reader and a provider response, then verified the upgrade and quota publication after release. Bundled-SQLite portable CTest passed and the MinGW app, CLI, and tests built. Windows 11 timings remain pending. [Issue #65](https://github.com/jatmn/JiStats/issues/65)
+
 - The version 13 Claude upgrade now retries a busy WAL checkpoint when two instances open an older database together. A bundled-SQLite regression holds the checkpoint lock until the second opener reaches it. Both instances now open with persistence, and the upgrade still records version 13 only after a checkpoint succeeds. [PR #62 review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672761310)
 
 - The version 13 Claude upgrade now rebuilds the SQLite file after redacting the rows. Enabling SQLite secure deletion for the updates cleared the rewritten rows but left 44 copies of the path in unused space on two B-tree pages. The regression checks the closed database as well as the row values and exercises a retry after a failed rebuild. [PR #62 review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672618383)
