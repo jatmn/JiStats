@@ -1058,6 +1058,7 @@ TEST_CASE("AnalysisQueryEngine keeps Codex model usage buckets granular for rece
     seedCodexSqliteUsageEvent(storage, "openai", "gpt-5.5", now - 38 * 60, 200);
     seedCodexSqliteUsageEvent(storage, "openai", "gpt-5.5", now - 31 * 60, 300);
     seedCodexSqliteUsageEvent(storage, "openai", "gpt-5.5", now - 24 * 60, 400);
+    seedUsageEvent(storage, "minimax", "MiniMax", now - 10 * 60, 50, 2, "billable-test-model");
 
     DashboardViewModel dashboard;
     dashboard.providers = {makeProvider("openai", "OpenAI", "openai.runtime_status")};
@@ -1071,6 +1072,45 @@ TEST_CASE("AnalysisQueryEngine keeps Codex model usage buckets granular for rece
     REQUIRE(analysis.openAiCodexModelUsage.series.size() == 1);
     CHECK(analysis.openAiCodexModelUsage.series.front().points.size() == 4);
     CHECK(analysis.openAiCodexModelUsage.series.front().totalTokens == 1000);
+
+    long long activityCount = 0;
+    for (const auto& point : analysis.trendPoints) {
+        activityCount += point.activityCount;
+    }
+    CHECK(activityCount == 1);
+    REQUIRE(analysis.providerBreakdown.size() == 1);
+    CHECK(analysis.providerBreakdown.front().label == "MiniMax");
+    CHECK(analysis.providerBreakdown.front().activityCount == 1);
+}
+
+TEST_CASE("Analysis keeps attribution-only accounts out of general report choices",
+          "[analysis][query_engine][analysis_query_engine][codex]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const std::time_t now = makeUtcTime(2026, 4, 20, 18);
+    seedCodexSqliteUsageEvent(storage, "openai", "gpt-5.5", now - 600, 321);
+    const int providerId = requireProviderId(storage, "openai");
+    REQUIRE(storage
+                .execute("UPDATE accounts SET account_key = 'openai.codex_local_sqlite' "
+                         "WHERE provider_id = ?;",
+                         {std::to_string(providerId)})
+                .success());
+    seedUsageEvent(storage, "openai", "OpenAI", now - 300, 777, 1, "billable-model");
+
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = "openai.codex_local_sqlite";
+    AnalysisQueryEngine engine(storage);
+    const auto analysis = engine.buildViewModel({}, preferences, now);
+    CHECK(analysis.scope.selectedAccountId == "openai.codex_local_sqlite");
+    CHECK(analysis.scopeLabel.find("model attribution") != std::string::npos);
+    CHECK(optionPairs(analysis.availableAccounts) ==
+          std::vector<std::string>{"|All Accounts", "openai.runtime_status|OpenAI / OpenAI Runtime"});
+    REQUIRE(analysis.openAiCodexModelUsage.series.size() == 1);
+    CHECK(analysis.openAiCodexModelUsage.series.front().totalTokens == 321);
+    CHECK(analysis.accountBreakdown.empty());
 }
 
 TEST_CASE("AnalysisQueryEngine keeps an account selectable after only daily rollups remain",
