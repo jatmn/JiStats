@@ -2434,6 +2434,72 @@ TEST_CASE("AppController restores the last completed MiniMax validation after re
     }
 }
 
+TEST_CASE("AppController never restores an old MiniMax validation for a partly saved replacement",
+          "[app][shell][minimax]") {
+    requireSqlite();
+    const auto action = GENERATE(DashboardMiniMaxCredentialAction::Save, DashboardMiniMaxCredentialAction::Validate);
+    const bool failBeforeWrite = GENERATE(false, true);
+    CAPTURE(static_cast<int>(action), failBeforeWrite);
+    TempTestDatabase dbPath;
+    seedMiniMaxCredentialMetadata(dbPath.path(), "token_plan", "Original Token Plan");
+    StorageService seed;
+    REQUIRE(seed.init(dbPath.path()));
+    REQUIRE(seed.execute("UPDATE credential_profiles SET validation_state = 'valid';").success());
+    // The rename trigger affects only the final save. Clearing validation leaves the account name alone.
+    REQUIRE(seed.execute(failBeforeWrite ? R"sql(
+        CREATE TRIGGER reject_profile_invalidation BEFORE UPDATE ON credential_profiles
+        BEGIN SELECT RAISE(ABORT, 'Fixture rejects credential invalidation'); END;
+    )sql"
+                                         : R"sql(
+        CREATE TRIGGER reject_profile_rename BEFORE UPDATE OF display_name ON accounts
+        WHEN NEW.display_name = 'Renamed Token Plan'
+        BEGIN SELECT RAISE(ABORT, 'Fixture rejects credential metadata update'); END;
+    )sql")
+                .success());
+    seed.close();
+
+    const std::string target = "JiStats/minimax/subscription/token_plan/token_plan.default";
+    auto backend = makeFakeCredentialBackend();
+    auto store = std::make_shared<WindowsCredentialStore>(backend);
+    REQUIRE(store->writeGenericCredential({target, "sk-tp-original", "MiniMax Token Plan", ""}));
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    app.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(app.init());
+    const auto original = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "token_plan");
+    REQUIRE(original.has_value());
+    REQUIRE(original->validationState == "valid");
+    REQUIRE_FALSE(original->lastValidatedAtLabel.empty());
+
+    DashboardMiniMaxCredentialRequest request;
+    request.action = action;
+    request.planKey = "token_plan";
+    request.accountDisplayName = "Renamed Token Plan";
+    request.secret = "sk-tp-new-unchecked";
+    CHECK_FALSE(app.submitMiniMaxCredentialActionForTesting(request));
+    CHECK(backend->peek(target) ==
+          std::optional<std::string>(failBeforeWrite ? "sk-tp-original" : "sk-tp-new-unchecked"));
+    app.shutdown();
+
+    AppController restarted;
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    restarted.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(restarted.init());
+    const auto restored = findMiniMaxSummary(restarted.getDashboardViewModelForTesting(), "token_plan");
+    REQUIRE(restored.has_value());
+    CHECK(restored->hasPersistedProfile);
+    CHECK(restored->accountDisplayName == "Original Token Plan");
+    CHECK(restored->validationState == (failBeforeWrite ? "valid" : "unknown"));
+    CHECK(restored->lastValidatedAtLabel == (failBeforeWrite ? original->lastValidatedAtLabel : ""));
+    CHECK(restored->lastValidationError.empty());
+    restarted.shutdown();
+}
+
 TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the masked secret field", "[app][shell][minimax]") {
     requireSqlite();
     TempTestDatabase dbPath;

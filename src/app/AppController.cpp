@@ -6134,6 +6134,29 @@ public:
             profile.accountDisplayName = minimaxDefaultAccountDisplayName(planKey);
         }
 
+        if (!request.secret.empty()) {
+            if (!storageAvailable) {
+                result.message = "MiniMax credential changes require access to saved validation results.";
+                return result;
+            }
+
+            // The saved outcome describes the old secret, even if the current check is pending.
+            const std::string target =
+                profile.secretRef.empty() ? MiniMaxAdapter::buildSecretRef(profile) : profile.secretRef;
+            const auto invalidation = storageService.execute(
+                "UPDATE credential_profiles SET validation_state = 'unknown', last_validation_error = '', "
+                "last_validated_at_utc = NULL WHERE secret_ref = ? AND "
+                "(validation_state <> 'unknown' OR last_validation_error <> '' OR last_validated_at_utc IS NOT NULL);",
+                {target});
+            if (!invalidation.success()) {
+                result.message = "Could not clear the previous MiniMax validation result.";
+                return result;
+            }
+            profile.validationState = "unknown";
+            profile.lastValidatedAt = 0;
+            profile.lastValidationError.clear();
+        }
+
         if (request.action == DashboardMiniMaxCredentialAction::Save) {
             if (!adapter->storeSubscriptionCredential(profile, request.secret)) {
                 MiniMaxSubscriptionCredentialProfile failed = adapter->getSubscriptionCredentialProfile();
