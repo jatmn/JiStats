@@ -441,19 +441,22 @@ std::string HtmlExporter::generateHtml(const DashboardViewModel& viewModel,
     html << "                    <div class=\"label\">Mirror Policy</div>\n";
     html << "                    <div class=\"value\">" << pImpl->escapeHtml(metadata.mirrorPolicyVersion) << "</div>\n";
     html << "                </div>\n";
-    
-    // Provider scope
-    if (!metadata.providerKeys.empty()) {
-        html << "                <div class=\"metadata-item\">\n";
-        html << "                    <div class=\"label\">Providers</div>\n";
-        html << "                    <div class=\"value\">";
+
+    html << "                <div class=\"metadata-item\">\n";
+    html << "                    <div class=\"label\">Providers</div>\n";
+    html << "                    <div class=\"value\">";
+    if (metadata.providerKeys.empty()) {
+        html << "All Providers";
+    } else {
         for (size_t i = 0; i < metadata.providerKeys.size(); ++i) {
-            if (i > 0) html << ", ";
+            if (i > 0) {
+                html << ", ";
+            }
             html << pImpl->escapeHtml(metadata.providerKeys[i]);
         }
-        html << "</div>\n";
-        html << "                </div>\n";
     }
+    html << "</div>\n";
+    html << "                </div>\n";
 
     html << "                <div class=\"metadata-item\">\n";
     html << "                    <div class=\"label\">Account Scope</div>\n";

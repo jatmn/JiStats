@@ -12,7 +12,7 @@ Open the dedicated Analysis workspace from the dashboard. The provider, account,
 
 HTML is the primary v1.0 export format. Reports are snapshots for sharing, archiving, or offline review. Use the dashboard and Analysis for current data and interactive review.
 
-Use **File → Export HTML Report…** for a manual report. Configure scheduled HTML export in Settings. [AppController](../../src/app/AppController.cpp) owns the internal schedule while JiStats runs. Manual and scheduled reports share the Analysis provider/account and date scope. Historical totals follow the selected account even when it has no live dashboard row. **All Providers** and **All Accounts** include retained records across the selected dates. Settings retain the schedule and last-run status. Export attempts are stored in `export_runs`.
+Use **File → Export HTML Report…** for a manual report. Configure scheduled HTML export in Settings. [AppController](../../src/app/AppController.cpp) owns the internal schedule while JiStats runs. Manual and scheduled reports share the Analysis provider/account and date scope. The report header and historical totals both follow the effective Analysis filters, including historical accounts without live dashboard rows. **All Providers** and **All Accounts** include retained records across the selected dates. Settings retain the schedule and last-run status. Export attempts are stored in `export_runs`.
 
 ### Report metadata
 

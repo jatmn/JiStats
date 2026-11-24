@@ -5478,16 +5478,17 @@ public:
         const std::string& outputPath,
         std::time_t now) const {
         const ResolvedAnalysisWindow analysisWindow = analysisQueryEngine.resolveWindow(preferences, now);
+        const auto selection = analysisQueryEngine.resolveSelection(dashboardPresenter.getViewModel(), preferences);
 
         ReportRequest request;
         request.format = ReportFormat::Html;
         request.outputPath = outputPath;
         request.dateRange = analysisWindow.reportDateRange;
-        if (!preferences.analysisSelectedProviderId.empty()) {
-            request.providerFilter.push_back(preferences.analysisSelectedProviderId);
+        if (!selection.providerId.empty()) {
+            request.providerFilter.push_back(selection.providerId);
         }
-        if (!preferences.analysisSelectedAccountId.empty()) {
-            request.accountFilter.push_back(preferences.analysisSelectedAccountId);
+        if (!selection.accountId.empty()) {
+            request.accountFilter.push_back(selection.accountId);
         }
         return request;
     }

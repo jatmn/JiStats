@@ -6054,8 +6054,11 @@ TEST_CASE("AppController manual HTML export uses the current analysis scope", "[
     app.shutdown();
 }
 
-TEST_CASE("AppController exports a historical Analysis account with no live row", "[app][analysis][reporting]") {
+TEST_CASE("AppController exports the effective Analysis account when no live row matches",
+          "[app][analysis][reporting]") {
     requireSqlite();
+    const bool accountWasPruned = GENERATE(false, true);
+    CAPTURE(accountWasPruned);
 
     TempTestDatabase dbPath;
     TempTestDirectory exportDir("jistats_historical_account_export");
@@ -6082,7 +6085,7 @@ TEST_CASE("AppController exports a historical Analysis account with no live row"
                          [&](const ProviderStatus& status) { return status.accountId == historicalAccount; }));
     DashboardPreferences preferences = dashboard.preferences;
     preferences.analysisSelectedProviderId = "openai";
-    preferences.analysisSelectedAccountId = historicalAccount;
+    preferences.analysisSelectedAccountId = accountWasPruned ? "pruned-history" : historicalAccount;
     preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
     preferences.analysisCustomRangeStartUtc = reportDay;
     preferences.analysisCustomRangeEndUtc = reportDay;
@@ -6094,9 +6097,24 @@ TEST_CASE("AppController exports a historical Analysis account with no live row"
     REQUIRE(report.is_open());
     const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
     CHECK(html.find("Archived ChatGPT") != std::string::npos);
-    CHECK(html.find("123 tokens") != std::string::npos);
-    CHECK(html.find("unrelated-runtime-model") == std::string::npos);
-    CHECK(html.find("777 tokens") == std::string::npos);
+    CHECK(html.find("<div class=\"value\">openai</div>") != std::string::npos);
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto exported = storage.getLatestExportRun("manual_html");
+    REQUIRE(exported.has_value());
+    CHECK(exported->providerFilterCsv == "openai");
+    if (accountWasPruned) {
+        CHECK(exported->accountFilterCsv.empty());
+        CHECK(html.find("<div class=\"value\">All Accounts</div>") != std::string::npos);
+        CHECK(html.find("unrelated-runtime-model") != std::string::npos);
+    } else {
+        CHECK(exported->accountFilterCsv == historicalAccount);
+        CHECK(html.find("<div class=\"value\">" + historicalAccount + "</div>") != std::string::npos);
+        CHECK(html.find("123 tokens") != std::string::npos);
+        CHECK(html.find("unrelated-runtime-model") == std::string::npos);
+        CHECK(html.find("777 tokens") == std::string::npos);
+    }
 }
 
 TEST_CASE("AppController All Providers and All Accounts exports ignore the dashboard selection",
@@ -6139,6 +6157,8 @@ TEST_CASE("AppController All Providers and All Accounts exports ignore the dashb
         const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
         CHECK(html.find("openai-test-model") != std::string::npos);
         CHECK(html.find("minimax-test-model") != std::string::npos);
+        CHECK(html.find("<div class=\"value\">All Providers</div>") != std::string::npos);
+        CHECK(html.find("<div class=\"value\">All Accounts</div>") != std::string::npos);
     }
 }
 

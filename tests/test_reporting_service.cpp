@@ -597,6 +597,7 @@ TEST_CASE("ReportingService generateReport populates metadata with provider scop
     ReportRequest request;
     request.format = ReportFormat::Html;
     request.outputPath = outputPath.string();
+    request.providerFilter = {"openai", "minimax"};
 
     ReportResult result = service.generateReport(request);
     REQUIRE(result.success);
@@ -606,7 +607,7 @@ TEST_CASE("ReportingService generateReport populates metadata with provider scop
     CHECK(result.metadata.providerKeys.size() == 2);
     CHECK(std::find(result.metadata.providerKeys.begin(), result.metadata.providerKeys.end(), "openai") != result.metadata.providerKeys.end());
     CHECK(std::find(result.metadata.providerKeys.begin(), result.metadata.providerKeys.end(), "minimax") != result.metadata.providerKeys.end());
-    CHECK(result.metadata.scopeLabel() == "Provider scope only");
+    CHECK(result.metadata.scopeLabel() == "All Accounts");
 }
 
 TEST_CASE("ReportingService generateReport metadata reflects live provider state", "[reporting]") {
@@ -833,6 +834,8 @@ TEST_CASE("ReportingService generateReport renders explicit account scope labels
     ReportRequest request;
     request.format = ReportFormat::Html;
     request.outputPath = outputPath.string();
+    request.providerFilter = {"openai", "minimax"};
+    request.accountFilter = {"acct-openai", "acct-minimax"};
 
     ReportResult result = service.generateReport(request);
     REQUIRE(result.success);

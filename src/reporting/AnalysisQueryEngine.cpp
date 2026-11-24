@@ -992,10 +992,56 @@ ResolvedAnalysisWindow AnalysisQueryEngine::resolveWindow(
     return window;
 }
 
-AnalysisViewModel AnalysisQueryEngine::buildViewModel(
-    const DashboardViewModel& sourceViewModel,
-    const DashboardPreferences& preferences,
-    std::time_t now) const {
+ResolvedAnalysisSelection AnalysisQueryEngine::resolveSelection(const DashboardViewModel& sourceViewModel,
+                                                                const DashboardPreferences& preferences) const {
+    ResolvedAnalysisSelection selection;
+    selection.providerId = preferences.analysisSelectedProviderId;
+    selection.accountId = preferences.analysisSelectedAccountId;
+
+    std::set<std::string> seenProviders;
+    std::set<std::string> seenAccounts;
+    selection.availableProviders.push_back({"", "All Providers"});
+    selection.availableAccounts.push_back({"", "All Accounts"});
+
+    auto addProviderOption = [&](const std::string& key, const std::string& label) {
+        if (key.empty() || !seenProviders.insert(key).second) {
+            return;
+        }
+        selection.availableProviders.push_back({key, label.empty() ? key : label});
+    };
+
+    auto addAccountOption = [&](const std::string& key, const std::string& label) {
+        if (key.empty() || !seenAccounts.insert(key).second) {
+            return;
+        }
+        selection.availableAccounts.push_back({key, label.empty() ? key : label});
+    };
+
+    if (storage_ != nullptr && storage_->isOpen()) {
+        addPersistedProviderOptions(*storage_, selection.availableProviders, seenProviders);
+        addPersistedAccountOptions(*storage_, selection.providerId, selection.availableAccounts, seenAccounts);
+    }
+
+    for (const auto& provider : sourceViewModel.providers) {
+        addProviderOption(provider.providerKey, provider.displayName);
+        if (!provider.accountId.empty() &&
+            (selection.providerId.empty() || provider.providerKey == selection.providerId)) {
+            addAccountOption(provider.accountId, provider.displayName + " / " + provider.accountId);
+        }
+    }
+
+    if (!selection.providerId.empty() && seenProviders.find(selection.providerId) == seenProviders.end()) {
+        selection.providerId.clear();
+    }
+    if (!selection.accountId.empty() && seenAccounts.find(selection.accountId) == seenAccounts.end()) {
+        selection.accountId.clear();
+    }
+
+    return selection;
+}
+
+AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& sourceViewModel,
+                                                      const DashboardPreferences& preferences, std::time_t now) const {
     AnalysisViewModel analysis;
     analysis.scope.selectedProviderId = preferences.analysisSelectedProviderId;
     analysis.scope.selectedAccountId = preferences.analysisSelectedAccountId;
@@ -1013,51 +1059,11 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
     analysis.trendBucketGranularity = trendBucketConfig.granularity;
     analysis.trendBucketLabel = trendBucketConfig.label;
 
-    std::set<std::string> seenProviders;
-    std::set<std::string> seenAccounts;
-    analysis.availableProviders.push_back({"", "All Providers"});
-    analysis.availableAccounts.push_back({"", "All Accounts"});
-
-    auto addProviderOption = [&](const std::string& key, const std::string& label) {
-        if (key.empty() || !seenProviders.insert(key).second) {
-            return;
-        }
-        analysis.availableProviders.push_back({key, label.empty() ? key : label});
-    };
-
-    auto addAccountOption = [&](const std::string& key, const std::string& label) {
-        if (key.empty() || !seenAccounts.insert(key).second) {
-            return;
-        }
-        analysis.availableAccounts.push_back({key, label.empty() ? key : label});
-    };
-
-    if (storage_ != nullptr && storage_->isOpen()) {
-        addPersistedProviderOptions(*storage_, analysis.availableProviders, seenProviders);
-        addPersistedAccountOptions(
-            *storage_,
-            analysis.scope.selectedProviderId,
-            analysis.availableAccounts,
-            seenAccounts);
-    }
-
-    for (const auto& provider : sourceViewModel.providers) {
-        addProviderOption(provider.providerKey, provider.displayName);
-        if (!provider.accountId.empty() &&
-            (analysis.scope.selectedProviderId.empty() ||
-             provider.providerKey == analysis.scope.selectedProviderId)) {
-            addAccountOption(provider.accountId, provider.displayName + " / " + provider.accountId);
-        }
-    }
-
-    if (!analysis.scope.selectedProviderId.empty() &&
-        seenProviders.find(analysis.scope.selectedProviderId) == seenProviders.end()) {
-        analysis.scope.selectedProviderId.clear();
-    }
-    if (!analysis.scope.selectedAccountId.empty() &&
-        seenAccounts.find(analysis.scope.selectedAccountId) == seenAccounts.end()) {
-        analysis.scope.selectedAccountId.clear();
-    }
+    auto selection = resolveSelection(sourceViewModel, preferences);
+    analysis.scope.selectedProviderId = std::move(selection.providerId);
+    analysis.scope.selectedAccountId = std::move(selection.accountId);
+    analysis.availableProviders = std::move(selection.availableProviders);
+    analysis.availableAccounts = std::move(selection.availableAccounts);
 
     const auto providerOption = std::find_if(
         analysis.availableProviders.begin(),
