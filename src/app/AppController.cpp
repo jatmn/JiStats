@@ -1424,28 +1424,6 @@ ResolvedReportWindow resolveReportWindow(const ReportRequest& request, std::time
     return window;
 }
 
-std::vector<std::string> collectReportProviderKeys(const DashboardViewModel& viewModel) {
-    std::vector<std::string> providerKeys;
-    providerKeys.reserve(viewModel.providers.size());
-    for (const auto& provider : viewModel.providers) {
-        if (!provider.providerKey.empty()) {
-            providerKeys.push_back(provider.providerKey);
-        }
-    }
-    return providerKeys;
-}
-
-std::vector<std::string> collectReportAccountIds(const DashboardViewModel& viewModel) {
-    std::vector<std::string> accountIds;
-    accountIds.reserve(viewModel.providers.size());
-    for (const auto& provider : viewModel.providers) {
-        if (!provider.accountId.empty()) {
-            accountIds.push_back(provider.accountId);
-        }
-    }
-    return accountIds;
-}
-
 void appendProviderFilterClause(
     std::string& sql,
     std::vector<std::string>& params,
@@ -1545,8 +1523,8 @@ ReportAggregateData buildReportAggregateData(
         }
     }
 
-    const std::vector<std::string> providerKeys = collectReportProviderKeys(viewModel);
-    const std::vector<std::string> accountIds = collectReportAccountIds(viewModel);
+    const auto& providerKeys = request.providerFilter;
+    const auto& accountIds = request.accountFilter;
     if (!storage.isOpen()) {
         if (metadata.containsBackfilledData || metadata.containsUnknownGaps) {
             std::ostringstream summary;
@@ -5500,20 +5478,17 @@ public:
         const std::string& outputPath,
         std::time_t now) const {
         const ResolvedAnalysisWindow analysisWindow = analysisQueryEngine.resolveWindow(preferences, now);
+        const auto selection = analysisQueryEngine.resolveSelection(dashboardPresenter.getViewModel(), preferences);
 
         ReportRequest request;
         request.format = ReportFormat::Html;
         request.outputPath = outputPath;
         request.dateRange = analysisWindow.reportDateRange;
-        if (!preferences.analysisSelectedProviderId.empty()) {
-            request.providerFilter.push_back(preferences.analysisSelectedProviderId);
-        } else if (!preferences.lastSelectedProviderId.empty()) {
-            request.providerFilter.push_back(preferences.lastSelectedProviderId);
+        if (!selection.providerId.empty()) {
+            request.providerFilter.push_back(selection.providerId);
         }
-        if (!preferences.analysisSelectedAccountId.empty()) {
-            request.accountFilter.push_back(preferences.analysisSelectedAccountId);
-        } else if (!preferences.lastSelectedAccountId.empty()) {
-            request.accountFilter.push_back(preferences.lastSelectedAccountId);
+        if (!selection.accountId.empty()) {
+            request.accountFilter.push_back(selection.accountId);
         }
         return request;
     }

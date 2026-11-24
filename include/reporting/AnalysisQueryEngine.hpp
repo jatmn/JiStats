@@ -5,6 +5,7 @@
 
 #include <ctime>
 #include <string>
+#include <vector>
 
 namespace JiStats {
 
@@ -20,6 +21,13 @@ struct ResolvedAnalysisWindow {
     ReportDateRange reportDateRange;
 };
 
+struct ResolvedAnalysisSelection {
+    std::string providerId;
+    std::string accountId;
+    std::vector<AnalysisScopeOption> availableProviders;
+    std::vector<AnalysisScopeOption> availableAccounts;
+};
+
 /**
  * Owns scope resolution and analysis view-model building for the active Analysis tab path.
  * The engine keeps scope handling, persisted-history queries, and export-window resolution in
@@ -33,6 +41,9 @@ public:
         const DashboardViewModel& sourceViewModel,
         const DashboardPreferences& preferences,
         std::time_t now) const;
+
+    ResolvedAnalysisSelection resolveSelection(const DashboardViewModel& sourceViewModel,
+                                               const DashboardPreferences& preferences) const;
 
     ResolvedAnalysisWindow resolveWindow(
         const DashboardPreferences& preferences,

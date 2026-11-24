@@ -116,29 +116,12 @@ void stripProviderQuotasFromViewModel(DashboardViewModel& viewModel) {
 
 } // namespace
 
-ReportMetadata buildReportMetadata(const DashboardViewModel& viewModel) {
+ReportMetadata buildReportMetadata(const DashboardViewModel& viewModel, const ReportRequest& request) {
     ReportMetadata metadata;
-    std::set<std::string> seenProviderKeys;
-    std::set<std::string> seenAccountIds;
+    metadata.providerKeys = request.providerFilter;
+    metadata.accountIds = request.accountFilter;
+    metadata.accountScopeComplete = !metadata.accountIds.empty();
     std::set<std::string> seenProviderSurfaces;
-    bool anyMissingAccountScope = false;
-
-    // Collect provider keys and account IDs
-    for (const auto& provider : viewModel.providers) {
-        if (!provider.providerKey.empty() && seenProviderKeys.insert(provider.providerKey).second) {
-            metadata.providerKeys.push_back(provider.providerKey);
-        }
-
-        if (!provider.accountId.empty()) {
-            if (seenAccountIds.insert(provider.accountId).second) {
-                metadata.accountIds.push_back(provider.accountId);
-            }
-        } else if (!provider.providerKey.empty()) {
-            anyMissingAccountScope = true;
-        }
-    }
-    metadata.accountScopeComplete =
-        !metadata.providerKeys.empty() && !anyMissingAccountScope;
 
     std::vector<ProviderState> providerStates;
     providerStates.reserve(viewModel.providers.size());
@@ -210,11 +193,11 @@ std::string ReportMetadata::confidenceLabel() const {
 }
 
 std::string ReportMetadata::scopeLabel() const {
-    if (providerKeys.empty()) {
-        return "No provider scope";
-    }
     if (accountIds.empty()) {
-        return "Provider scope only";
+        return "All Accounts";
+    }
+    if (providerKeys.empty()) {
+        return "Account scope";
     }
     return accountScopeComplete
         ? "Provider and account scope"
@@ -319,7 +302,7 @@ ReportResult ReportingService::generateReport(const ReportRequest& request) {
             exporter.setReportTimestamp(std::chrono::system_clock::now());
             
             // Build report metadata from view model data
-            ReportMetadata metadata = buildReportMetadata(reportViewModel);
+            ReportMetadata metadata = buildReportMetadata(reportViewModel, request);
             if (pImpl->mirrorPolicyVersionProvider) {
                 const std::string version =
                     pImpl->mirrorPolicyVersionProvider(reportViewModel);
