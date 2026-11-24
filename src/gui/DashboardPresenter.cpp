@@ -973,8 +973,8 @@ bool isSubscriptionQuota(const ProviderStatus& provider, const QuotaInfo& quota)
 
 std::string quotaWindowLabel(const ProviderStatus& provider, const QuotaInfo& quota, const std::string& window,
                              bool secondary = false) {
-    // Codex uses coarse types for several different reported durations.
-    if ((isOpenAISubscriptionQuota(provider, quota) && (window == "interval" || window == "weekly")) ||
+    // Codex secondary types also cover durations shorter than a week.
+    if ((isOpenAISubscriptionQuota(provider, quota) && (window == "interval" || (secondary && window == "weekly"))) ||
         (isKimiSubscriptionQuota(provider, quota) && window == "interval")) {
         return secondary ? "Secondary window" : "Primary window";
     }

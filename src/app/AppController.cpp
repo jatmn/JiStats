@@ -51,6 +51,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <windows.h>
@@ -2603,7 +2604,7 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         "       COALESCE(qs.limit_value, 0), "
         "       COALESCE(qs.remaining_value, "
         "           CASE WHEN qs.limit_value IS NOT NULL THEN qs.limit_value - qs.used_value ELSE 0 END), "
-        "       qs.confidence_tier, qs.window_end_utc "
+        "       qs.confidence_tier, qs.window_end_utc, qs.window_start_utc, qs.account_id "
         "FROM latest_provider_snapshots latest "
         "JOIN quota_snapshots qs "
         "  ON qs.provider_id = latest.provider_id "
@@ -2620,11 +2621,42 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
     viewModel.appVersion = kJiStatsAppVersion;
     viewModel.preferences = preferences;
 
+    // An old Codex read stored its weekly-only allowance under both plan keys.
+    // Match the saved window and values before preferring the weekly row.
+    using SavedQuotaWindow = std::tuple<int, std::time_t, std::time_t, long long, long long, long long>;
+    const auto savedWindow = [&result](size_t row) -> SavedQuotaWindow {
+        return {result.getInt(row, 12),
+                parseRuntimeTimestamp(result.getString(row, 11)),
+                parseRuntimeTimestamp(result.getString(row, 10)),
+                result.getInt64(row, 6),
+                result.getInt64(row, 7),
+                result.getInt64(row, 8)};
+    };
+    std::map<SavedQuotaWindow, size_t> firstWeeklyRow;
+    for (size_t row = 0; row < result.rowCount(); ++row) {
+        if (result.getString(row, 0) == "openai" &&
+            result.getString(row, 3) == "openai_subscription_codex_local:weekly") {
+            firstWeeklyRow.try_emplace(savedWindow(row), row);
+        }
+    }
+
     std::time_t freshestSnapshotTime = 0;
     for (size_t row = 0; row < result.rowCount(); ++row) {
         const std::string providerKey = result.getString(row, 0);
         if (!isProviderTrackingEnabled(preferences, providerKey)) {
             continue;
+        }
+
+        const auto planKey = result.getString(row, 3);
+        const bool codexWeekly = providerKey == "openai" && planKey == "openai_subscription_codex_local:weekly";
+        const bool codexInterval = providerKey == "openai" && planKey == "openai_subscription_codex_local:interval";
+        if (codexWeekly || codexInterval) {
+            const auto window = savedWindow(row);
+            const auto weekly = firstWeeklyRow.find(window);
+            if (weekly != firstWeeklyRow.end() &&
+                (codexWeekly ? row != weekly->second : std::get<2>(window) - std::get<1>(window) == 7 * 86400)) {
+                continue;
+            }
         }
 
         const std::string providerDisplayName = result.getString(row, 1);
@@ -2654,7 +2686,6 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
             providerIt = std::prev(viewModel.providers.end());
         }
 
-        const auto planKey = result.getString(row, 3);
         const long long used = result.getInt64(row, 6);
         const long long limit = result.getInt64(row, 7);
         const long long remaining = result.getInt64(row, 8);
