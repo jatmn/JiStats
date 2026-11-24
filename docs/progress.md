@@ -92,6 +92,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 - Codex SQLite thread deltas contribute to model attribution. The dashboard, Analysis activity and HTML usage totals now apply the same source exclusions to raw data and rollup fallbacks as to stored usage rollups. The synthetic SQLite tests replay recent and missing-hour events and verify that billable usage still counts. [Issue #100](https://github.com/jatmn/JiStats/issues/100)
 
+- Analysis hides accounts backed only by Codex model attribution. A saved selection for such an account stays scoped to it in HTML exports. The focused review regression verifies the picker, the dedicated chart, and a scheduled export with a second account under the same provider. [PR #147 review](https://github.com/jatmn/JiStats/pull/147#discussion_r4676329148)
+
 - Codex Analysis preserves enclosing timestamps when matching recorded requests to estimated counter intervals. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 467 Windows cases passed under Wine.
 
 - Codex Analysis retains distinct legacy counter readings when tallying prompts and per-minute growth across estimated resets. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 466 Windows cases passed under Wine.

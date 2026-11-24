@@ -5397,6 +5397,63 @@ TEST_CASE("AppController excludes Codex SQLite model deltas from general usage",
     CHECK(html.find("codex-test-model") == std::string::npos);
 }
 
+TEST_CASE("Saved Codex attribution accounts do not widen scheduled HTML exports",
+          "[app][analysis][reporting][scheduled][codex]") {
+    requireSqlite();
+    const bool rawAttributionPruned = GENERATE(false, true);
+    CAPTURE(rawAttributionPruned);
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_codex_scope_export");
+    const std::time_t now = std::time(nullptr);
+    const std::time_t reportDay = now - 86400;
+    const std::string timestamp = toUtcIso(reportDay);
+    const std::string codexAccount = "openai.codex_local_sqlite";
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false, true, 60, exportDir.path().string(),
+                           "", "", "openai", codexAccount, "custom", timestamp, timestamp);
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", reportDay, 777, 10, "unrelated-runtime-model");
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto codex = seedUsageProviderAccount(storage, "openai", codexAccount, "OpenAI Codex Local");
+    PersistedUsageEvent delta;
+    delta.providerId = codex.providerId;
+    delta.accountId = codex.accountId;
+    delta.eventTime = reportDay;
+    delta.sourceType = "codex_local_sqlite";
+    delta.requestType = "codex_thread_delta";
+    delta.modelKey = "codex-test-model";
+    delta.totalTokens = 321;
+    REQUIRE(storage
+                .execute("UPDATE accounts SET scope_type = 'local_codex_sqlite' WHERE id = ?;",
+                         {std::to_string(codex.accountId)})
+                .success());
+    if (!rawAttributionPruned) {
+        REQUIRE(storage.insertUsageEvents({delta}));
+    }
+    storage.close();
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({}));
+    app.setScheduledExportPollIntervalForTesting(50);
+    REQUIRE(app.init());
+    REQUIRE(
+        waitForCondition([&]() { return !app.getDashboardViewModelForTesting().scheduledExportLastRunTime.empty(); },
+                         std::chrono::milliseconds(4000)));
+
+    REQUIRE(storage.init(dbPath.path()));
+    const auto exported = storage.getLatestExportRun("scheduled_html");
+    REQUIRE(exported.has_value());
+    REQUIRE(exported->success);
+    CHECK(exported->providerFilterCsv == "openai");
+    CHECK(exported->accountFilterCsv == codexAccount);
+    std::ifstream report(exported->outputPath);
+    REQUIRE(report.is_open());
+    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+    CHECK(html.find("unrelated-runtime-model") == std::string::npos);
+    CHECK(html.find("codex-test-model") == std::string::npos);
+}
+
 TEST_CASE("AppController keeps taskbar overlay on subscription quota when Codex local usage exists", "[app][runtime][taskbar][codex]") {
     requireSqlite();
 

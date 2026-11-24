@@ -26,6 +26,7 @@ struct ResolvedAnalysisSelection {
     std::string accountId;
     std::vector<AnalysisScopeOption> availableProviders;
     std::vector<AnalysisScopeOption> availableAccounts;
+    bool savedAccountHasOnlyModelAttribution = false;
 };
 
 /**

@@ -831,8 +831,8 @@ void addPersistedAccountOptions(
                       "FROM accounts a "
                       "JOIN providers p ON p.id = a.provider_id "
                       "WHERE ("
-                      "    EXISTS (SELECT 1 FROM usage_events ue WHERE ue.account_id = a.id AND ue.source_type != "
-                      "'codex_local_rollout') "
+                      "    EXISTS (SELECT 1 FROM usage_events ue WHERE ue.account_id = a.id "
+                      "AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')) "
                       "    OR EXISTS (SELECT 1 FROM usage_rollups_daily r WHERE r.provider_id = a.provider_id AND "
                       "r.account_id = a.id) "
                       "    OR EXISTS (SELECT 1 FROM activity_events ae WHERE ae.account_id = a.id) "
@@ -1034,7 +1034,21 @@ ResolvedAnalysisSelection AnalysisQueryEngine::resolveSelection(const DashboardV
         selection.providerId.clear();
     }
     if (!selection.accountId.empty() && seenAccounts.find(selection.accountId) == seenAccounts.end()) {
-        selection.accountId.clear();
+        if (storage_ != nullptr && storage_->isOpen()) {
+            const auto savedAttribution = storage_->execute(
+                "SELECT 1 FROM accounts a JOIN providers p ON p.id = a.provider_id "
+                "WHERE a.account_key = ? AND (? = '' OR p.provider_key = ?) "
+                "AND (a.scope_type = 'local_codex_sqlite' OR EXISTS "
+                "(SELECT 1 FROM usage_events ue WHERE ue.account_id = a.id "
+                "AND ue.source_type = 'codex_local_sqlite')) LIMIT 1;",
+                {selection.accountId, preferences.analysisSelectedProviderId, preferences.analysisSelectedProviderId});
+            selection.savedAccountHasOnlyModelAttribution =
+                savedAttribution.success() && savedAttribution.rowCount() != 0;
+        }
+        // Preserve the saved account filter so sharing an export never broadens its scope.
+        if (!selection.savedAccountHasOnlyModelAttribution) {
+            selection.accountId.clear();
+        }
     }
 
     return selection;
@@ -1078,12 +1092,13 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
             return option.key == analysis.scope.selectedAccountId;
         });
 
+    const std::string accountLabel =
+        selection.savedAccountHasOnlyModelAttribution
+            ? "Saved account has only model attribution"
+            : (accountOption != analysis.availableAccounts.end() ? accountOption->label : "All Accounts");
     analysis.scopeLabel =
-        (providerOption != analysis.availableProviders.end() ? providerOption->label : "All Providers") +
-        " / " +
-        (accountOption != analysis.availableAccounts.end() ? accountOption->label : "All Accounts") +
-        " / " +
-        window.label;
+        (providerOption != analysis.availableProviders.end() ? providerOption->label : "All Providers") + " / " +
+        accountLabel + " / " + window.label;
 
     if (storage_ == nullptr || !storage_->isOpen()) {
         analysis.dataQualityNote = "History analysis is unavailable until JiStats storage is ready.";
