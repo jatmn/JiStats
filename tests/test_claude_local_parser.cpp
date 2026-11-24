@@ -2,6 +2,7 @@
 #include "providers/claude/ClaudeCodeLocalParser.hpp"
 #include "providers/claude/ClaudeCodeAdapter.hpp"
 #include "db/StorageService.hpp"
+#include "app_controller_test_support.hpp"
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
 #include <ctime>
@@ -215,33 +216,32 @@ TEST_CASE("Claude adapter fetchUsage returns usage events", "[claude][adapter]")
     REQUIRE(!usage.events.empty());
 }
 
-TEST_CASE("Claude adapter fetchUsage filters to the requested time window", "[claude][adapter]") {
+TEST_CASE("Claude adapter uses UTC dates for bounded daily usage", "[claude][adapter]") {
+    const int localHour = GENERATE(0, 9);
+    CAPTURE(localHour);
+    struct ResetTimeZone {
+        ~ResetTimeZone() {
+            _tzset();
+        }
+    } resetTimeZone;
+    const TestSupport::ScopedEnvironmentVariable timeZone("TZ", localHour == 0 ? "UTC0" : "JST-9");
+    _tzset();
+
     ClaudeCodeAdapter adapter;
     adapter.setMockStatsCachePath("docs/fixtures/claude/stats-cache.redacted.json");
 
-    std::tm tm{};
-    tm.tm_year = 2025 - 1900;
-    tm.tm_mon = 0;
-    tm.tm_mday = 3;
-    tm.tm_hour = 0;
-    tm.tm_min = 0;
-    tm.tm_sec = 0;
-#ifdef _WIN32
-    const std::time_t dayStart = _mkgmtime(&tm);
-#else
-    const std::time_t dayStart = timegm(&tm);
-#endif
-    REQUIRE(dayStart > 0);
+    constexpr std::time_t dayStart = 1735862400; // 2025-01-03 00:00:00 UTC
+    std::tm localTime{};
+    REQUIRE(localtime_s(&localTime, &dayStart) == 0);
+    REQUIRE(localTime.tm_hour == localHour);
 
     const std::time_t dayEnd = dayStart + 86400 - 1;
-    auto usage = adapter.fetchUsage(dayStart, dayEnd);
+    const auto usage = adapter.fetchUsage(dayStart, dayEnd);
     REQUIRE(usage.success);
     REQUIRE(usage.events.size() == 1);
     CHECK(usage.events.front().modelKey == "claude-sonnet-4-20250514");
-    for (const auto& event : usage.events) {
-        CHECK(event.eventTime >= dayStart);
-        CHECK(event.eventTime <= dayEnd);
-    }
+    CHECK(usage.events.front().eventTime == dayStart);
+    CHECK(usage.events.front().totalTokens == 4100);
 }
 
 TEST_CASE("Claude adapter validateCredentials succeeds for existing fixture", "[claude][adapter]") {
@@ -322,7 +322,9 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
 
     ClaudeCodeAdapter adapter;
     adapter.setMockStatsCachePath(source.path());
-    const auto usage = adapter.fetchUsage(activity.startedAt - 1, activity.startedAt + 1);
+    constexpr std::time_t usageDayStart = 1735776000; // 2025-01-02 00:00:00 UTC
+    constexpr std::time_t usageDayEnd = usageDayStart + 86400 - 1;
+    const auto usage = adapter.fetchUsage(usageDayStart, usageDayEnd);
     REQUIRE(usage.success);
     REQUIRE(usage.events.size() == 1);
     CHECK(usage.events.front().totalTokens == 42);
@@ -381,7 +383,7 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
     CHECK(migratedUsage.front().sourceRunId == backfill.sourceRunId);
     CHECK(migratedUsage.front().totalTokens == 42);
 
-    const auto replay = adapter.fetchUsage(activity.startedAt - 1, activity.startedAt + 1);
+    const auto replay = adapter.fetchUsage(usageDayStart, usageDayEnd);
     REQUIRE(replay.success);
     REQUIRE(replay.events.size() == 1);
     CHECK((replay.events.front().sourceRunId != backfill.sourceRunId) == advanceCache);
