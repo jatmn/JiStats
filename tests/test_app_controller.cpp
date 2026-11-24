@@ -2245,7 +2245,8 @@ TEST_CASE("AppController updates an existing MiniMax credential profile from the
     REQUIRE(app.submitMiniMaxCredentialActionForTesting(request));
     REQUIRE(waitForCondition([&app]() {
         const auto summary = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "coding_plan");
-        return summary.has_value() && summary->accountDisplayName == "Work Coding Plan";
+        return summary.has_value() && summary->accountDisplayName == "Work Coding Plan" &&
+               app.getDashboardStatusTextForTesting() == "Stored MiniMax Coding Plan credential.";
     }, std::chrono::milliseconds(4000)));
 
     request.accountDisplayName = "Renamed Coding Plan";
