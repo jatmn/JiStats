@@ -2245,7 +2245,8 @@ TEST_CASE("AppController updates an existing MiniMax credential profile from the
     REQUIRE(app.submitMiniMaxCredentialActionForTesting(request));
     REQUIRE(waitForCondition([&app]() {
         const auto summary = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "coding_plan");
-        return summary.has_value() && summary->accountDisplayName == "Work Coding Plan";
+        return summary.has_value() && summary->accountDisplayName == "Work Coding Plan" &&
+               app.getDashboardStatusTextForTesting() == "Stored MiniMax Coding Plan credential.";
     }, std::chrono::milliseconds(4000)));
 
     request.accountDisplayName = "Renamed Coding Plan";
@@ -2348,7 +2349,9 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
     REQUIRE(app.submitMiniMaxCredentialActionForTesting(save));
     REQUIRE(waitForCondition([&app]() {
         const auto summary = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "token_plan");
-        return summary.has_value() && summary->hasPersistedProfile;
+        // The profile can be published before the presenter processes Save completion.
+        return summary.has_value() && summary->hasPersistedProfile &&
+               app.getDashboardStatusTextForTesting() == "Stored MiniMax Token Plan credential.";
     }));
 
     DashboardMiniMaxCredentialRequest validate;
