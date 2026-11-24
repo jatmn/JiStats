@@ -9,25 +9,32 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repoRoot
 
-$processNames = @(
-    "JiStats",
-    "JiStats-upx",
-    "JiStatsMiniMaxCli",
-    "JiStatsMiniMaxCli-upx",
-    "JiStatsTests"
-)
+$executableTargets = @("JiStats", "JiStatsMiniMaxCli", "JiStatsTests")
+if ($Target -and $Target -notcontains "all" -and $Target -notcontains "ALL_BUILD") {
+    $executableTargets = $executableTargets | Where-Object { $Target -contains $_ }
+}
 
-$runningProcesses = Get-Process -ErrorAction SilentlyContinue |
-    Where-Object { $processNames -contains $_.ProcessName }
+$buildPath = (Resolve-Path -LiteralPath $BuildDir -ErrorAction SilentlyContinue).ProviderPath
+$cachePath = if ($buildPath) { Join-Path $buildPath "CMakeCache.txt" }
+if ($executableTargets -and $cachePath -and (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
+    $outputPath = Join-Path $buildPath "bin"
+    if (Select-String -LiteralPath $cachePath -Pattern '^CMAKE_CONFIGURATION_TYPES:[^=]+=.+' -Quiet -ErrorAction SilentlyContinue) {
+        $outputPath = Join-Path $outputPath "Release"
+    }
+    $processNames = foreach ($executableTarget in $executableTargets) {
+        $executableTarget
+        if ($executableTarget -eq "JiStats") {
+            "JiStats-upx"
+        }
+    }
+    $outputExecutables = $processNames | ForEach-Object { Join-Path $outputPath "$_.exe" }
 
-if ($runningProcesses) {
-    $summary = $runningProcesses |
-        Sort-Object ProcessName, Id |
-        ForEach-Object { "$($_.ProcessName)#$($_.Id)" }
-    Write-Host ("Stopping running JiStats binaries before Release build: {0}" -f ($summary -join ", "))
-    $runningProcesses | Stop-Process -Force
-} else {
-    Write-Host "No running JiStats binaries found."
+    Get-Process -Name $processNames -ErrorAction SilentlyContinue | ForEach-Object {
+        $executable = $_.Path
+        if ($outputExecutables -contains $executable) {
+            Write-Warning "Running build output '$executable' (PID $($_.Id)). Exit it normally if it blocks the build."
+        }
+    }
 }
 
 $cmakeArgs = @("--build", $BuildDir, "--config", "Release")
