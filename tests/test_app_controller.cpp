@@ -2452,8 +2452,6 @@ TEST_CASE("AppController restores validation only for the MiniMax key that was c
     seedMiniMaxCredentialMetadata(dbPath.path(), "token_plan", "Original Token Plan");
     StorageService seed;
     REQUIRE(seed.init(dbPath.path()));
-    // Keep startup retention from writing through the deferred transaction used by the rollback case.
-    REQUIRE(SettingsService(seed).setString("retention.last_run_utc", toUtcIso(std::time(nullptr))));
     REQUIRE(seed.execute("UPDATE credential_profiles SET validation_state = 'invalid', "
                          "last_validation_error = 'MiniMax subscription key rejected';")
                 .success());
@@ -2482,6 +2480,7 @@ TEST_CASE("AppController restores validation only for the MiniMax key that was c
 
     AppController app;
     app.setHeadlessForTesting(true);
+    app.setRuntimeWorkersEnabledForTesting(failure != "shared rollback");
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
     app.setMiniMaxCredentialStoreForTesting(store);
@@ -2497,7 +2496,11 @@ TEST_CASE("AppController restores validation only for the MiniMax key that was c
     request.accountDisplayName = "Renamed Token Plan";
     request.secret = "sk-tp-new-unchecked";
     if (failure == "shared rollback") {
+        bool cleared = false;
+        app.setAfterMiniMaxValidationClearForTesting([&cleared]() { cleared = true; });
         CHECK(app.submitMiniMaxCredentialActionWithStorageRollbackForTesting(request) == std::optional<bool>(false));
+        CHECK(cleared);
+        app.setAfterMiniMaxValidationClearForTesting({});
     } else {
         CHECK_FALSE(app.submitMiniMaxCredentialActionForTesting(request));
     }
@@ -2601,6 +2604,49 @@ TEST_CASE("AppController coordinates MiniMax credential changes across instances
         release.set_value();
         first.waitForMiniMaxValidationForTesting();
         REQUIRE(peerSaved);
+    }
+
+    SECTION("A busy profile shows why the validation needs to be retried") {
+        std::promise<void> releaseValidation;
+        first.setMiniMaxValidationReleaseForTesting(releaseValidation.get_future().share());
+        first.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+        DashboardMiniMaxCredentialRequest validate;
+        validate.action = DashboardMiniMaxCredentialAction::Validate;
+        validate.planKey = "token_plan";
+        REQUIRE(first.submitMiniMaxCredentialActionForTesting(validate));
+
+        std::promise<void> peerCleared;
+        std::promise<void> releasePeer;
+        auto cleared = peerCleared.get_future();
+        auto released = releasePeer.get_future();
+        peer.setAfterMiniMaxValidationClearForTesting([&]() {
+            peerCleared.set_value();
+            released.wait();
+        });
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::Reject;
+        auto peerResult =
+            std::async(std::launch::async, [&]() { return peer.submitMiniMaxCredentialActionForTesting(replacement); });
+
+        const bool peerHeldLock = cleared.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        releaseValidation.set_value();
+        first.waitForMiniMaxValidationForTesting();
+        const auto retry = findMiniMaxSummary(first.getDashboardViewModelForTesting(), "token_plan");
+        releasePeer.set_value();
+        CHECK_FALSE(peerResult.get());
+        REQUIRE(peerHeldLock);
+        REQUIRE(retry.has_value());
+        CHECK(retry->validationState == "unreachable");
+        CHECK(retry->lastValidatedAtLabel.empty());
+        CHECK(retry->lastValidationError.find("Retry validation") != std::string::npos);
+
+        REQUIRE(check.init(dbPath.path()));
+        const auto stored = check.execute("SELECT validation_state FROM credential_profiles;");
+        REQUIRE(stored.success());
+        CHECK(stored.getString(0, 0) == "valid");
+        check.close();
+        peer.setAfterMiniMaxValidationClearForTesting({});
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::None;
+        REQUIRE(peer.submitMiniMaxCredentialActionForTesting(replacement));
     }
 
     first.shutdown();

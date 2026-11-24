@@ -55,6 +55,7 @@ public:
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
     void setHeadlessForTesting(bool value);
+    void setRuntimeWorkersEnabledForTesting(bool value);
     void setDisableTaskbarForTesting(bool value);
     void setTaskbarTestModeForTesting(bool value);
     void setForceDashboardInitFailureForTesting(bool value);

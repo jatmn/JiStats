@@ -4133,6 +4133,7 @@ public:
     bool forceDashboardInitFailureForTesting = false;
     std::shared_ptr<ProviderManager> testProviderManager;
     bool headlessForTesting = false;
+    bool runtimeWorkersEnabledForTesting = true;
     bool disableTaskbarForTesting = false;
     bool taskbarTestModeForTesting = false;
     bool disableCodexTokenImportForTesting = false;
@@ -5922,7 +5923,12 @@ public:
 
                 const ProfileDatabaseLock profileLock(storageAvailable ? storageService.getDbPath() : "",
                                                       kMiniMaxProfileLockName, 5000);
-                if ((storageAvailable && !profileLock.ownsLock()) || !validation.matchesCredential(*adapter)) {
+                if (storageAvailable && !profileLock.ownsLock()) {
+                    validatedProfile.validationState = "unreachable";
+                    validatedProfile.lastValidatedAt = 0;
+                    validatedProfile.lastValidationError =
+                        "Could not save the MiniMax validation result because the profile is busy. Retry validation.";
+                } else if (!validation.matchesCredential(*adapter)) {
                     validatedProfile.validationState = "unknown";
                     validatedProfile.lastValidatedAt = 0;
                     validatedProfile.lastValidationError.clear();
@@ -8059,21 +8065,23 @@ bool AppController::init(bool launchInBackground) {
         pImpl->applyTaskbarPreference(viewModel.preferences);
 #endif
 
-        pImpl->startInteractionWorkThread();
-        if (pImpl->shouldQueueDeferredStartupRefresh(
-                loadedPreferences,
-                usedPersistedStartupHydration,
-                executedStartupCatchUp)) {
-            pImpl->queueDeferredStartupRefresh(
-                false,
-                pImpl->shouldImportLocalActivityDuringStartupRefresh(loadedPreferences));
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (pImpl->runtimeWorkersEnabledForTesting)
+#endif
+        {
+            pImpl->startInteractionWorkThread();
+            if (pImpl->shouldQueueDeferredStartupRefresh(loadedPreferences, usedPersistedStartupHydration,
+                                                         executedStartupCatchUp)) {
+                pImpl->queueDeferredStartupRefresh(
+                    false, pImpl->shouldImportLocalActivityDuringStartupRefresh(loadedPreferences));
+            }
+            pImpl->startTaskbarRefreshWatcher();
+            pImpl->startOpenAICodexRefreshWatcher();
+            pImpl->startLocalProviderRefreshWatcher();
+            pImpl->startMiniMaxRefreshWatcher();
+            pImpl->startScheduledExportWatcher();
+            pImpl->startRetentionWatcher();
         }
-        pImpl->startTaskbarRefreshWatcher();
-        pImpl->startOpenAICodexRefreshWatcher();
-        pImpl->startLocalProviderRefreshWatcher();
-        pImpl->startMiniMaxRefreshWatcher();
-        pImpl->startScheduledExportWatcher();
-        pImpl->startRetentionWatcher();
 
         pImpl->state = "running";
         JISTATS_LOG_INFO(LogCategory::Startup, "JiStats initialized");
@@ -8118,6 +8126,10 @@ std::string AppController::getState() const {
 #ifdef JISTATS_ENABLE_TEST_HOOKS
 void AppController::setHeadlessForTesting(bool value) {
     pImpl->headlessForTesting = value;
+}
+
+void AppController::setRuntimeWorkersEnabledForTesting(bool value) {
+    pImpl->runtimeWorkersEnabledForTesting = value;
 }
 
 void AppController::setDisableTaskbarForTesting(bool value) {
