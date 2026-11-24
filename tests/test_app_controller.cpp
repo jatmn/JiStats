@@ -3272,14 +3272,15 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     std::filesystem::create_directories(codexHome.path() / "sessions");
     const std::time_t now = std::time(nullptr);
     const bool paired = GENERATE(false, true);
+    const std::time_t reset = now + 86400;
     const std::string primary =
-        paired ? R"json({"used_percent":28,"window_minutes":300,"resets_at":)json" + std::to_string(now + 3600) + "}"
+        paired ? R"json({"used_percent":6,"window_minutes":300,"resets_at":)json" + std::to_string(reset) + "}"
                : "null";
     std::ofstream rollout(codexHome.path() / "sessions" / "rollout-windows.jsonl");
     REQUIRE(rollout.is_open());
     rollout << R"json({"type":"event_msg","timestamp":")json" << toUtcIso(now)
             << R"json(","payload":{"type":"token_count","rate_limits":{"primary":)json" << primary
-            << R"json(,"secondary":{"used_percent":6,"window_minutes":10080,"resets_at":)json" << now + 86400 << "}}}}";
+            << R"json(,"secondary":{"used_percent":6,"window_minutes":10080,"resets_at":)json" << reset << "}}}}";
     rollout.close();
     REQUIRE(rollout.good());
 
@@ -3287,7 +3288,7 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     const QuotaResponse quota = adapter->fetchQuota();
     REQUIRE(quota.success);
     CHECK(quota.windowType == (paired ? "interval" : "weekly"));
-    CHECK(quota.remaining == (paired ? 72 : 94));
+    CHECK(quota.remaining == 94);
     CHECK(quota.secondaryLimit == (paired ? 100 : 0));
     if (paired) {
         CHECK(quota.secondaryWindowType == "weekly");
@@ -3306,7 +3307,7 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     const auto isCodexSummary = [](const DashboardSummaryItem& item) { return item.label == "OpenAI Subscription"; };
     REQUIRE(std::count_if(summaries.begin(), summaries.end(), isCodexSummary) == 1);
     const auto summary = std::find_if(summaries.begin(), summaries.end(), isCodexSummary);
-    CHECK(summary->badge == (paired ? "Primary window: 72% remaining" : "7-day: 94% remaining"));
+    CHECK(summary->badge == (paired ? "Primary window: 94% remaining" : "7-day: 94% remaining"));
     CHECK(summary->secondaryBadge == (paired ? "Secondary window: 94% remaining" : ""));
     app.shutdown();
 
@@ -3319,10 +3320,53 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     REQUIRE(snapshots.rowCount() == (paired ? 2 : 1));
     if (paired) {
         CHECK(snapshots.getString(0, 0) == "interval");
-        CHECK(snapshots.getInt64(0, 1) == 72);
+        CHECK(snapshots.getInt64(0, 1) == 94);
     }
     CHECK(snapshots.getString(snapshots.rowCount() - 1, 0) == "weekly");
     CHECK(snapshots.getInt64(snapshots.rowCount() - 1, 1) == 94);
+
+    if (!paired) {
+        REQUIRE(
+            storage
+                .execute("INSERT INTO plans (account_id, plan_key, plan_type, display_name, quota_window, limit_value) "
+                         "SELECT account_id, 'openai_subscription_codex_local:interval', plan_type, display_name, "
+                         "'interval', limit_value "
+                         "FROM plans WHERE plan_key = 'openai_subscription_codex_local:weekly';")
+                .success());
+    }
+    // Replay the weekly reading and, for the weekly-only case, mimic the old interval copy.
+    REQUIRE(
+        storage
+            .execute(
+                "INSERT INTO quota_snapshots (provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, "
+                "window_end_utc, used_value, limit_value, confidence_tier, basis_summary, quota_dimension, "
+                "remaining_value, "
+                "is_reconciled) "
+                "SELECT qs.provider_id, qs.account_id, copy.id, qs.snapshot_time_utc, qs.window_start_utc, "
+                "qs.window_end_utc, "
+                "qs.used_value, qs.limit_value, qs.confidence_tier, qs.basis_summary, qs.quota_dimension, "
+                "qs.remaining_value, "
+                "qs.is_reconciled FROM quota_snapshots qs JOIN plans original ON original.id = qs.plan_id "
+                "JOIN plans copy ON copy.account_id = qs.account_id "
+                "WHERE original.plan_key = 'openai_subscription_codex_local:weekly' "
+                "AND (copy.plan_key = original.plan_key OR ? = 'legacy');",
+                {paired ? "paired" : "legacy"})
+            .success());
+    storage.close();
+
+    AppController restarted;
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(providers);
+    REQUIRE(restarted.init());
+    const auto startup = restarted.getDashboardViewModelForTesting();
+    const auto* openai = findProviderStatus(startup, "openai");
+    REQUIRE(openai != nullptr);
+    REQUIRE(openai->quotas.size() == (paired ? 2 : 1));
+    const auto startupBars = restarted.getDashboardUsageProgressSummariesForTesting();
+    CHECK(std::count_if(startupBars.begin(), startupBars.end(),
+                        [](const DashboardSummaryItem& item) { return item.badge == "7-day: 94% remaining"; }) == 1);
+    restarted.shutdown();
 }
 
 TEST_CASE("AppController labels Codex-local quota rows without generic API wording", "[app][runtime]") {
