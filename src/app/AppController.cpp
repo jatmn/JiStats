@@ -4037,6 +4037,7 @@ public:
     std::mutex codexModelAttributionMutex;
     // Keep ordinary preferences and attribution off the connection shared by runtime and retention work.
     StorageService preferencesStorage;
+    StorageService miniMaxCredentialStorage;
     SettingsService preferenceWriter{preferencesStorage};
     StorageService codexAttributionStorage;
     SettingsService codexAttributionSettings{codexAttributionStorage};
@@ -6025,47 +6026,50 @@ public:
         viewModel.minimaxCredentialProfiles = buildMiniMaxCredentialSummaries();
     }
 
+    bool openMiniMaxCredentialStorage() {
+        return miniMaxCredentialStorage.isOpen() || miniMaxCredentialStorage.init(storageService.getDbPath());
+    }
+
     bool persistMiniMaxCredentialProfile(const MiniMaxSubscriptionCredentialProfile& profile, std::string& error) {
         if (!storageAvailable) {
             error.clear();
             return true;
         }
+        if (!openMiniMaxCredentialStorage()) {
+            error = miniMaxCredentialStorage.getLastError();
+            return false;
+        }
 
-        const auto providerId = findProviderIdByKey(storageService, "minimax");
+        const auto providerId = findProviderIdByKey(miniMaxCredentialStorage, "minimax");
         if (!providerId.has_value()) {
             error = "MiniMax provider row is missing from storage";
             return false;
         }
 
         MiniMaxStoredAccountRecord account =
-            loadMiniMaxStoredAccount(storageService, *providerId, profile.planKey);
+            loadMiniMaxStoredAccount(miniMaxCredentialStorage, *providerId, profile.planKey);
         const std::string desiredDisplayName = profile.accountDisplayName.empty()
             ? minimaxDefaultAccountDisplayName(profile.planKey)
             : profile.accountDisplayName;
 
         if (!account.exists) {
-            QueryResult insert = storageService.execute(
+            QueryResult insert = miniMaxCredentialStorage.execute(
                 "INSERT INTO accounts (provider_id, account_key, display_name, scope_type, scope_identifier) "
                 "VALUES (?, ?, ?, ?, ?);",
-                {
-                    std::to_string(*providerId),
-                    minimaxAccountKey(profile.planKey),
-                    desiredDisplayName,
-                    "subscription",
-                    minimaxAccountKey(profile.planKey)
-                });
+                {std::to_string(*providerId), minimaxAccountKey(profile.planKey), desiredDisplayName, "subscription",
+                 minimaxAccountKey(profile.planKey)});
             if (!insert.success()) {
-                error = storageService.getLastError();
+                error = miniMaxCredentialStorage.getLastError();
                 return false;
             }
             account.accountId = static_cast<int>(insert.lastInsertRowId());
         } else if (account.accountDisplayName != desiredDisplayName) {
-            QueryResult update = storageService.execute(
+            QueryResult update = miniMaxCredentialStorage.execute(
                 "UPDATE accounts SET display_name = ?, updated_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
                 "WHERE id = ?;",
                 {desiredDisplayName, std::to_string(account.accountId)});
             if (!update.success()) {
-                error = storageService.getLastError();
+                error = miniMaxCredentialStorage.getLastError();
                 return false;
             }
         }
@@ -6088,13 +6092,57 @@ public:
             persisted.lastValidationError = miniMaxValidationErrorForStorage(profile);
         }
 
-        if (!storageService.upsertCredentialProfile(persisted)) {
-            error = storageService.getLastError();
+        if (!miniMaxCredentialStorage.upsertCredentialProfile(persisted)) {
+            error = miniMaxCredentialStorage.getLastError();
             return false;
         }
 
         error.clear();
         return true;
+    }
+
+    bool clearMiniMaxValidation(const std::string& target, QueryResult& previous) {
+        auto& storage = miniMaxCredentialStorage;
+        // Own and commit this transaction before writing the secret to Credential Manager.
+        if (!openMiniMaxCredentialStorage() || !storage.beginTransaction(StorageService::TransactionMode::Immediate)) {
+            return false;
+        }
+
+        previous = storage.execute(
+            "SELECT id, validation_state, last_validation_error, last_validated_at_utc "
+            "FROM credential_profiles WHERE secret_ref = ? AND "
+            "(validation_state <> 'unknown' OR last_validation_error <> '' OR last_validated_at_utc IS NOT NULL);",
+            {target});
+        if (previous.success() &&
+            storage
+                .execute("UPDATE credential_profiles SET validation_state = 'unknown', last_validation_error = '', "
+                         "last_validated_at_utc = NULL WHERE secret_ref = ? AND "
+                         "(validation_state <> 'unknown' OR last_validation_error <> '' OR last_validated_at_utc IS "
+                         "NOT NULL);",
+                         {target})
+                .success() &&
+            storage.commitTransaction()) {
+            return true;
+        }
+
+        if (!storage.rollbackTransaction()) {
+            storage.close();
+        }
+        return false;
+    }
+
+    bool restoreMiniMaxValidation(const std::string& target, const QueryResult& previous) {
+        bool restored = true;
+        for (std::size_t row = 0; row < previous.rowCount(); ++row) {
+            const auto result = miniMaxCredentialStorage.execute(
+                "UPDATE credential_profiles SET validation_state = ?, last_validation_error = ?, "
+                "last_validated_at_utc = NULLIF(?, '') WHERE id = ? AND secret_ref = ? AND "
+                "validation_state = 'unknown' AND last_validation_error = '' AND last_validated_at_utc IS NULL;",
+                {previous.getString(row, 1), previous.getString(row, 2), previous.getString(row, 3),
+                 previous.getString(row, 0), target});
+            restored = result.success() && restored;
+        }
+        return restored;
     }
 
     DashboardMiniMaxCredentialResult handleMiniMaxCredentialAction(const DashboardMiniMaxCredentialRequest& request) {
@@ -6122,7 +6170,7 @@ public:
         }
 
         const std::string planKey = request.planKey == "token_plan" ? "token_plan" : "coding_plan";
-        const auto revision = ++miniMaxCredentialRevisions[planKey];
+        auto& revision = miniMaxCredentialRevisions[planKey];
         const auto storedProfile = getMiniMaxCredentialProfile(planKey);
         MiniMaxSubscriptionCredentialProfile profile = storedProfile.has_value()
             ? *storedProfile
@@ -6134,40 +6182,42 @@ public:
             profile.accountDisplayName = minimaxDefaultAccountDisplayName(planKey);
         }
 
-        if (!request.secret.empty()) {
-            if (!storageAvailable) {
-                result.message = "MiniMax credential changes require access to saved validation results.";
-                return result;
+        const bool save = request.action == DashboardMiniMaxCredentialAction::Save;
+        if (save || !request.secret.empty()) {
+            QueryResult previousValidation;
+            std::string target;
+            if (!request.secret.empty()) {
+                if (!storageAvailable) {
+                    result.message = "MiniMax credential changes require access to saved validation results.";
+                    return result;
+                }
+
+                target = profile.secretRef.empty() ? MiniMaxAdapter::buildSecretRef(profile) : profile.secretRef;
+                if (!clearMiniMaxValidation(target, previousValidation)) {
+                    result.message = "Could not clear the previous MiniMax validation result.";
+                    return result;
+                }
+                profile.lastValidatedAt = 0;
             }
 
-            // The saved outcome describes the old secret, even if the current check is pending.
-            const std::string target =
-                profile.secretRef.empty() ? MiniMaxAdapter::buildSecretRef(profile) : profile.secretRef;
-            const auto invalidation = storageService.execute(
-                "UPDATE credential_profiles SET validation_state = 'unknown', last_validation_error = '', "
-                "last_validated_at_utc = NULL WHERE secret_ref = ? AND "
-                "(validation_state <> 'unknown' OR last_validation_error <> '' OR last_validated_at_utc IS NOT NULL);",
-                {target});
-            if (!invalidation.success()) {
-                result.message = "Could not clear the previous MiniMax validation result.";
-                return result;
-            }
-            profile.validationState = "unknown";
-            profile.lastValidatedAt = 0;
-            profile.lastValidationError.clear();
-        }
-
-        if (request.action == DashboardMiniMaxCredentialAction::Save) {
-            if (!adapter->storeSubscriptionCredential(profile, request.secret)) {
+            bool previousSecretPreserved = false;
+            if (!adapter->storeSubscriptionCredential(profile, request.secret, &previousSecretPreserved)) {
                 MiniMaxSubscriptionCredentialProfile failed = adapter->getSubscriptionCredentialProfile();
                 failed.lastValidationError = normalizeMiniMaxValidationError(failed.lastValidationError);
-                updateMiniMaxCredentialProfile(planKey, failed);
-                syncActiveMiniMaxRuntimeProfile(planKey);
                 result.message =
                     failed.lastValidationError.empty() ? "MiniMax credential save failed." : failed.lastValidationError;
+                if (previousSecretPreserved && restoreMiniMaxValidation(target, previousValidation)) {
+                    syncActiveMiniMaxRuntimeProfile(planKey);
+                    return result;
+                }
+
+                ++revision;
+                updateMiniMaxCredentialProfile(planKey, failed);
+                syncActiveMiniMaxRuntimeProfile(planKey);
                 return result;
             }
 
+            ++revision;
             profile = adapter->getSubscriptionCredentialProfile();
             std::string persistError;
             if (!persistMiniMaxCredentialProfile(profile, persistError)) {
@@ -6179,33 +6229,12 @@ public:
                 return result;
             }
 
-            updateMiniMaxCredentialProfile(planKey, profile);
-            syncActiveMiniMaxRuntimeProfile(planKey);
-            result.success = true;
-            result.accountDisplayName = profile.accountDisplayName;
-            result.message = "Stored " + minimaxPlanDisplayName(planKey) + " credential.";
-            return result;
-        }
-
-        if (!request.secret.empty()) {
-            if (!adapter->storeSubscriptionCredential(profile, request.secret)) {
-                MiniMaxSubscriptionCredentialProfile failed = adapter->getSubscriptionCredentialProfile();
-                failed.lastValidationError = normalizeMiniMaxValidationError(failed.lastValidationError);
-                updateMiniMaxCredentialProfile(planKey, failed);
-                syncActiveMiniMaxRuntimeProfile(planKey);
-                result.message =
-                    failed.lastValidationError.empty() ? "MiniMax credential save failed." : failed.lastValidationError;
-                return result;
-            }
-
-            profile = adapter->getSubscriptionCredentialProfile();
-            std::string persistError;
-            if (!persistMiniMaxCredentialProfile(profile, persistError)) {
-                profile.validationState = "invalid";
-                profile.lastValidationError = persistError;
+            if (save) {
                 updateMiniMaxCredentialProfile(planKey, profile);
                 syncActiveMiniMaxRuntimeProfile(planKey);
-                result.message = persistError;
+                result.success = true;
+                result.accountDisplayName = profile.accountDisplayName;
+                result.message = "Stored " + minimaxPlanDisplayName(planKey) + " credential.";
                 return result;
             }
         } else {
@@ -6220,6 +6249,7 @@ public:
                 return result;
             }
             adapter->setSubscriptionCredentialProfile(profile);
+            ++revision;
         }
 
         profile.validationState = "pending";
@@ -7320,6 +7350,7 @@ public:
         }
         codexAttributionStorage.close();
         preferencesStorage.close();
+        miniMaxCredentialStorage.close();
         if (storageService.isOpen()) {
             storageService.close();
         }
@@ -8192,6 +8223,20 @@ bool AppController::submitMiniMaxCredentialActionForTesting(
     }
 
     return pImpl->handleMiniMaxCredentialAction(request).success;
+}
+
+std::optional<bool> AppController::submitMiniMaxCredentialActionWithStorageRollbackForTesting(
+    const DashboardMiniMaxCredentialRequest& request) {
+    auto& storage = pImpl->storageService;
+    if (!storage.execute("BEGIN TRANSACTION;").success()) {
+        return std::nullopt;
+    }
+    std::lock_guard<std::mutex> actionLock(pImpl->miniMaxCredentialActionMutex);
+    const auto result = pImpl->applyMiniMaxCredentialAction(request);
+    if (!storage.execute("ROLLBACK;").success()) {
+        return std::nullopt;
+    }
+    return result.success;
 }
 
 std::string AppController::getMiniMaxSecretFieldTextForTesting() const {

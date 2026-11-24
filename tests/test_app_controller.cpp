@@ -702,16 +702,22 @@ std::vector<std::filesystem::path> listHtmlReports(const std::filesystem::path& 
 }
 
 class FakeWindowsCredentialBackend final : public IWindowsCredentialBackend {
-public:
-    bool writeGenericCredential(
-        const WindowsCredentialWriteRequest& request,
-        std::string& error) override {
+  public:
+    enum class WriteFailure { None, Reject, AfterWrite };
+
+    bool writeGenericCredential(const WindowsCredentialWriteRequest& request, std::string& error) override {
         if (request.targetName.empty() || request.secret.empty()) {
             error = "Credential target name and secret are required";
             return false;
         }
 
-        secrets_[request.targetName] = request.secret;
+        if (writeFailure != WriteFailure::Reject) {
+            secrets_[request.targetName] = request.secret;
+        }
+        if (writeFailure != WriteFailure::None) {
+            error = "Synthetic credential store write failure";
+            return false;
+        }
         error.clear();
         return true;
     }
@@ -768,7 +774,9 @@ public:
         return it->second;
     }
 
-private:
+    WriteFailure writeFailure = WriteFailure::None;
+
+  private:
     std::map<std::string, std::string> secrets_;
 };
 
@@ -2434,23 +2442,24 @@ TEST_CASE("AppController restores the last completed MiniMax validation after re
     }
 }
 
-TEST_CASE("AppController never restores an old MiniMax validation for a partly saved replacement",
-          "[app][shell][minimax]") {
+TEST_CASE("AppController restores validation only for the MiniMax key that was checked", "[app][shell][minimax]") {
     requireSqlite();
     const auto action = GENERATE(DashboardMiniMaxCredentialAction::Save, DashboardMiniMaxCredentialAction::Validate);
-    const bool failBeforeWrite = GENERATE(false, true);
-    CAPTURE(static_cast<int>(action), failBeforeWrite);
+    const std::string failure = GENERATE("clear", "metadata", "shared rollback", "reject key", "key changed");
+    CAPTURE(static_cast<int>(action), failure);
     TempTestDatabase dbPath;
     seedMiniMaxCredentialMetadata(dbPath.path(), "token_plan", "Original Token Plan");
     StorageService seed;
     REQUIRE(seed.init(dbPath.path()));
-    REQUIRE(seed.execute("UPDATE credential_profiles SET validation_state = 'valid';").success());
+    REQUIRE(seed.execute("UPDATE credential_profiles SET validation_state = 'invalid', "
+                         "last_validation_error = 'MiniMax subscription key rejected';")
+                .success());
     // The rename trigger affects only the final save. Clearing validation leaves the account name alone.
-    REQUIRE(seed.execute(failBeforeWrite ? R"sql(
+    REQUIRE(seed.execute(failure == "clear" ? R"sql(
         CREATE TRIGGER reject_profile_invalidation BEFORE UPDATE ON credential_profiles
         BEGIN SELECT RAISE(ABORT, 'Fixture rejects credential invalidation'); END;
     )sql"
-                                         : R"sql(
+                                            : R"sql(
         CREATE TRIGGER reject_profile_rename BEFORE UPDATE OF display_name ON accounts
         WHEN NEW.display_name = 'Renamed Token Plan'
         BEGIN SELECT RAISE(ABORT, 'Fixture rejects credential metadata update'); END;
@@ -2462,6 +2471,11 @@ TEST_CASE("AppController never restores an old MiniMax validation for a partly s
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
     REQUIRE(store->writeGenericCredential({target, "sk-tp-original", "MiniMax Token Plan", ""}));
+    if (failure == "reject key") {
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::Reject;
+    } else if (failure == "key changed") {
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::AfterWrite;
+    }
 
     AppController app;
     app.setHeadlessForTesting(true);
@@ -2471,7 +2485,7 @@ TEST_CASE("AppController never restores an old MiniMax validation for a partly s
     REQUIRE(app.init());
     const auto original = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "token_plan");
     REQUIRE(original.has_value());
-    REQUIRE(original->validationState == "valid");
+    REQUIRE(original->validationState == "invalid");
     REQUIRE_FALSE(original->lastValidatedAtLabel.empty());
 
     DashboardMiniMaxCredentialRequest request;
@@ -2479,9 +2493,14 @@ TEST_CASE("AppController never restores an old MiniMax validation for a partly s
     request.planKey = "token_plan";
     request.accountDisplayName = "Renamed Token Plan";
     request.secret = "sk-tp-new-unchecked";
-    CHECK_FALSE(app.submitMiniMaxCredentialActionForTesting(request));
+    if (failure == "shared rollback") {
+        CHECK(app.submitMiniMaxCredentialActionWithStorageRollbackForTesting(request) == std::optional<bool>(false));
+    } else {
+        CHECK_FALSE(app.submitMiniMaxCredentialActionForTesting(request));
+    }
+    const bool originalKeyRemains = failure == "clear" || failure == "reject key";
     CHECK(backend->peek(target) ==
-          std::optional<std::string>(failBeforeWrite ? "sk-tp-original" : "sk-tp-new-unchecked"));
+          std::optional<std::string>(originalKeyRemains ? "sk-tp-original" : "sk-tp-new-unchecked"));
     app.shutdown();
 
     AppController restarted;
@@ -2494,9 +2513,9 @@ TEST_CASE("AppController never restores an old MiniMax validation for a partly s
     REQUIRE(restored.has_value());
     CHECK(restored->hasPersistedProfile);
     CHECK(restored->accountDisplayName == "Original Token Plan");
-    CHECK(restored->validationState == (failBeforeWrite ? "valid" : "unknown"));
-    CHECK(restored->lastValidatedAtLabel == (failBeforeWrite ? original->lastValidatedAtLabel : ""));
-    CHECK(restored->lastValidationError.empty());
+    CHECK(restored->validationState == (originalKeyRemains ? "invalid" : "unknown"));
+    CHECK(restored->lastValidatedAtLabel == (originalKeyRemains ? original->lastValidatedAtLabel : ""));
+    CHECK(restored->lastValidationError == (originalKeyRemains ? original->lastValidationError : ""));
     restarted.shutdown();
 }
 

@@ -88,6 +88,8 @@ public:
     bool isDashboardShellDialogOpenForTesting(DashboardShellDialog dialog) const;
     std::string getDashboardShellDialogBodyTextForTesting(DashboardShellDialog dialog) const;
     bool submitMiniMaxCredentialActionForTesting(const DashboardMiniMaxCredentialRequest& request);
+    std::optional<bool>
+    submitMiniMaxCredentialActionWithStorageRollbackForTesting(const DashboardMiniMaxCredentialRequest& request);
     std::string getMiniMaxSecretFieldTextForTesting() const;
     std::optional<std::string> getMiniMaxValidationStateForTesting(const std::string& planKey) const;
     std::vector<DashboardSummaryItem> getDashboardUsageProgressSummariesForTesting() const;

@@ -729,11 +729,13 @@ MiniMaxSubscriptionCredentialProfile MiniMaxAdapter::getSubscriptionCredentialPr
     return pImpl->subscriptionProfile;
 }
 
-bool MiniMaxAdapter::storeSubscriptionCredential(
-    const MiniMaxSubscriptionCredentialProfile& profile,
-    const std::string& secret) {
+bool MiniMaxAdapter::storeSubscriptionCredential(const MiniMaxSubscriptionCredentialProfile& profile,
+                                                 const std::string& secret, bool* previousSecretPreserved) {
     std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
     ++pImpl->validationRevision;
+    if (previousSecretPreserved) {
+        *previousSecretPreserved = false;
+    }
     std::string error;
     if (!validateSubscriptionCredentialProfile(profile, error)) {
         pImpl->subscriptionProfile = MiniMaxSubscriptionCredentialProfile{};
@@ -764,9 +766,15 @@ bool MiniMaxAdapter::storeSubscriptionCredential(
     request.userName = normalized.profileName;
     request.comment = "JiStats MiniMax subscription credential";
 
+    const auto previousSecret =
+        previousSecretPreserved ? pImpl->credentialStore->readGenericCredential(request.targetName) : std::nullopt;
     if (!pImpl->credentialStore->writeGenericCredential(request)) {
         normalized.validationState = "invalid";
         normalized.lastValidationError = pImpl->credentialStore->getLastError();
+        if (previousSecret.has_value()) {
+            *previousSecretPreserved =
+                pImpl->credentialStore->readGenericCredential(request.targetName) == previousSecret;
+        }
         pImpl->subscriptionProfile = normalized;
         return false;
     }

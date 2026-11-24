@@ -64,9 +64,8 @@ public:
 
     void setSubscriptionCredentialProfile(const MiniMaxSubscriptionCredentialProfile& profile);
     MiniMaxSubscriptionCredentialProfile getSubscriptionCredentialProfile() const;
-    bool storeSubscriptionCredential(
-        const MiniMaxSubscriptionCredentialProfile& profile,
-        const std::string& secret);
+    bool storeSubscriptionCredential(const MiniMaxSubscriptionCredentialProfile& profile, const std::string& secret,
+                                     bool* previousSecretPreserved = nullptr);
     std::function<MiniMaxSubscriptionCredentialProfile()>
     prepareSubscriptionCredentialValidation(const MiniMaxSubscriptionCredentialProfile& profile);
     std::optional<MiniMaxSubscriptionPollingConfig> resolveSubscriptionPollingConfig(
