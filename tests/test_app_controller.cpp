@@ -2978,20 +2978,18 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
         userProfileRoot.path() / ".codex" / "sessions" / "2026" / "04" / "19" / "rollout-live.jsonl";
     const std::time_t now = std::time(nullptr);
 
-    writeCodexRolloutFile(rolloutPath, 25.0, now, now + (5 * 3600));
+    if (GENERATE(true, false)) {
+        writeCodexRolloutFile(rolloutPath, 25.0, now, now + (5 * 3600));
+    }
     ScopedEnvironmentVariable codexHome(
         "CODEX_HOME",
         (userProfileRoot.path() / ".codex").string());
 
-    auto openaiProvider = makeCurrentQuotaProvider(
-        "openai",
-        "OpenAI",
-        25,
-        100,
-        now,
-        "interval",
-        "openai_subscription_codex_local");
-    auto providerManager = makeProviderManager({openaiProvider});
+    auto openaiProvider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 25, 100, "interval", "openai_subscription_codex_local"));
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(openaiProvider);
+    std::atomic<int> rolloutSamples{0};
 
     AppController app;
     app.setHeadlessForTesting(true);
@@ -2999,10 +2997,12 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setOpenAICodexRefreshPollIntervalForTesting(25);
+    app.setBeforeCodexRolloutSampleForTesting([&]() { ++rolloutSamples; });
 
     REQUIRE(app.init());
     REQUIRE_FALSE(app.getDashboardViewModelForTesting().preferences.openaiSubscriptionTrackingEnabled);
     CHECK(openaiProvider->getQuotaFetchCount() == 0);
+    CHECK(rolloutSamples.load() == 0);
 
     auto preferences = app.getDashboardViewModelForTesting().preferences;
     preferences.openaiSubscriptionTrackingEnabled = true;
@@ -3014,6 +3014,8 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
         return provider && !provider->quotas.empty() && provider->quotas.front().used == used;
     };
     REQUIRE(hasQuota(25));
+    REQUIRE(waitForCondition([&]() { return rolloutSamples.load() >= 3; }));
+    CHECK(openaiProvider->getQuotaFetchCount() == 1);
     const auto refreshQuota = [&](const std::filesystem::path& changedPath, long long used, int offsetSeconds) {
         openaiProvider->setQuotaResponse(
             makeQuotaResponse(now + offsetSeconds, used, 100, "interval", "openai_subscription_codex_local"));

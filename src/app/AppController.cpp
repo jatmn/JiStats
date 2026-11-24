@@ -305,46 +305,6 @@ void considerRefreshWatcherFileSample(
     }
 }
 
-std::optional<RefreshWatcherFileSample> sampleLatestCodexRolloutFileForRefreshWatcher() {
-    const std::string directoryPath = resolveCodexRolloutDirectoryForRefreshWatcher();
-    if (directoryPath.empty()) {
-        return std::nullopt;
-    }
-
-    std::error_code ec;
-    const std::filesystem::path root(directoryPath);
-    if (!std::filesystem::exists(root, ec) || ec) {
-        return std::nullopt;
-    }
-
-    std::optional<RefreshWatcherFileSample> latest;
-    for (std::filesystem::recursive_directory_iterator it(
-             root,
-             std::filesystem::directory_options::skip_permission_denied,
-             ec);
-         !ec && it != std::filesystem::recursive_directory_iterator();
-         it.increment(ec)) {
-        const auto& entry = *it;
-        if (!entry.is_regular_file(ec) || ec || !isCodexRolloutPath(entry.path())) {
-            ec.clear();
-            continue;
-        }
-
-        const auto writeTime = entry.last_write_time(ec);
-        if (ec) {
-            ec.clear();
-            continue;
-        }
-
-        const RefreshWatcherFileSample candidate{entry.path(), writeTime};
-        if (shouldReplaceRefreshWatcherSample(latest, candidate)) {
-            latest = candidate;
-        }
-    }
-
-    return latest;
-}
-
 std::optional<RefreshWatcherFileSample> sampleClaudeLocalArtifactForRefreshWatcher() {
     const std::string statsCachePath = ClaudeCodeLocalParser::resolveDefaultStatsCachePath();
     if (statsCachePath.empty()) {
@@ -3960,7 +3920,10 @@ public:
     ExportSchedule appliedExportSchedule;
     std::condition_variable refreshWatcherCv;
     std::atomic<unsigned> subscriptionWatchMask{0};
-    bool openAICodexWatcherEnabled = false; // Protected by refreshWatcherMutex.
+    // The watch state and rollout baseline share refreshWatcherMutex.
+    bool openAICodexWatcherEnabled = false;
+    std::uint64_t openAICodexWatchGeneration = 0;
+    std::optional<RefreshWatcherFileSample> lastObservedCodexRolloutSample;
     std::condition_variable interactionWorkCv;
     std::optional<DashboardPreferences> pendingInteractionPreferences;
     std::optional<DashboardPreferences> activeInteractionPreferences;
@@ -3987,9 +3950,7 @@ public:
     std::chrono::milliseconds scheduledExportDormantPollInterval{std::chrono::hours(6)};
     std::chrono::milliseconds retentionPollInterval{
         std::chrono::duration_cast<std::chrono::milliseconds>(kRetentionCheckInterval)};
-    std::optional<RefreshWatcherFileSample> lastObservedCodexRolloutSample;
     std::optional<RefreshWatcherFileSample> lastObservedLocalProviderArtifactSample;
-    size_t openAICodexWatcherUnchangedPasses = 0;
     size_t localProviderWatcherUnchangedPasses = 0;
     std::map<std::string, DirectApiQuotaPollState> directApiQuotaPollStates;
     std::uint64_t quotaRefreshGeneration = 0;
@@ -4011,6 +3972,7 @@ public:
     std::function<void()> afterSettingsDequeueForTesting;
     std::function<void()> beforeRuntimePublicationForTesting;
     std::function<void()> beforeCodexSourceReadForTesting;
+    std::function<void()> beforeCodexRolloutSampleForTesting;
     std::optional<std::time_t> currentTimeForTesting;
 #endif
 
@@ -4629,13 +4591,20 @@ public:
         const unsigned subscriptionMask = (preferences.grokSubscriptionTrackingEnabled ? 1u : 0u) |
                                           (preferences.cursorSubscriptionTrackingEnabled ? 2u : 0u);
         const bool watchCodexRollouts = preferences.openaiSubscriptionTrackingEnabled && resolveOpenAIRuntimeAdapter();
-        bool changed;
-        {
-            std::lock_guard<std::mutex> lock(refreshWatcherMutex);
-            changed = subscriptionWatchMask.exchange(subscriptionMask) != subscriptionMask ||
-                      openAICodexWatcherEnabled != watchCodexRollouts;
+        std::unique_lock<std::mutex> lock(refreshWatcherMutex);
+        const bool codexWatchChanged = openAICodexWatcherEnabled != watchCodexRollouts;
+        if (codexWatchChanged) {
+            lock.unlock();
+            // The activating refresh fetches quota. Sample before it so the watcher can
+            // ignore its existing rollouts and still notice writes made during the fetch.
+            auto baseline = watchCodexRollouts ? sampleCodexRolloutsForWatcher() : std::nullopt;
+            lock.lock();
+            lastObservedCodexRolloutSample = std::move(baseline);
             openAICodexWatcherEnabled = watchCodexRollouts;
+            ++openAICodexWatchGeneration;
         }
+        const bool changed = subscriptionWatchMask.exchange(subscriptionMask) != subscriptionMask || codexWatchChanged;
+        lock.unlock();
         if (changed) {
             refreshWatcherCv.notify_all();
         }
@@ -4967,23 +4936,61 @@ public:
         return preferences.claudeCodeEnabled || preferences.kimiCodeEnabled;
     }
 
-    bool detectOpenAICodexRolloutUpdate() {
-        const auto latestSample = sampleLatestCodexRolloutFileForRefreshWatcher();
-        if (!latestSample.has_value()) {
+    std::optional<RefreshWatcherFileSample> sampleCodexRolloutsForWatcher() const {
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (beforeCodexRolloutSampleForTesting) {
+            beforeCodexRolloutSampleForTesting();
+        }
+#endif
+
+        const std::string directoryPath = resolveCodexRolloutDirectoryForRefreshWatcher();
+        if (directoryPath.empty()) {
+            return std::nullopt;
+        }
+
+        std::error_code ec;
+        const std::filesystem::path root(directoryPath);
+        if (!std::filesystem::exists(root, ec) || ec) {
+            return std::nullopt;
+        }
+
+        std::optional<RefreshWatcherFileSample> latest;
+        for (std::filesystem::recursive_directory_iterator it(
+                 root, std::filesystem::directory_options::skip_permission_denied, ec);
+             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+            const auto& entry = *it;
+            if (!entry.is_regular_file(ec) || ec || !isCodexRolloutPath(entry.path())) {
+                ec.clear();
+                continue;
+            }
+
+            const auto writeTime = entry.last_write_time(ec);
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+
+            const RefreshWatcherFileSample candidate{entry.path(), writeTime};
+            if (shouldReplaceRefreshWatcherSample(latest, candidate)) {
+                latest = candidate;
+            }
+        }
+
+        return latest;
+    }
+
+    bool detectOpenAICodexRolloutUpdate(std::uint64_t generation) {
+        const auto sample = sampleCodexRolloutsForWatcher();
+        std::lock_guard<std::mutex> lock(refreshWatcherMutex);
+        if (!sample || generation != openAICodexWatchGeneration) {
+            return false;
+        }
+        if (lastObservedCodexRolloutSample && sample->path == lastObservedCodexRolloutSample->path &&
+            sample->lastWriteTime == lastObservedCodexRolloutSample->lastWriteTime) {
             return false;
         }
 
-        if (!lastObservedCodexRolloutSample.has_value()) {
-            lastObservedCodexRolloutSample = latestSample;
-            return true;
-        }
-
-        if (latestSample->path == lastObservedCodexRolloutSample->path &&
-            latestSample->lastWriteTime == lastObservedCodexRolloutSample->lastWriteTime) {
-            return false;
-        }
-
-        lastObservedCodexRolloutSample = latestSample;
+        lastObservedCodexRolloutSample = sample;
         return true;
     }
 
@@ -5012,34 +5019,37 @@ public:
 
     void startOpenAICodexRefreshWatcher() {
         joinOpenAICodexRefreshThread();
-        lastObservedCodexRolloutSample.reset();
-        openAICodexWatcherUnchangedPasses = 0;
         openAICodexRefreshThread = std::thread([this]() {
+            size_t unchangedPasses = 0;
+            std::uint64_t lastGeneration = 0;
             while (!shouldStopMiniMaxValidation()) {
                 bool watcherActive;
+                std::uint64_t generation;
                 {
                     std::lock_guard<std::mutex> lock(refreshWatcherMutex);
                     watcherActive = openAICodexWatcherEnabled;
+                    generation = openAICodexWatchGeneration;
+                }
+                if (generation != lastGeneration) {
+                    unchangedPasses = 0;
+                    lastGeneration = generation;
                 }
                 if (watcherActive) {
-                    if (detectOpenAICodexRolloutUpdate()) {
-                        openAICodexWatcherUnchangedPasses = 0;
+                    if (detectOpenAICodexRolloutUpdate(generation)) {
+                        unchangedPasses = 0;
                         refreshProviderRuntimeState(std::time(nullptr), false, false);
                     } else {
-                        ++openAICodexWatcherUnchangedPasses;
+                        ++unchangedPasses;
                     }
-                } else {
-                    lastObservedCodexRolloutSample.reset();
-                    openAICodexWatcherUnchangedPasses = 0;
                 }
 
                 const auto interval = adaptiveWatcherIntervalOrDormant(
                     watcherActive, openAICodexRefreshPollInterval,
                     std::chrono::duration_cast<std::chrono::milliseconds>(kOpenAICodexRefreshMaxBackoffInterval),
-                    openAICodexWatcherUnchangedPasses);
+                    unchangedPasses);
                 std::unique_lock<std::mutex> lock(refreshWatcherMutex);
-                refreshWatcherCv.wait_for(lock, interval, [this, watcherActive]() {
-                    return shuttingDown.load() || openAICodexWatcherEnabled != watcherActive;
+                refreshWatcherCv.wait_for(lock, interval, [this, generation]() {
+                    return shuttingDown.load() || openAICodexWatchGeneration != generation;
                 });
             }
         });
@@ -7073,6 +7083,8 @@ public:
             storageService.close();
         }
         storageAvailable = false;
+        openAICodexWatcherEnabled = false; // All writers have been joined.
+        lastObservedCodexRolloutSample.reset();
         initialized = false;
         if (finalShutdownState) {
             state = "shutdown";
@@ -7988,6 +8000,10 @@ void AppController::setBeforeRuntimePublicationForTesting(std::function<void()> 
 
 void AppController::setBeforeCodexSourceReadForTesting(std::function<void()> callback) {
     pImpl->beforeCodexSourceReadForTesting = std::move(callback);
+}
+
+void AppController::setBeforeCodexRolloutSampleForTesting(std::function<void()> callback) {
+    pImpl->beforeCodexRolloutSampleForTesting = std::move(callback);
 }
 
 void AppController::applyDashboardPreferencesForTesting(const DashboardPreferences& preferences) {
