@@ -625,6 +625,13 @@ TEST_CASE("AppController ends a Claude outage after a usable undated cache read"
     TempTestDirectory profile("jistats_claude_offline");
     ScopedEnvironmentVariable claudeConfig("CLAUDE_CONFIG_DIR", profile.path().string());
     const auto cachePath = profile.path() / "fixture.json";
+    const auto writeCache = [&cachePath](const char* contents) {
+        std::ofstream cache(cachePath);
+        cache << contents;
+        cache.close();
+        REQUIRE(cache.good());
+    };
+    writeCache("{");
     TempTestDatabase dbPath;
     seedStartupPreferences(dbPath.path(), false, false, false, false, true);
     auto adapter = std::make_shared<ClaudeCodeAdapter>();
@@ -641,7 +648,7 @@ TEST_CASE("AppController ends a Claude outage after a usable undated cache read"
     app.setProviderManagerForTesting(providerManager);
     app.setDisableTaskbarForTesting(true);
     REQUIRE(app.init());
-    REQUIRE(app.isDashboardOfflineNoticeVisibleForTesting());
+    REQUIRE(waitForCondition([&app]() { return app.isDashboardOfflineNoticeVisibleForTesting(); }));
     REQUIRE(app.clickDashboardOfflineDismissForTesting());
     REQUIRE(waitForCondition([&app]() { return !app.isDashboardOfflineNoticeVisibleForTesting(); }));
     app.refreshRuntimeForTesting();
@@ -649,12 +656,7 @@ TEST_CASE("AppController ends a Claude outage after a usable undated cache read"
     REQUIRE(dismissed.has_value());
     REQUIRE(dismissed->noticeDismissedAt > 0);
 
-    {
-        std::ofstream cache(cachePath);
-        cache << R"({"totalMessages":42})";
-        cache.close();
-        REQUIRE(cache.good());
-    }
+    writeCache(R"({"totalMessages":42})");
     app.refreshRuntimeForTesting();
     const auto dashboard = app.getDashboardViewModelForTesting();
     const auto* claude = findProviderStatus(dashboard, "claude_code");
@@ -668,7 +670,7 @@ TEST_CASE("AppController ends a Claude outage after a usable undated cache read"
     CHECK(recovered->status == "online");
     CHECK(recovered->noticeDismissedAt == 0);
 
-    REQUIRE(std::filesystem::remove(cachePath));
+    writeCache("{");
     app.refreshRuntimeForTesting();
     CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
     CHECK(app.isDashboardOfflineNoticeVisibleForTesting());
