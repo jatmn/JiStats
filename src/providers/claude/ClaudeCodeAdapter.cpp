@@ -2,8 +2,27 @@
 #include "providers/claude/ClaudeCodeLocalParser.hpp"
 #include <algorithm>
 #include <filesystem>
+#include <limits>
 
 namespace JiStats {
+
+namespace {
+
+std::optional<long long> sumModelTokens(const std::vector<ClaudeCodeModelAggregate>& models) {
+    long long total = 0;
+    for (const auto& model : models) {
+        for (const auto tokens :
+             {model.inputTokens, model.outputTokens, model.cacheReadInputTokens, model.cacheCreationInputTokens}) {
+            if (tokens > std::numeric_limits<long long>::max() - total) {
+                return std::nullopt;
+            }
+            total += tokens;
+        }
+    }
+    return total;
+}
+
+} // namespace
 
 struct ClaudeCodeAdapter::Impl {
 public:
@@ -85,17 +104,21 @@ QuotaResponse ClaudeCodeAdapter::fetchQuota() {
         return response;
     }
 
+    const auto totalTokens = result.hasModelTokenCounts ? sumModelTokens(result.modelUsage) : std::nullopt;
+    if (!totalTokens && !result.totalMessages) {
+        pImpl->lastError = "Claude stats-cache has no usable aggregate activity counters";
+        response.error = pImpl->lastError;
+        response.unavailable = true;
+        return response;
+    }
+
     response.success = true;
     response.snapshotTime = result.parsedAt;
     response.providerSurface = ClaudeCodeLocalParser::kProviderSurface;
     response.windowType = "local_aggregate";
 
-    // Use total tokens as the "used" metric when available; fall back to total messages.
-    long long totalTokens = 0;
-    for (const auto& model : result.modelUsage) {
-        totalTokens += model.inputTokens + model.outputTokens + model.cacheReadInputTokens + model.cacheCreationInputTokens;
-    }
-    response.used = totalTokens > 0 ? totalTokens : result.totalMessages;
+    // Prefer a positive token total, then the message count. A measured token total can also be zero.
+    response.used = totalTokens && *totalTokens > 0 ? *totalTokens : result.totalMessages.value_or(0);
 
     // Local files do not contain limit/remaining; keep them at 0 to signal unknown.
     response.limit = 0;

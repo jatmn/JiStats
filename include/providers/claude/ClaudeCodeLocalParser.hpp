@@ -4,6 +4,7 @@
 #include "observation/ActivityEvent.hpp"
 #include <ctime>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -46,7 +47,8 @@ struct ClaudeCodeLocalParseResult {
     std::vector<ClaudeCodeDailyModelTokens> dailyModelTokens;
     std::vector<ClaudeCodeModelAggregate> modelUsage;
     long long totalSessions = 0;
-    long long totalMessages = 0;
+    std::optional<long long> totalMessages;
+    bool hasModelTokenCounts = false;
     std::string firstSessionDate;
     std::time_t parsedAt = 0;
 };

@@ -204,7 +204,53 @@ TEST_CASE("Claude adapter fetchQuota returns local aggregate", "[claude][adapter
     REQUIRE(quota.windowType == "local_aggregate");
     REQUIRE(quota.limit == 0);
     REQUIRE(quota.remaining == 0);
-    REQUIRE(quota.used > 0);
+    REQUIRE(quota.used == 16275);
+}
+
+TEST_CASE("Claude adapter requires a recorded local aggregate counter", "[claude][adapter]") {
+    ClaudeCodeAdapter adapter;
+
+    SECTION("No valid counter leaves the aggregate unavailable") {
+        const auto stats = GENERATE(
+            "{}", R"({"totalSessions":1,"modelUsage":{"fixture-model":{"cost_usd":0.01}}})",
+            R"({"totalMessages":-3,"modelUsage":{"fixture-model":{"inputTokens":-2}}})",
+            R"({"totalMessages":9223372036854775808})",
+            R"({"modelUsage":{"a":{"inputTokens":4611686018427387904,"outputTokens":4611686018427387904}}})",
+            R"({"modelUsage":{"a":{"inputTokens":4611686018427387904},"b":{"inputTokens":4611686018427387904}}})");
+        const TempFixtureFile fixture(stats);
+        adapter.setMockStatsCachePath(fixture.path());
+
+        const auto quota = adapter.fetchQuota();
+        CHECK_FALSE(quota.success);
+        CHECK(quota.unavailable);
+        CHECK(quota.snapshotTime == 0);
+        CHECK_FALSE(quota.error.empty());
+    }
+
+    SECTION("An explicit zero is a measured aggregate") {
+        const auto stats = GENERATE(R"({"totalMessages":0})", R"({"modelUsage":{"fixture-model":{"inputTokens":0}}})");
+        const TempFixtureFile fixture(stats);
+        adapter.setMockStatsCachePath(fixture.path());
+
+        const auto quota = adapter.fetchQuota();
+        REQUIRE(quota.success);
+        CHECK_FALSE(quota.unavailable);
+        CHECK(quota.providerSurface == "claude_code_local_stats");
+        CHECK(quota.used == 0);
+    }
+
+    SECTION("A recorded message count remains usable when the token sum is out of range") {
+        const auto messages = GENERATE(0, 17);
+        const TempFixtureFile fixture(
+            "{\"totalMessages\":" + std::to_string(messages) +
+            R"(,"modelUsage":{"a":{"inputTokens":4611686018427387904,"outputTokens":4611686018427387904}}})");
+        adapter.setMockStatsCachePath(fixture.path());
+
+        const auto quota = adapter.fetchQuota();
+        REQUIRE(quota.success);
+        CHECK_FALSE(quota.unavailable);
+        CHECK(quota.used == messages);
+    }
 }
 
 TEST_CASE("Claude adapter fetchUsage returns usage events", "[claude][adapter]") {
