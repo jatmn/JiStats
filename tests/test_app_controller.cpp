@@ -6054,6 +6054,94 @@ TEST_CASE("AppController manual HTML export uses the current analysis scope", "[
     app.shutdown();
 }
 
+TEST_CASE("AppController exports a historical Analysis account with no live row", "[app][analysis][reporting]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_historical_account_export");
+    const std::time_t now = std::time(nullptr);
+    const std::time_t reportDay = now - 86400;
+    const std::string historicalAccount = "imported-history:openai_subscription_export_import";
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", reportDay, 777, 10, "unrelated-runtime-model");
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        const auto ids = seedUsageProviderAccount(storage, "openai", historicalAccount, "Archived ChatGPT");
+        insertUsageEvent(storage, ids.providerId, ids.accountId, toUtcIso(reportDay), "archived-model", 123, 4);
+    }
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now)}));
+    REQUIRE(app.init());
+
+    const auto dashboard = app.getDashboardViewModelForTesting();
+    REQUIRE(std::none_of(dashboard.providers.begin(), dashboard.providers.end(),
+                         [&](const ProviderStatus& status) { return status.accountId == historicalAccount; }));
+    DashboardPreferences preferences = dashboard.preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = historicalAccount;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = reportDay;
+    preferences.analysisCustomRangeEndUtc = reportDay;
+    app.applyDashboardPreferencesForTesting(preferences);
+
+    const auto reportPath = exportDir.path() / "historical-scope.html";
+    REQUIRE(app.exportHtmlReportForTesting(reportPath.string()).success);
+    std::ifstream report(reportPath);
+    REQUIRE(report.is_open());
+    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+    CHECK(html.find("Archived ChatGPT") != std::string::npos);
+    CHECK(html.find("123 tokens") != std::string::npos);
+    CHECK(html.find("unrelated-runtime-model") == std::string::npos);
+    CHECK(html.find("777 tokens") == std::string::npos);
+}
+
+TEST_CASE("AppController All Providers and All Accounts exports ignore the dashboard selection",
+          "[app][analysis][reporting][scheduled]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_unrestricted_analysis_export");
+    const auto scheduledDir = exportDir.path() / "scheduled";
+    const std::time_t now = std::time(nullptr);
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false, true, 60, scheduledDir.string(),
+                           "openai", "openai.runtime_status");
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", now - 86400, 123, 1, "openai-test-model");
+    seedRuntimeUsageEvent(dbPath.path(), "minimax", "MiniMax", now - 86400, 456, 1, "minimax-test-model");
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now)}));
+    app.setScheduledExportPollIntervalForTesting(50);
+    REQUIRE(app.init());
+    REQUIRE(
+        waitForCondition([&]() { return !app.getDashboardViewModelForTesting().scheduledExportLastRunTime.empty(); },
+                         std::chrono::milliseconds(4000)));
+
+    const auto manualPath = exportDir.path() / "manual.html";
+    REQUIRE(app.exportHtmlReportForTesting(manualPath.string()).success);
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    for (const auto* kind : {"manual_html", "scheduled_html"}) {
+        CAPTURE(kind);
+        const auto stored = storage.getLatestExportRun(kind);
+        REQUIRE(stored.has_value());
+        REQUIRE(stored->success);
+        CHECK(stored->providerFilterCsv.empty());
+        CHECK(stored->accountFilterCsv.empty());
+        std::ifstream report(stored->outputPath);
+        REQUIRE(report.is_open());
+        const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+        CHECK(html.find("openai-test-model") != std::string::npos);
+        CHECK(html.find("minimax-test-model") != std::string::npos);
+    }
+}
+
 TEST_CASE("AppController writes a scheduled HTML report when the export seam is enabled", "[app][reporting][scheduled]") {
     requireSqlite();
 
@@ -6061,19 +6149,8 @@ TEST_CASE("AppController writes a scheduled HTML report when the export seam is 
     TempTestDirectory exportDir("jistats_scheduled_export");
     const std::time_t now = std::time(nullptr);
 
-    seedStartupPreferences(
-        dbPath.path(),
-        false,
-        false,
-        true,
-        false,
-        false,
-        false,
-        true,
-        60,
-        exportDir.path().string(),
-        "openai",
-        "openai.runtime_status");
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false, true, 60, exportDir.path().string(),
+                           "openai", "openai.runtime_status", "openai", "openai.runtime_status");
     seedRuntimeUsageEvent(
         dbPath.path(),
         "openai",
@@ -6236,19 +6313,8 @@ TEST_CASE("AppController surfaces recovery and scheduled export status in the da
     TempTestDirectory exportDir("jistats_dashboard_status");
     const std::time_t now = std::time(nullptr);
 
-    seedStartupPreferences(
-        dbPath.path(),
-        false,
-        false,
-        true,
-        false,
-        false,
-        false,
-        true,
-        60,
-        exportDir.path().string(),
-        "openai",
-        "openai.runtime_status");
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false, true, 60, exportDir.path().string(),
+                           "openai", "openai.runtime_status", "openai", "openai.runtime_status");
     seedRuntimeState(
         dbPath.path(),
         now - (3 * 3600),
