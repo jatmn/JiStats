@@ -7,6 +7,7 @@
 #include <sstream>
 #include <iomanip>
 #include <optional>
+#include <tuple>
 
 namespace JiStats {
 
@@ -68,48 +69,110 @@ public:
         return true;
     }
 
-    bool parseQuotaPayload(const std::string& body, QuotaResponse& response) const {
+    bool parseQuotaPayload(const std::string& body, bool tokenPlan, QuotaResponse& response) const {
         response.rawResponse = body;
+        response.success = false;
 
         JsonValue json;
         if (!JsonParser::parse(body, json)) {
-            response.success = false;
             response.error = "Failed to parse JSON response";
             return false;
         }
 
         const JsonValue* modelRemains = json.getMember("model_remains");
         if (!modelRemains || !modelRemains->isArray() || modelRemains->getArray().empty()) {
-            response.success = false;
             response.error = "No model_remains in response";
             return false;
         }
 
-        const JsonValue& firstModel = modelRemains->getArray()[0];
-        if (!firstModel.isObject()) {
-            response.success = false;
-            response.error = "Invalid model_remains entry";
-            return false;
+        struct Interval {
+            long long startMs = 0;
+            long long endMs = 0;
+            long long remaining = 0;
+            long long limit = 0;
+        };
+
+        const auto readWindow = [this](const JsonValue& row, Interval& interval, std::string& error) {
+            if (!row.isObject()) {
+                error = "Invalid model_remains entry";
+                return false;
+            }
+            return tryGetRequiredNumber(row, "start_time", interval.startMs, error) &&
+                   tryGetRequiredNumber(row, "end_time", interval.endMs, error);
+        };
+        const auto readCounts = [this](const JsonValue& row, Interval& interval, std::string& error) {
+            return tryGetRequiredNumber(row, "current_interval_usage_count", interval.remaining, error) &&
+                   tryGetRequiredNumber(row, "current_interval_total_count", interval.limit, error);
+        };
+
+        const auto& rows = modelRemains->getArray();
+        Interval selected;
+        if (rows.size() == 1 && !rows.front().getMember("model_name")) {
+            // Legacy single-row responses omit the model identity.
+            if (!readWindow(rows.front(), selected, response.error) ||
+                !readCounts(rows.front(), selected, response.error)) {
+                return false;
+            }
+        } else {
+            std::optional<Interval> latest;
+            bool selectedCountQuota = false;
+            bool conflictingBalance = false;
+            std::string invalidInterval;
+            constexpr auto hourSeconds = 60 * 60;
+            for (const auto& row : rows) {
+                const auto* modelName = row.getMember("model_name");
+                if (!modelName || !modelName->isString()) {
+                    continue;
+                }
+                const bool countQuota = modelName->getString() == "MiniMax-M*";
+                if (!countQuota && !(tokenPlan && modelName->getString() == "general")) {
+                    continue;
+                }
+
+                Interval interval;
+                if (!readWindow(row, interval, invalidInterval) || interval.startMs <= 0 ||
+                    interval.endMs <= interval.startMs) {
+                    continue;
+                }
+                const auto span = parseTimestamp(interval.endMs) - parseTimestamp(interval.startMs);
+                if (span <= 0) {
+                    continue;
+                }
+                // Only the shared five-hour row establishes a request balance. Token Plan general
+                // rows establish a reset window even when the meaning of their counts is unknown.
+                if (countQuota && (span <= 4 * hourSeconds || span > 5 * hourSeconds ||
+                                   !readCounts(row, interval, invalidInterval) || interval.limit <= 0)) {
+                    continue;
+                }
+
+                const auto window = std::tie(countQuota, interval.endMs, interval.startMs);
+                if (!latest || window > std::tie(selectedCountQuota, latest->endMs, latest->startMs)) {
+                    latest = interval;
+                    selectedCountQuota = countQuota;
+                    conflictingBalance = false;
+                } else if (window == std::tie(selectedCountQuota, latest->endMs, latest->startMs) &&
+                           (interval.limit != latest->limit || interval.remaining != latest->remaining)) {
+                    conflictingBalance = true;
+                }
+            }
+            if (!latest) {
+                response.error = rows.size() == 1 && !invalidInterval.empty()
+                                     ? invalidInterval
+                                     : "No supported MiniMax coding quota in response";
+                return false;
+            }
+            if (conflictingBalance) {
+                response.error = "Conflicting MiniMax coding quota balances";
+                return false;
+            }
+            selected = *latest;
         }
 
-        long long startTimeMs = 0;
-        long long endTimeMs = 0;
-        long long remainingCount = 0;
-        long long limitCount = 0;
-
-        if (!tryGetRequiredNumber(firstModel, "start_time", startTimeMs, response.error) ||
-            !tryGetRequiredNumber(firstModel, "end_time", endTimeMs, response.error) ||
-            !tryGetRequiredNumber(firstModel, "current_interval_usage_count", remainingCount, response.error) ||
-            !tryGetRequiredNumber(firstModel, "current_interval_total_count", limitCount, response.error)) {
-            response.success = false;
-            return false;
-        }
-
-        response.windowStart = parseTimestamp(startTimeMs);
-        response.windowEnd = parseTimestamp(endTimeMs);
-        response.limit = std::max<long long>(0, limitCount);
-        response.remaining = std::clamp(remainingCount, 0LL, response.limit);
-        response.used = std::clamp(response.limit - response.remaining, 0LL, response.limit);
+        response.windowStart = parseTimestamp(selected.startMs);
+        response.windowEnd = parseTimestamp(selected.endMs);
+        response.limit = std::max<long long>(0, selected.limit);
+        response.remaining = std::clamp(selected.remaining, 0LL, response.limit);
+        response.used = response.limit - response.remaining;
         response.windowType = "interval";
         response.error.clear();
         response.success = true;
@@ -412,9 +475,11 @@ public:
             return response;
         }
 
-        parseQuotaPayload(httpResp.body, response);
+        const bool tokenPlan = endpoint == TOKEN_PLAN_ENDPOINT;
+        parseQuotaPayload(httpResp.body, tokenPlan, response);
         const std::string endpointFamily =
-            canonicalEndpointFamily(subscriptionProfile.endpointFamily, subscriptionProfile.planKey);
+            tokenPlan ? "token_plan_remains"
+                      : canonicalEndpointFamily(subscriptionProfile.endpointFamily, subscriptionProfile.planKey);
         if (response.success) {
             response.providerSurface = providerSurfaceForFamily(endpointFamily);
         }
@@ -461,7 +526,8 @@ QuotaResponse MiniMaxAdapter::fetchQuota() {
             return response;
         }
         pImpl->lastResolvedEndpoint = pImpl->resolveQuotaEndpoint();
-        pImpl->parseQuotaPayload(pImpl->mockQuotaResponse, response);
+        pImpl->parseQuotaPayload(pImpl->mockQuotaResponse,
+                                 pImpl->lastResolvedEndpoint == MiniMaxAdapter::Impl::TOKEN_PLAN_ENDPOINT, response);
         if (response.success) {
             response.providerSurface = configuredSurface;
         }
