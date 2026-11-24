@@ -72,7 +72,7 @@ std::string buildRunId(long long sourceId, const std::string& threadId, long lon
 }
 
 bool legacyUriCouldChangePath(const std::string& path) {
-    if (path.find_first_of("#?") != std::string::npos) {
+    if (path.compare(0, 12, "//localhost/") == 0 || path.find_first_of("#?") != std::string::npos) {
         return true;
     }
     for (auto offset = path.find('%'); offset != std::string::npos; offset = path.find('%', offset + 1)) {

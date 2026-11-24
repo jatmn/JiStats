@@ -104,6 +104,16 @@ TEST_CASE("CodexLocalSqliteReader opens the literal state database path", "[code
     REQUIRE(result.threads.size() == 1);
     CHECK(result.threads.front().threadId == "thread-1");
     CHECK(result.threads.front().tokensUsed == 1250);
+#ifdef _WIN32
+    if (source.is_absolute() && source.root_name().native().size() == 2) {
+        const std::string deviceSource = "//?/" + source.generic_string();
+        const auto deviceResult = CodexLocalSqliteReader().readThreads(deviceSource);
+        INFO(deviceResult.error);
+        REQUIRE(deviceResult.success);
+        REQUIRE(deviceResult.threads.size() == 1);
+        CHECK(deviceResult.threads.front().tokensUsed == 1250);
+    }
+#endif
 #endif
 }
 

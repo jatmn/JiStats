@@ -112,7 +112,16 @@ CodexLocalSqliteReadResult CodexLocalSqliteReader::readThreads(const std::string
 
     const std::filesystem::path path(resolvedPath);
     std::error_code ec;
-    const auto openPath = std::filesystem::absolute(path, ec);
+    auto openPath = path;
+#ifdef _WIN32
+    if (path.native().find_first_not_of(L"/\\") == 2) {
+        // Keep both leading separators on fully qualified UNC and device paths.
+        openPath.make_preferred();
+    } else
+#endif
+    {
+        openPath = std::filesystem::absolute(path, ec);
+    }
     if (ec || !std::filesystem::exists(openPath, ec)) {
         result.error = "Codex state SQLite database not found";
         result.sourcePath = resolvedPath;
