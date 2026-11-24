@@ -143,6 +143,50 @@ TEST_CASE("CodexLocalUsageImporter baselines first scan then imports token delta
 #endif
 }
 
+TEST_CASE("CodexLocalUsageImporter starts a literal path baseline after a legacy URI checkpoint",
+          "[codex][storage][import]") {
+#if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
+    SKIP("SQLite unavailable");
+#else
+    TempTestDatabase appDb;
+    const TempTestDirectory directory("codex_literal_baseline");
+    const auto decoded = directory.path() / "folder name" / "state_5.sqlite";
+    const auto literal = directory.path() / "folder%20name" / "state_5.sqlite";
+    std::filesystem::create_directory(decoded.parent_path());
+    std::filesystem::create_directory(literal.parent_path());
+    writeCodexStateDb(decoded.string(), 42);
+    writeCodexStateDb(literal.string(), 1250);
+
+    StorageService storage;
+    REQUIRE(storage.init(appDb.path()));
+    CodexLocalUsageImporter importer(storage);
+    constexpr int generation = 2;
+    REQUIRE(importer.importFromSource(decoded.string(), 1700007200, generation).success);
+    REQUIRE(std::filesystem::remove(decoded));
+    writeCodexStateDb(decoded.string(), 50);
+    REQUIRE(importer.importFromSource(decoded.string(), 1700010800, generation).success);
+    REQUIRE(totalUsageTokens(storage) == 8);
+
+    // Earlier releases opened the decoded file but keyed its checkpoint by the requested path.
+    REQUIRE(storage
+                .execute("UPDATE codex_local_sources SET source_path = ?, source_identity = ? WHERE source_path = ?;",
+                         {literal.string(), literal.string() + "#attribution-2", decoded.string()})
+                .success());
+    const auto first = importer.importFromSource(literal.string(), 1700014400, generation);
+    REQUIRE(first.success);
+    CHECK(first.baselinedThreads == 1);
+    CHECK(first.deltaEventsInserted == 0);
+    CHECK(totalUsageTokens(storage) == 8);
+
+    REQUIRE(std::filesystem::remove(literal));
+    writeCodexStateDb(literal.string(), 1325);
+    const auto next = importer.importFromSource(literal.string(), 1700018000, generation);
+    REQUIRE(next.success);
+    CHECK(next.deltaEventsInserted == 1);
+    CHECK(totalUsageTokens(storage) == 83);
+#endif
+}
+
 TEST_CASE("CodexLocalUsageImporter retries an incomplete consent baseline without importing cumulative usage",
           "[codex][storage][import]") {
 #if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
