@@ -758,7 +758,28 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
     }
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    static constexpr char claudeDailyActivityPredicate[] =
+        "provider_surface = 'claude_code_local_stats' AND activity_kind = 'session_active' "
+        "AND source_type = 'local' AND surface_key = 'stats-cache' AND raw_reference GLOB 'scope:fnv1a64:?*'";
     auto activityEventExists = [this](const PersistedActivityEvent& candidate) -> std::optional<bool> {
+        const auto& activity = candidate.activity;
+        const auto& reference = activity.rawReference;
+        if (activity.providerSurface == "claude_code_local_stats" &&
+            activity.activityKind == ActivityKind::SessionActive &&
+            (activity.sourceType.empty() || activity.sourceType == "local") && activity.surfaceKey == "stats-cache" &&
+            reference.size() > kLocalPathReferencePrefix.size() &&
+            reference.compare(0, kLocalPathReferencePrefix.size(), kLocalPathReferencePrefix) == 0) {
+            // A conflicting AUTOINCREMENT insert still advances sqlite_sequence.
+            static const std::string lookup =
+                std::string("SELECT 1 FROM activity_events WHERE provider_id = ? AND account_id = ? "
+                            "AND started_at_utc = ? AND raw_reference = ? AND ") +
+                claudeDailyActivityPredicate + " LIMIT 1";
+            const auto result =
+                execute(lookup, {std::to_string(candidate.providerId), std::to_string(candidate.accountId),
+                                 toUtcIsoString(activity.startedAt), reference});
+            return result.success() ? std::optional<bool>(result.rowCount() != 0) : std::nullopt;
+        }
+
         std::string sql = "SELECT 1 FROM activity_events "
                           "WHERE provider_id = ? AND account_id = ? AND ";
         std::vector<std::string> params = {
@@ -825,7 +846,6 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
 
         QueryResult result = execute(sql, params);
         if (!result.success()) {
-            pImpl->lastError = "Failed to check for duplicate activity event";
             return std::nullopt;
         }
 
@@ -834,6 +854,7 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
 
     const auto alreadyExists = activityEventExists(event);
     if (!alreadyExists.has_value()) {
+        pImpl->lastError = "Failed to check for duplicate activity event";
         return false;
     }
     if (*alreadyExists) {
@@ -842,13 +863,15 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
     }
 
     sqlite3_stmt* stmt = nullptr;
-    const char* sql =
-        "INSERT INTO activity_events ("
-        "provider_id, account_id, plan_id, provider_surface, activity_kind, started_at_utc, ended_at_utc, "
-        "duration_seconds, source_type, source_run_id, surface_key, window_title_hint, confidence_tier, raw_reference"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+    static const std::string sql =
+        std::string("INSERT INTO activity_events ("
+                    "provider_id, account_id, plan_id, provider_surface, activity_kind, started_at_utc, ended_at_utc, "
+                    "duration_seconds, source_type, source_run_id, surface_key, window_title_hint, confidence_tier, "
+                    "raw_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(provider_id, account_id, started_at_utc, raw_reference) WHERE ") +
+        claudeDailyActivityPredicate + " DO NOTHING;";
 
-    int rc = sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr);
+    int rc = sqlite3_prepare_v2(pImpl->db, sql.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         pImpl->lastError = "Failed to prepare activity event insert";
         return false;
@@ -898,7 +921,14 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
         sqlite3_bind_null(stmt, 14);
     }
 
+    // Keep the conflict result and insert ID tied to this step on the shared connection.
+    sqlite3_mutex* const dbMutex = sqlite3_db_mutex(pImpl->db);
+    sqlite3_mutex_enter(dbMutex);
     rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE && insertedId && sqlite3_changes(pImpl->db) != 0) {
+        *insertedId = sqlite3_last_insert_rowid(pImpl->db);
+    }
+    sqlite3_mutex_leave(dbMutex);
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE) {
@@ -907,9 +937,6 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
     }
 
     pImpl->lastError.clear();
-    if (insertedId) {
-        *insertedId = sqlite3_last_insert_rowid(pImpl->db);
-    }
     return true;
 #else
     pImpl->lastError = SQLITE_UNAVAILABLE_ERROR;
