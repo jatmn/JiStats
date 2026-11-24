@@ -2537,6 +2537,71 @@ TEST_CASE("AppController runs catch-up recovery and records runtime gap markers 
     app.shutdown();
 }
 
+TEST_CASE("AppController leaves recovery coverage unknown for unsupported provider history",
+          "[app][runtime][recovery][unsupported_history]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedAllProviderTrackingEnabled(dbPath.path());
+    const std::time_t now = std::time(nullptr);
+    const std::time_t recoveryStart = now - (3 * 3600);
+    seedRuntimeState(dbPath.path(), recoveryStart, recoveryStart);
+
+    TempTestDirectory codexHome("jistats_codex_recovery");
+    ScopedEnvironmentVariable codexHomeEnv("CODEX_HOME", codexHome.path().string());
+    writeCodexRolloutFile(codexHome.path() / "sessions" / "rollout-recovery.jsonl", 25.0, now, now + 3600);
+
+    auto miniMax = std::make_shared<MiniMaxAdapter>("synthetic-key");
+    miniMax->setMockQuotaResponse(R"json({"model_remains":[{"start_time":1735689600000,"end_time":1735707600000,
+        "remains_time":4500000,"current_interval_total_count":240,"current_interval_usage_count":223,
+        "model_name":"MiniMax-M*"}]})json");
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(std::make_shared<OpenAIAdapter>());
+    providers->addProvider(miniMax);
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+    REQUIRE(waitForCondition(
+        [&]() {
+            const auto state = app.getPersistedRuntimeStateForTesting();
+            return state && state->recoveryMarker.empty();
+        },
+        std::chrono::milliseconds(1500)));
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    for (const std::string providerKey : {"openai", "minimax"}) {
+        CAPTURE(providerKey);
+        const int providerId = requireProviderId(storage, providerKey);
+        const int accountId = requireAccountId(storage, providerId, providerKey + ".runtime_status");
+        CHECK_FALSE(storage.getLatestRecoveryCheckpoint(providerId, accountId, "runtime_backfill").has_value());
+        const auto gaps = storage.getGapMarkers(providerId, accountId, recoveryStart, std::time(nullptr));
+        REQUIRE(gaps.size() == 1);
+        CHECK(gaps.front().classification == GapClassification::Unknown);
+        CHECK(gaps.front().sourceKind == "runtime_recovery");
+        CHECK(gaps.front().basisSummary == "JiStats was not fully observing provider state during the recovery window");
+
+        PersistedRecoveryCheckpoint legacy;
+        legacy.providerId = providerId;
+        legacy.accountId = accountId;
+        legacy.syncKind = "runtime_backfill";
+        legacy.recoveryStart = recoveryStart - 3600;
+        legacy.recoveryEnd = recoveryStart;
+        legacy.attemptAt = recoveryStart;
+        legacy.outcome = providerKey == "openai" ? "no_data" : "fetch_failed";
+        REQUIRE(storage.insertRecoveryCheckpoint(legacy));
+    }
+    storage.close();
+    app.refreshRuntimeForTesting();
+    const auto dashboard = app.getDashboardViewModelForTesting();
+    CHECK(dashboard.recoveryStatusSummary == "Unknown gaps in 2 providers");
+    CHECK(dashboard.recoveryStatusDetail.find("Last recovery outcome:") == std::string::npos);
+    app.shutdown();
+}
+
 TEST_CASE("AppController persists imported recovery backfill checkpoints per provider", "[app][runtime][recovery]") {
     requireSqlite();
 

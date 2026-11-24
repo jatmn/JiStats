@@ -5222,6 +5222,10 @@ public:
                 continue;
             }
 
+            const auto adapter = activeProviderManager().getProvider(provider.providerKey);
+            if (adapter && !adapter->supportsUsageHistory()) {
+                continue;
+            }
             const auto checkpoint =
                 storageService.getLatestRecoveryCheckpoint(*providerId, *accountId, kRuntimeBackfillSyncKind);
             if (!checkpoint.has_value()) {
