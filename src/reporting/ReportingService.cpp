@@ -126,7 +126,7 @@ ReportMetadata buildReportMetadata(const DashboardViewModel& viewModel, const Re
     std::vector<ProviderState> providerStates;
     providerStates.reserve(viewModel.providers.size());
     for (const auto& provider : viewModel.providers) {
-        if (provider.isEnabled) {
+        if (provider.isEnabled && provider.contributesToRuntimeState) {
             providerStates.push_back(provider.state);
         }
     }
