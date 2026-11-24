@@ -3038,14 +3038,17 @@ TEST_CASE("AppController classifies Codex quota freshness from the rollout obser
     const int ageSeconds = GENERATE(-1, 60, 7200);
     const bool undated = ageSeconds < 0;
     const std::time_t eventTime = undated ? 0 : now - ageSeconds;
-    writeCodexRolloutFile(codexHome.path() / "sessions" / "rollout-freshness.jsonl", 25.0, eventTime, now + 3600);
+    const auto rolloutPath = codexHome.path() / "sessions" / "rollout-freshness.jsonl";
+    writeCodexRolloutFile(rolloutPath, 25.0, eventTime, now + 3600);
 
     auto adapter = std::make_shared<OpenAIAdapter>();
     auto providers = std::make_shared<ProviderManager>();
     providers->addProvider(adapter);
+    ScopedTrayTestHandler trayHandler(
+        [](TrayController::TestOperation, TrayStatus, const std::string&, std::string&) { return true; });
     AppController app;
     app.setCurrentTimeForTesting(now);
-    app.setHeadlessForTesting(true);
+    app.setTaskbarTestModeForTesting(true);
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providers);
     REQUIRE(app.init());
@@ -3063,6 +3066,23 @@ TEST_CASE("AppController classifies Codex quota freshness from the rollout obser
         CHECK(parseRuntimeTimestamp(openai->lastSyncTime) == eventTime);
         REQUIRE(openai->quotas.size() == 1);
         CHECK(openai->quotas.front().remaining == 75);
+    }
+    if (undated) {
+        const auto trayState = app.getTrayStateForTesting();
+        CHECK(trayState.status == TrayStatus::Warning);
+        CHECK(trayState.tooltip.find("Unknown") != std::string::npos);
+        REQUIRE(std::filesystem::remove(rolloutPath));
+        for (int read = 0; read < 2; ++read) {
+            app.refreshRuntimeForTesting();
+            const auto dashboard = app.getDashboardViewModelForTesting();
+            const auto* openai = findProviderStatus(dashboard, "openai");
+            REQUIRE(openai != nullptr);
+            CHECK(openai->state == ProviderState::Offline);
+            REQUIRE(openai->lastKnownQuota.has_value());
+            CHECK(openai->lastKnownQuota->lastSyncTime.empty());
+            REQUIRE(openai->lastKnownQuota->quotas.size() == 1);
+            CHECK(openai->lastKnownQuota->quotas.front().remaining == 75);
+        }
     }
     app.shutdown();
 

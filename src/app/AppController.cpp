@@ -2894,13 +2894,13 @@ void retainLastKnownDashboardQuota(DashboardViewModel& next, const DashboardView
         const auto& previousQuota = prior->lastKnownQuota ? prior->lastKnownQuota->quotas : prior->quotas;
         LastKnownQuotaReading reading;
         reading.lastSyncTime = prior->lastKnownQuota ? prior->lastKnownQuota->lastSyncTime : prior->lastSyncTime;
-        if (reading.lastSyncTime.empty()) {
-            continue;
-        }
         for (const auto& quota : previousQuota) {
             const bool matchingPlan = provider.providerKey != "minimax" ||
                                       (!provider.quotaSource.empty() && quota.providerSurface == provider.quotaSource);
-            if (matchingPlan && isSubscriptionQuotaReading(*prior, quota)) {
+            const bool undatedCodexQuota =
+                prior->providerKey == "openai" && quota.providerSurface == "openai_subscription_codex_local";
+            if (matchingPlan && (!reading.lastSyncTime.empty() || undatedCodexQuota) &&
+                isSubscriptionQuotaReading(*prior, quota)) {
                 reading.quotas.push_back(quota);
             }
         }
@@ -3150,8 +3150,8 @@ void overlayProviderStatesOnTaskbarMetrics(
     }
 }
 
-TrayStatus trayStatusForRuntimeState(RuntimeState runtimeState) {
-    switch (runtimeState) {
+TrayStatus trayStatusForRuntimeState(const DashboardViewModel& viewModel) {
+    switch (viewModel.runtimeState) {
         case RuntimeState::Current:
             return TrayStatus::Normal;
         case RuntimeState::Stale:
@@ -3160,6 +3160,14 @@ TrayStatus trayStatusForRuntimeState(RuntimeState runtimeState) {
             return TrayStatus::Syncing;
         case RuntimeState::Offline:
             return TrayStatus::Offline;
+        case RuntimeState::Unknown: {
+            const bool unknownFreshness =
+                std::any_of(viewModel.providers.begin(), viewModel.providers.end(), [](const auto& provider) {
+                    return provider.isEnabled && provider.contributesToRuntimeState &&
+                           provider.state == ProviderState::Unknown;
+                });
+            return unknownFreshness ? TrayStatus::Warning : TrayStatus::Error;
+        }
         default:
             return TrayStatus::Error;
     }
@@ -6191,7 +6199,7 @@ public:
             if (!snapshot.trayTooltipSuffix.empty()) {
                 tooltip += snapshot.trayTooltipSuffix;
             }
-            trayController.setState(trayStatusForRuntimeState(viewModel.runtimeState), tooltip);
+            trayController.setState(trayStatusForRuntimeState(viewModel), tooltip);
         }
     }
 
