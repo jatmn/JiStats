@@ -6245,6 +6245,65 @@ TEST_CASE("AppController labels backfilled usage in the HTML report dates", "[ap
     }
 }
 
+TEST_CASE("AppController excludes usage after the HTML export cutoff at UTC midnight", "[app][reporting]") {
+    requireSqlite();
+    const bool buildRollup = GENERATE(false, true);
+    CAPTURE(buildRollup);
+
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_midnight_report");
+    const std::time_t midnight = (std::time(nullptr) / 86400 - 1) * 86400;
+    const std::string accountKey = "midnight-claude-account";
+
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        const auto account = seedUsageProviderAccount(storage, "claude_code", accountKey, "Midnight Claude history");
+        insertUsageEvent(storage, account.providerId, account.accountId, toUtcIso(midnight), "in-range-model", 111, 1);
+        insertUsageEvent(storage, account.providerId, account.accountId, toUtcIso(midnight + 900), "later-model", 222,
+                         2);
+        REQUIRE(storage
+                    .execute("UPDATE usage_events SET is_backfilled = 1 WHERE account_id = ? AND model_key = ?;",
+                             {std::to_string(account.accountId), "later-model"})
+                    .success());
+        if (buildRollup) {
+            REQUIRE(storage.rebuildUsageRollups(UsageRollupResolution::Daily, account.providerId, account.accountId,
+                                                midnight, midnight));
+        }
+    }
+
+    AppController app;
+    app.setCurrentTimeForTesting(midnight);
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({}));
+    REQUIRE(app.init());
+
+    DashboardPreferences preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.analysisSelectedProviderId = "claude_code";
+    preferences.analysisSelectedAccountId = accountKey;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Today;
+    app.applyDashboardPreferencesForTesting(preferences);
+
+    const auto path = exportDir.path() / "midnight.html";
+    REQUIRE(app.exportHtmlReportForTesting(path.string()).success);
+    std::ifstream report(path);
+    REQUIRE(report.is_open());
+    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+    CHECK(html.find("111 tokens") != std::string::npos);
+    CHECK(html.find("in-range-model") != std::string::npos);
+    CHECK(html.find("222 tokens") == std::string::npos);
+    CHECK(html.find("333 tokens") == std::string::npos);
+    CHECK(html.find("later-model") == std::string::npos);
+    CHECK(html.find("Contains backfilled data: No") != std::string::npos);
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto attempt = storage.getLatestExportRun("manual_html");
+    REQUIRE(attempt.has_value());
+    CHECK(attempt->rangeEnd == midnight);
+}
+
 TEST_CASE("AppController exports the effective Analysis account when no live row matches",
           "[app][analysis][reporting][scheduled]") {
     requireSqlite();
@@ -6455,28 +6514,14 @@ TEST_CASE("AppController scheduled HTML export uses retained daily rollups after
     TempTestDatabase dbPath;
     TempTestDirectory exportDir("jistats_scheduled_export_rollups");
     const std::time_t now = std::time(nullptr);
+    // Match retention, which keeps whole-day rollups after the raw history expires.
+    const std::time_t usageDay = (now / 86400 - 100) * 86400;
+    const std::string usageDate = toUtcIso(usageDay);
 
-    seedStartupPreferences(
-        dbPath.path(),
-        false,
-        false,
-        true,
-        false,
-        false,
-        false,
-        true,
-        60,
-        exportDir.path().string(),
-        "openai",
-        "openai.runtime_status");
-    seedRuntimeUsageEvent(
-        dbPath.path(),
-        "openai",
-        "OpenAI",
-        now - 1800,
-        240,
-        18,
-        "gpt-4.1");
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false, true, 60, exportDir.path().string(),
+                           "openai", "openai.runtime_status", "openai", "openai.runtime_status", "custom", usageDate,
+                           usageDate);
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", usageDay + 1800, 240, 18, "gpt-4.1");
 
     {
         StorageService storage;
@@ -6485,12 +6530,7 @@ TEST_CASE("AppController scheduled HTML export uses retained daily rollups after
         const auto accountId = loadRuntimeAccountId(storage, "openai");
         REQUIRE(providerId.has_value());
         REQUIRE(accountId.has_value());
-        REQUIRE(storage.rebuildUsageRollups(
-            UsageRollupResolution::Daily,
-            *providerId,
-            *accountId,
-            now - 86400,
-            now));
+        REQUIRE(storage.rebuildUsageRollups(UsageRollupResolution::Daily, *providerId, *accountId, usageDay, usageDay));
         REQUIRE(storage.execute("DELETE FROM usage_events;").success());
         storage.close();
     }

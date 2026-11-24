@@ -41,8 +41,6 @@ struct ReportRequest {
     bool includeTrends = true;
     std::vector<std::string> providerFilter;  // Empty = all providers
     std::vector<std::string> accountFilter;   // Empty = all accounts
-    // The selected range ends at the export snapshot, so the current daily rollup is usable.
-    bool includeCurrentDailyRollup = false;
 };
 
 /**

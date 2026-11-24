@@ -1468,8 +1468,7 @@ void appendAccountFilterClause(
     sql += ")";
 }
 
-std::optional<std::pair<std::time_t, std::time_t>> reportDailyRollupRange(std::time_t from, std::time_t to,
-                                                                          bool includeCurrentDailyRollup) {
+std::optional<std::pair<std::time_t, std::time_t>> fullyCoveredDailyRange(std::time_t from, std::time_t to) {
     if (from > to) {
         return std::nullopt;
     }
@@ -1481,7 +1480,7 @@ std::optional<std::pair<std::time_t, std::time_t>> reportDailyRollupRange(std::t
     }
 
     std::time_t endDay = utcDayStart(to);
-    if (!includeCurrentDailyRollup && to - endDay < kSecondsPerDay - 1) {
+    if (to - endDay < kSecondsPerDay - 1) {
         endDay -= kSecondsPerDay;
     }
 
@@ -1638,7 +1637,7 @@ ReportAggregateData buildReportAggregateData(
     };
 
     std::map<std::string, ReportSummaryBucket> dailyBuckets;
-    const auto fullDays = reportDailyRollupRange(window.start, window.end, request.includeCurrentDailyRollup);
+    const auto fullDays = fullyCoveredDailyRange(window.start, window.end);
     if (!fullDays.has_value()) {
         queryRawDailyBuckets(window.start, window.end, false, dailyBuckets);
     } else {
@@ -5490,7 +5489,6 @@ public:
         request.format = ReportFormat::Html;
         request.outputPath = outputPath;
         request.dateRange = analysisWindow.reportDateRange;
-        request.includeCurrentDailyRollup = analysisWindow.end == now;
         if (!selection.providerId.empty()) {
             request.providerFilter.push_back(selection.providerId);
         }
@@ -5584,7 +5582,7 @@ public:
         DashboardHtmlExportResult result;
 
         const DashboardPreferences preferences = currentDashboardPreferences();
-        const std::time_t requestedAt = std::time(nullptr);
+        const std::time_t requestedAt = currentTime();
         ReportRequest request =
             buildAnalysisScopedHtmlExportRequest(preferences, outputPath, requestedAt);
 
