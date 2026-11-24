@@ -2,8 +2,27 @@
 #include "providers/claude/ClaudeCodeLocalParser.hpp"
 #include <algorithm>
 #include <filesystem>
+#include <limits>
 
 namespace JiStats {
+
+namespace {
+
+std::optional<long long> sumModelTokens(const std::vector<ClaudeCodeModelAggregate>& models) {
+    long long total = 0;
+    for (const auto& model : models) {
+        for (const auto tokens :
+             {model.inputTokens, model.outputTokens, model.cacheReadInputTokens, model.cacheCreationInputTokens}) {
+            if (tokens > std::numeric_limits<long long>::max() - total) {
+                return std::nullopt;
+            }
+            total += tokens;
+        }
+    }
+    return total;
+}
+
+} // namespace
 
 struct ClaudeCodeAdapter::Impl {
 public:
@@ -85,8 +104,9 @@ QuotaResponse ClaudeCodeAdapter::fetchQuota() {
         return response;
     }
 
-    if (!result.totalMessages && !result.hasModelTokenCounts) {
-        pImpl->lastError = "Claude stats-cache has no aggregate activity counters";
+    const auto totalTokens = result.hasModelTokenCounts ? sumModelTokens(result.modelUsage) : std::nullopt;
+    if (!totalTokens && !result.totalMessages) {
+        pImpl->lastError = "Claude stats-cache has no usable aggregate activity counters";
         response.error = pImpl->lastError;
         response.unavailable = true;
         return response;
@@ -98,11 +118,7 @@ QuotaResponse ClaudeCodeAdapter::fetchQuota() {
     response.windowType = "local_aggregate";
 
     // Prefer a positive token total, then the message count. A measured token total can also be zero.
-    long long totalTokens = 0;
-    for (const auto& model : result.modelUsage) {
-        totalTokens += model.inputTokens + model.outputTokens + model.cacheReadInputTokens + model.cacheCreationInputTokens;
-    }
-    response.used = totalTokens > 0 ? totalTokens : result.totalMessages.value_or(0);
+    response.used = totalTokens && *totalTokens > 0 ? *totalTokens : result.totalMessages.value_or(0);
 
     // Local files do not contain limit/remaining; keep them at 0 to signal unknown.
     response.limit = 0;

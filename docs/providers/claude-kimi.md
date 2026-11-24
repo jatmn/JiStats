@@ -12,7 +12,7 @@ Replay the [Claude fixtures](../fixtures/claude/) with [the Claude parser tests]
 
 An activity day counts once per cache and account across cache revisions.
 
-The local aggregate requires a recorded token or message counter. An explicit zero is a valid measurement. When both counters are missing or invalid, the aggregate is unavailable.
+The local aggregate requires a recorded token or message counter. An explicit zero is a valid measurement. If the token sum is out of range, the adapter uses the recorded message count when available. When neither counter is usable, the aggregate is unavailable.
 
 ## Kimi Code
 
