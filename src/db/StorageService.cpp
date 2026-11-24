@@ -2363,7 +2363,8 @@ StorageService::getQuotaSnapshots(int providerId, int accountId, std::time_t sna
                "'openai_subscription_codex_local:*' "
                "THEN 'percent' ELSE COALESCE(NULLIF(qs.quota_dimension, ''), 'requests') END "
                "AND r.rollup_period_start_utc = substr(qs.snapshot_time_utc, 1, 10) || 'T00:00:00Z' "
-               "AND r.rollup_period_start_utc BETWEEN ? AND ? AND r.observed_billing_windows IS NOT NULL)";
+               "AND r.rollup_period_start_utc BETWEEN ? AND ? AND r.observed_billing_windows IS NOT NULL "
+               "AND r.latest_limit_value > 0)";
         params.push_back(toUtcIsoString(skipReplayableRollupDays->first));
         params.push_back(toUtcIsoString(skipReplayableRollupDays->second));
     }
