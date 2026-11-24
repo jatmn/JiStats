@@ -6661,6 +6661,48 @@ TEST_CASE("AppController manual HTML export uses the current analysis scope", "[
     app.shutdown();
 }
 
+TEST_CASE("AppController rejects manual HTML export and defers scheduled export for future Analysis dates",
+          "[app][analysis][reporting][scheduled]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_future_analysis_export");
+    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
+    const std::time_t now = std::time(nullptr);
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", now, 777, 10, "current-model");
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setCurrentTimeForTesting(now);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({}));
+    REQUIRE(app.init());
+
+    auto preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = now + 2 * 86400;
+    preferences.analysisCustomRangeEndUtc = now + 4 * 86400;
+    preferences.scheduledExportEnabled = true;
+    preferences.scheduledExportIntervalMinutes = 60;
+    preferences.scheduledExportPath = exportDir.path().string();
+    app.applyDashboardPreferencesForTesting(preferences);
+
+    const auto manualPath = exportDir.path() / "future.html";
+    const auto result = app.exportHtmlReportForTesting(manualPath.string());
+    CHECK_FALSE(result.success);
+    CHECK(result.message.find("future") != std::string::npos);
+    CHECK(std::filesystem::is_empty(exportDir.path()));
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto manualRun = storage.getLatestExportRun("manual_html");
+    REQUIRE(manualRun.has_value());
+    CHECK_FALSE(manualRun->success);
+    CHECK(manualRun->rangeStart > now);
+    CHECK_FALSE(storage.getLatestExportRun("scheduled_html").has_value());
+    CHECK(app.getDashboardViewModelForTesting().scheduledExportLastRunTime.empty());
+}
+
 TEST_CASE("AppController scopes the HTML recovery summary and badges to historical evidence",
           "[app][reporting][recovery]") {
     requireSqlite();

@@ -5636,21 +5636,25 @@ public:
         (void)storageService.insertExportRun(exportRun);
     }
 
-    void runScheduledExportIfDue(std::time_t now) {
+    std::optional<std::time_t> runScheduledExportIfDue(std::time_t now) {
         const DashboardPreferences preferences = appliedScheduledExportPreferences();
         if (!shouldRunScheduledExport(preferences)) {
-            return;
+            return std::nullopt;
         }
         {
             std::lock_guard<std::mutex> exportLock(scheduledExportMutex);
             if (!isScheduledExportDue(preferences, now)) {
-                return;
+                return std::nullopt;
             }
         }
 
         const std::time_t requestedAt = now;
         ReportRequest request =
             buildAnalysisScopedHtmlExportRequest(preferences, "", requestedAt);
+        const auto rangeStart = std::chrono::system_clock::to_time_t(request.dateRange.start);
+        if (rangeStart > requestedAt) {
+            return rangeStart;
+        }
 
         const std::string originalDefaultOutputDir = reportingService.getDefaultOutputDirectory();
         if (!preferences.scheduledExportPath.empty()) {
@@ -5668,7 +5672,7 @@ public:
             JISTATS_LOG_WARN(
                 LogCategory::General,
                 "Scheduled HTML export failed: " + result.errorMessage);
-            return;
+            return std::nullopt;
         }
 
         {
@@ -5687,6 +5691,7 @@ public:
         JISTATS_LOG_INFO(
             LogCategory::General,
             "Scheduled HTML export wrote: " + result.outputPath);
+        return std::nullopt;
     }
 
     DashboardHtmlExportResult handleManualHtmlExport(const std::string& outputPath) {
@@ -5697,7 +5702,12 @@ public:
         ReportRequest request =
             buildAnalysisScopedHtmlExportRequest(preferences, outputPath, requestedAt);
 
-        const ReportResult reportResult = reportingService.generateReport(request);
+        ReportResult reportResult;
+        if (std::chrono::system_clock::to_time_t(request.dateRange.start) > requestedAt) {
+            reportResult.errorMessage = "The Analysis From date is in the future. Select today or an earlier UTC date.";
+        } else {
+            reportResult = reportingService.generateReport(request);
+        }
         persistExportRun("manual_html", request, reportResult, requestedAt, std::time(nullptr));
 
         if (!reportResult.success) {
@@ -5724,9 +5734,14 @@ public:
         scheduledExportThread = std::thread([this]() {
             while (!shouldStopMiniMaxValidation()) {
                 const std::time_t now = std::time(nullptr);
-                runScheduledExportIfDue(now);
+                const auto deferredUntil = runScheduledExportIfDue(now);
+                // While the selected range is in the future, recheck for scope edits without repeatedly exporting.
+                const auto wait = deferredUntil ? std::min(scheduledExportPollInterval,
+                                                           std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                               std::chrono::seconds(*deferredUntil - now)))
+                                                : scheduledExportWaitInterval(now);
 
-                if (waitForRefreshWatcherInterval(scheduledExportWaitInterval(now))) {
+                if (waitForRefreshWatcherInterval(wait)) {
                     break;
                 }
             }
