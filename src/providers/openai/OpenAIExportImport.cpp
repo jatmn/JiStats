@@ -12,6 +12,7 @@
 #include "core/JsonParser.hpp"
 #include "db/StorageService.hpp"
 #include "observation/ActivityEvent.hpp"
+#include "providers/openai/ImportTransaction.hpp"
 
 namespace JiStats {
 
@@ -539,6 +540,12 @@ OpenAIExportImportRunResult OpenAIExportImport::importHistoricalActivity(
         return run;
     }
 
+    OpenAIImportDetail::ImportTransaction transaction(storage);
+    if (!transaction.begin()) {
+        run.error = "Could not start the ChatGPT export import transaction";
+        return run;
+    }
+
     int providerId = 0;
     int accountId = 0;
     if (!ensureOpenAIProvider(storage, providerId, run.error) ||
@@ -548,21 +555,24 @@ OpenAIExportImportRunResult OpenAIExportImport::importHistoricalActivity(
 
     run.importRunId = makeImportRunId(run.parsed);
 
-    std::set<std::string> existingKeys;
-    const auto existingEvents = storage.getActivityEvents(
-        providerId,
-        accountId,
-        run.parsed.coverageStartAt,
-        run.parsed.coverageEndAt);
-    if (!storage.getLastError().empty()) {
-        run.error = storage.getLastError();
-        return run;
+    std::set<std::string> seenReferences;
+    {
+        const QueryResult existing =
+            storage.execute("SELECT raw_reference FROM activity_events "
+                            "WHERE provider_id = ? AND account_id = ? AND provider_surface = ? AND source_type = ? "
+                            "AND activity_kind = ? AND raw_reference IS NOT NULL;",
+                            {std::to_string(providerId), std::to_string(accountId), kProviderSurface,
+                             std::string(kImportedSourceType), toString(ActivityKind::MessageSend)});
+        if (!existing.success()) {
+            run.error = existing.error();
+            return run;
+        }
+        for (std::size_t row = 0; row < existing.rowCount(); ++row) {
+            seenReferences.insert(existing.getString(row, 0));
+        }
     }
 
-    for (const auto& event : existingEvents) {
-        existingKeys.insert(event.activity.sourceRunId + "|" + event.activity.rawReference);
-    }
-
+    std::size_t insertedCount = 0;
     for (const auto& message : run.parsed.userMessages) {
         PersistedActivityEvent persisted;
         persisted.providerId = providerId;
@@ -580,9 +590,7 @@ OpenAIExportImportRunResult OpenAIExportImport::importHistoricalActivity(
         persisted.activity.confidence = ActivityConfidence::Imported;
         persisted.activity.rawReference = makeRawReference(message);
 
-        const std::string dedupeKey =
-            persisted.activity.sourceRunId + "|" + persisted.activity.rawReference;
-        if (existingKeys.find(dedupeKey) != existingKeys.end()) {
+        if (!seenReferences.insert(persisted.activity.rawReference).second) {
             continue;
         }
 
@@ -591,8 +599,7 @@ OpenAIExportImportRunResult OpenAIExportImport::importHistoricalActivity(
             return run;
         }
 
-        existingKeys.insert(dedupeKey);
-        ++run.insertedCount;
+        ++insertedCount;
     }
 
     PersistedSyncState syncState;
@@ -608,6 +615,12 @@ OpenAIExportImportRunResult OpenAIExportImport::importHistoricalActivity(
         return run;
     }
 
+    if (!transaction.commit()) {
+        run.error = "Could not commit the ChatGPT export import";
+        return run;
+    }
+
+    run.insertedCount = insertedCount;
     run.success = true;
     return run;
 }
