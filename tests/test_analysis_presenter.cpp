@@ -314,6 +314,27 @@ TEST_CASE("AnalysisPresenter separates recent Codex rates from selected activity
     CHECK(recent.find("30 min: 9.8 tokens/min, 0.7 prompts/min.") != std::string::npos);
 }
 
+TEST_CASE("AnalysisPresenter reports retained daily activity with unavailable hourly detail",
+          "[analysis][presenter][analysis_presenter]") {
+    ScopedParentWindow parent;
+    REQUIRE(parent.get() != nullptr);
+    AnalysisPresenter presenter;
+    REQUIRE(presenter.init(parent.get()));
+
+    auto model = makeViewModel();
+    model.dailySummaries = {{"2026-04-10", 5, "OpenAI API", {}}};
+    model.trendBucketGranularity = AnalysisTrendBucketGranularity::Hourly;
+    model.trendPoints.clear();
+    presenter.updateViewModel(model);
+    CHECK(presenter.getTrendSummaryForTesting() ==
+          "5 records in the selected range. Hourly detail is unavailable for 5 records.");
+
+    model.trendPoints = {{"04-10 09:00", 2, makeUtcTime(2026, 4, 10, 9), makeUtcTime(2026, 4, 10, 10), "OpenAI API"}};
+    presenter.updateViewModel(model);
+    CHECK(presenter.getTrendSummaryForTesting() ==
+          "5 records in the selected range. Hourly detail is unavailable for 3 records.");
+}
+
 TEST_CASE("AnalysisPresenter reports the quota low without inventing its timestamp",
           "[analysis][presenter][analysis_presenter]") {
     ScopedParentWindow parent;

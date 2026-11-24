@@ -796,15 +796,17 @@ void addPersistedProviderOptions(
     StorageService& storage,
     std::vector<AnalysisScopeOption>& options,
     std::set<std::string>& seenProviders) {
-    QueryResult result = storage.execute(
-        "SELECT p.provider_key, p.display_name "
-        "FROM providers p "
-        "WHERE EXISTS (SELECT 1 FROM usage_events ue WHERE ue.provider_id = p.id AND ue.source_type != 'codex_local_rollout') "
-        "   OR EXISTS (SELECT 1 FROM activity_events ae WHERE ae.provider_id = p.id) "
-        "   OR EXISTS (SELECT 1 FROM quota_snapshots qs WHERE qs.provider_id = p.id) "
-        "   OR EXISTS (SELECT 1 FROM gap_markers gm WHERE gm.provider_id = p.id) "
-        "   OR EXISTS (SELECT 1 FROM recovery_checkpoints rc WHERE rc.provider_id = p.id) "
-        "ORDER BY p.display_name, p.provider_key;");
+    QueryResult result =
+        storage.execute("SELECT p.provider_key, p.display_name "
+                        "FROM providers p "
+                        "WHERE EXISTS (SELECT 1 FROM usage_events ue WHERE ue.provider_id = p.id AND ue.source_type != "
+                        "'codex_local_rollout') "
+                        "   OR EXISTS (SELECT 1 FROM usage_rollups_daily r WHERE r.provider_id = p.id) "
+                        "   OR EXISTS (SELECT 1 FROM activity_events ae WHERE ae.provider_id = p.id) "
+                        "   OR EXISTS (SELECT 1 FROM quota_snapshots qs WHERE qs.provider_id = p.id) "
+                        "   OR EXISTS (SELECT 1 FROM gap_markers gm WHERE gm.provider_id = p.id) "
+                        "   OR EXISTS (SELECT 1 FROM recovery_checkpoints rc WHERE rc.provider_id = p.id) "
+                        "ORDER BY p.display_name, p.provider_key;");
     if (!result.success()) {
         return;
     }
@@ -825,17 +827,19 @@ void addPersistedAccountOptions(
     const std::string& selectedProviderId,
     std::vector<AnalysisScopeOption>& options,
     std::set<std::string>& seenAccounts) {
-    std::string sql =
-        "SELECT a.account_key, a.display_name, p.display_name "
-        "FROM accounts a "
-        "JOIN providers p ON p.id = a.provider_id "
-        "WHERE ("
-        "    EXISTS (SELECT 1 FROM usage_events ue WHERE ue.account_id = a.id AND ue.source_type != 'codex_local_rollout') "
-        "    OR EXISTS (SELECT 1 FROM activity_events ae WHERE ae.account_id = a.id) "
-        "    OR EXISTS (SELECT 1 FROM quota_snapshots qs WHERE qs.account_id = a.id) "
-        "    OR EXISTS (SELECT 1 FROM gap_markers gm WHERE gm.account_id = a.id) "
-        "    OR EXISTS (SELECT 1 FROM recovery_checkpoints rc WHERE rc.account_id = a.id)"
-        ")";
+    std::string sql = "SELECT a.account_key, a.display_name, p.display_name "
+                      "FROM accounts a "
+                      "JOIN providers p ON p.id = a.provider_id "
+                      "WHERE ("
+                      "    EXISTS (SELECT 1 FROM usage_events ue WHERE ue.account_id = a.id AND ue.source_type != "
+                      "'codex_local_rollout') "
+                      "    OR EXISTS (SELECT 1 FROM usage_rollups_daily r WHERE r.provider_id = a.provider_id AND "
+                      "r.account_id = a.id) "
+                      "    OR EXISTS (SELECT 1 FROM activity_events ae WHERE ae.account_id = a.id) "
+                      "    OR EXISTS (SELECT 1 FROM quota_snapshots qs WHERE qs.account_id = a.id) "
+                      "    OR EXISTS (SELECT 1 FROM gap_markers gm WHERE gm.account_id = a.id) "
+                      "    OR EXISTS (SELECT 1 FROM recovery_checkpoints rc WHERE rc.account_id = a.id)"
+                      ")";
     std::vector<std::string> params;
     if (!selectedProviderId.empty()) {
         sql += " AND p.provider_key = ?";
