@@ -137,7 +137,10 @@ ReportMetadata buildReportMetadata(const DashboardViewModel& viewModel, const Re
     metadata.isStale = metadata.runtimeState == RuntimeState::Stale;
 
     for (const auto& provider : viewModel.providers) {
-        const std::time_t parsed = parseRuntimeTimestamp(provider.lastSyncTime);
+        std::time_t parsed = parseRuntimeTimestamp(provider.lastSyncTime);
+        if (parsed <= 0 && provider.lastKnownQuota) {
+            parsed = parseRuntimeTimestamp(provider.lastKnownQuota->lastSyncTime);
+        }
         if (parsed > 0) {
             const auto syncTime = std::chrono::system_clock::from_time_t(parsed);
             if (!metadata.dataFreshnessTimestamp || syncTime > *metadata.dataFreshnessTimestamp) {
