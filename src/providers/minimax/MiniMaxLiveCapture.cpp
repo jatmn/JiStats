@@ -50,20 +50,40 @@ std::string jsonEscape(const std::string& value) {
     return stream.str();
 }
 
-bool ensureOutputParentDirectory(const std::string& outputPath, std::string& error) {
-    const std::filesystem::path path(outputPath);
-    const std::filesystem::path parent = path.parent_path();
-    if (!parent.empty()) {
-        std::error_code ec;
-        std::filesystem::create_directories(parent, ec);
-        if (ec) {
-            error = "Failed to create output directory: " + parent.string();
-            return false;
+std::optional<std::filesystem::path> prepareCaptureOutputPath(const std::string& outputPath, std::string& error) {
+    std::error_code ec;
+    const auto absolutePath = std::filesystem::absolute(std::filesystem::path(outputPath), ec);
+    if (ec) {
+        error = "Failed to resolve output path: " + outputPath;
+        return std::nullopt;
+    }
+    const auto path = std::filesystem::weakly_canonical(absolutePath, ec);
+    if (ec) {
+        error = "Failed to resolve output path: " + outputPath;
+        return std::nullopt;
+    }
+
+    const auto parent = path.parent_path();
+    for (auto directory = parent; !directory.empty(); directory = directory.parent_path()) {
+        // Recognize a source tree even for an out-of-tree build or an extracted source archive.
+        if (std::filesystem::is_regular_file(directory / "CMakeLists.txt", ec) &&
+            std::filesystem::is_regular_file(directory / "AGENTS.md", ec) &&
+            std::filesystem::is_regular_file(directory / "src/providers/minimax/MiniMaxLiveCapture.cpp", ec)) {
+            error = "Capture output must be outside the JiStats source checkout.";
+            return std::nullopt;
+        }
+        if (directory == directory.root_path()) {
+            break;
         }
     }
 
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+        error = "Failed to create output directory: " + parent.string();
+        return std::nullopt;
+    }
     error.clear();
-    return true;
+    return path;
 }
 
 std::string planDisplayName(const std::string& planKey) {
@@ -321,11 +341,12 @@ bool MiniMaxLiveCapture::writeCaptureJson(
     const MiniMaxCaptureResult& result,
     const std::string& outputPath,
     std::string& error) const {
-    if (!ensureOutputParentDirectory(outputPath, error)) {
+    const auto path = prepareCaptureOutputPath(outputPath, error);
+    if (!path) {
         return false;
     }
 
-    std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+    std::ofstream output(*path, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
         error = "Failed to open output path: " + outputPath;
         return false;
@@ -385,11 +406,12 @@ bool MiniMaxLiveCapture::writeDiagnosticJson(
     const MiniMaxDiagnosticReport& report,
     const std::string& outputPath,
     std::string& error) const {
-    if (!ensureOutputParentDirectory(outputPath, error)) {
+    const auto path = prepareCaptureOutputPath(outputPath, error);
+    if (!path) {
         return false;
     }
 
-    std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+    std::ofstream output(*path, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
         error = "Failed to open output path: " + outputPath;
         return false;

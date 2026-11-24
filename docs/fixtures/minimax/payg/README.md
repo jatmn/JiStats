@@ -47,4 +47,4 @@ The current dedicated-key validation shows:
 
 That means the currently validated PAYG usage signal is immediate per-request usage plus published pricing, not a separately validated aggregate usage-history API.
 
-The capture helper writes raw output under `%LOCALAPPDATA%/JiStats/captures/minimax/payg` by default. Keep those files local.
+The capture helper writes raw output under `%LOCALAPPDATA%/JiStats/captures/minimax/payg` by default. Use `-OutputDir` for a different location outside the source checkout. Paths inside the source checkout are rejected.

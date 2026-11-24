@@ -408,6 +408,31 @@ TEST_CASE("MiniMax live capture writes a diagnostic report with plan state and c
     CHECK(json.find(MiniMaxAdapter::buildSecretRef(codingProfile)) != std::string::npos);
 }
 
+TEST_CASE("MiniMax capture writers keep output outside source trees", "[minimax][live_capture]") {
+    const TempTestDirectory temp("jistats_minimax_capture_boundary");
+    const auto source = temp.path() / "checkout";
+    const auto markers = source / "src/providers/minimax";
+    std::filesystem::create_directories(markers);
+    REQUIRE(std::ofstream(source / "CMakeLists.txt").is_open());
+    REQUIRE(std::ofstream(source / "AGENTS.md").is_open());
+    REQUIRE(std::ofstream(markers / "MiniMaxLiveCapture.cpp").is_open());
+
+    MiniMaxLiveCapture capture(makeFakeCredentialStore());
+    std::string error;
+    const auto privateOutput = source / "captures";
+    CHECK_FALSE(capture.writeCaptureJson({}, (privateOutput / "quota.json").string(), error));
+    CHECK(error == "Capture output must be outside the JiStats source checkout.");
+    CHECK_FALSE(capture.writeDiagnosticJson({}, (privateOutput / "diagnostics.json").string(), error));
+    CHECK(error == "Capture output must be outside the JiStats source checkout.");
+    CHECK_FALSE(std::filesystem::exists(privateOutput));
+
+    const auto sibling = temp.path() / "checkout-captures";
+    REQUIRE(capture.writeCaptureJson({}, (sibling / "quota.json").string(), error));
+    REQUIRE(capture.writeDiagnosticJson({}, (sibling / "diagnostics.json").string(), error));
+    CHECK(std::filesystem::is_regular_file(sibling / "quota.json"));
+    CHECK(std::filesystem::is_regular_file(sibling / "diagnostics.json"));
+}
+
 TEST_CASE("MiniMax live capture surfaces database open failures distinctly during readiness inspection",
           "[minimax][live_capture]") {
     requireSqlite();
