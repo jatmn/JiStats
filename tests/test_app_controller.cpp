@@ -2625,6 +2625,64 @@ TEST_CASE("AppController binds MiniMax validation to the submitted credential", 
     CHECK(profiles.getString(0, 1).empty());
 }
 
+TEST_CASE("AppController restores separate MiniMax results after reverse completion", "[app][minimax]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    auto store = std::make_shared<WindowsCredentialStore>(makeFakeCredentialBackend());
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(std::make_shared<MiniMaxAdapter>());
+
+    AppController app;
+    std::promise<void> releaseCodingPlan;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setMiniMaxCredentialStoreForTesting(store);
+    app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+    app.setMiniMaxValidationReleaseForTesting(releaseCodingPlan.get_future().share());
+    REQUIRE(app.init());
+
+    DashboardMiniMaxCredentialRequest coding;
+    coding.action = DashboardMiniMaxCredentialAction::Validate;
+    coding.planKey = "coding_plan";
+    coding.secret = "synthetic-coding";
+    REQUIRE(app.submitMiniMaxCredentialActionForTesting(coding));
+
+    app.setMiniMaxValidationResponseForTesting(true, 200, R"({"base_resp":{"status_code":0}})", "");
+    app.setMiniMaxValidationReleaseForTesting({});
+    auto token = coding;
+    token.planKey = "token_plan";
+    token.secret = "synthetic-token";
+    REQUIRE(app.submitMiniMaxCredentialActionForTesting(token));
+    REQUIRE(waitForCondition([&app]() {
+        return app.getMiniMaxValidationStateForTesting("token_plan") == std::optional<std::string>("valid");
+    }));
+    CHECK(app.getMiniMaxValidationStateForTesting("coding_plan") == std::optional<std::string>("pending"));
+    releaseCodingPlan.set_value();
+    app.waitForMiniMaxValidationForTesting();
+    CHECK(app.getMiniMaxValidationStateForTesting("coding_plan") == std::optional<std::string>("invalid"));
+    app.shutdown();
+
+    AppController restarted;
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    restarted.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(restarted.init());
+    const auto dashboard = restarted.getDashboardViewModelForTesting();
+    const auto restoredCoding = findMiniMaxSummary(dashboard, "coding_plan");
+    const auto restoredToken = findMiniMaxSummary(dashboard, "token_plan");
+    REQUIRE(restoredCoding.has_value());
+    REQUIRE(restoredToken.has_value());
+    CHECK(restoredCoding->validationState == "invalid");
+    CHECK(restoredCoding->lastValidationError == "MiniMax subscription key rejected");
+    CHECK(restoredToken->validationState == "valid");
+    CHECK(restoredToken->lastValidationError.empty());
+    CHECK_FALSE(restoredCoding->lastValidatedAtLabel.empty());
+    CHECK_FALSE(restoredToken->lastValidatedAtLabel.empty());
+    restarted.shutdown();
+}
+
 TEST_CASE("AppController reports missing MiniMax secrets from hydrated metadata in the settings shell", "[app][shell][minimax]") {
     requireSqlite();
 
