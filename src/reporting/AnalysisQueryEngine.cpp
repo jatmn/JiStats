@@ -1863,7 +1863,13 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
 
         std::map<std::string, AnalysisQuotaTrendSeries> quotaSeriesByKey;
         std::map<std::string, std::optional<std::pair<std::time_t, std::time_t>>> previousWindowsByKey;
-        std::map<std::string, std::optional<double>> rollupLowWaterBySeriesKey;
+        std::map<std::string, double> rollupLowWaterBySeriesKey;
+        const auto rememberLowWater = [&](const std::string& key, double percentage) {
+            auto [entry, inserted] = rollupLowWaterBySeriesKey.try_emplace(key, percentage);
+            if (!inserted) {
+                entry->second = std::min(entry->second, percentage);
+            }
+        };
         const auto configureQuotaSeries =
             [&](AnalysisQuotaTrendSeries& series,
                 const std::optional<int>& planId,
@@ -1908,11 +1914,16 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
                 utcDayStart(window.start),
                 utcDayStart(window.end));
             for (const auto& rollup : quotaRollups) {
+                const std::string seriesKey = quotaSeriesKey(rollup.planId, rollup.quotaDimension);
+                if (rollup.lowWaterRemainingValue && rollup.lowWaterLimitValue && *rollup.lowWaterLimitValue > 0 &&
+                    rollup.latestSnapshotTime <= window.end) {
+                    rememberLowWater(seriesKey, 100.0 * static_cast<double>(*rollup.lowWaterRemainingValue) /
+                                                    *rollup.lowWaterLimitValue);
+                }
                 if (!rollup.latestLimitValue || *rollup.latestLimitValue <= 0) {
                     continue;
                 }
 
-                const std::string seriesKey = quotaSeriesKey(rollup.planId, rollup.quotaDimension);
                 const long long limitValue = *rollup.latestLimitValue;
                 const long long remainingValue = rollup.latestRemainingValue.has_value()
                     ? std::clamp(*rollup.latestRemainingValue, 0LL, limitValue)
@@ -1942,21 +1953,33 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
                 point.reconciled = rollup.reconciledSampleCount > 0;
                 point.dailyRollup = true;
                 series.points.push_back(std::move(point));
-
-                if (rollup.lowWaterRemainingValue.has_value() &&
-                    rollup.lowWaterLimitValue.has_value() &&
-                    *rollup.lowWaterLimitValue > 0) {
-                    const double lowWaterPercentage =
-                        (static_cast<double>(*rollup.lowWaterRemainingValue) /
-                         static_cast<double>(*rollup.lowWaterLimitValue)) * 100.0;
-                    auto& existing = rollupLowWaterBySeriesKey[seriesKey];
-                    if (!existing.has_value() || lowWaterPercentage < *existing) {
-                        existing = lowWaterPercentage;
-                    }
-                }
             }
             quotaHistoryUsesRollups = !quotaSeriesByKey.empty();
             if (quotaHistoryUsesRollups) {
+                // An older rollup may have saved the minimum count. Retained raw readings can
+                // establish a lower percentage without replacing history or transferring all samples.
+                const auto retainedMinima = storage_->execute(
+                    "SELECT COALESCE(qs.plan_id, 0), "
+                    "CASE WHEN pl.plan_key = 'openai_subscription_codex_local' OR "
+                    "pl.plan_key GLOB 'openai_subscription_codex_local:*' THEN 'percent' "
+                    "ELSE COALESCE(NULLIF(qs.quota_dimension, ''), 'requests') END, "
+                    "MIN(100.0 * MAX(0, MIN(qs.limit_value, "
+                    "COALESCE(qs.remaining_value, qs.limit_value - qs.used_value))) / qs.limit_value) "
+                    "FROM quota_snapshots qs LEFT JOIN plans pl ON pl.id = qs.plan_id AND pl.account_id = "
+                    "qs.account_id "
+                    "WHERE qs.provider_id = ? AND qs.account_id = ? AND qs.snapshot_time_utc BETWEEN ? AND ? "
+                    "AND qs.limit_value > 0 GROUP BY 1, 2;",
+                    {std::to_string(scopedProviderAccountIds->providerId),
+                     std::to_string(scopedProviderAccountIds->accountId), formatTimeUtcIso(window.start),
+                     formatTimeUtcIso(window.end)});
+                if (retainedMinima.success()) {
+                    for (size_t row = 0; row < retainedMinima.rowCount(); ++row) {
+                        rememberLowWater(
+                            quotaSeriesKey(retainedMinima.getInt(row, 0), retainedMinima.getString(row, 1)),
+                            retainedMinima.getDouble(row, 2));
+                    }
+                }
+
                 // Rollup bounds cannot be filtered within a day. Read raw evidence for partial and unrepresented days.
                 constexpr std::time_t daySeconds = 86400;
                 const auto firstDay = utcDayStart(window.start);
@@ -2036,12 +2059,11 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
             series.latestRemainingValue = latest.remainingValue;
             series.limitValue = latest.limitValue;
 
-            const auto lowWaterOverrideIt = rollupLowWaterBySeriesKey.find(entry.first);
-            if (lowWaterOverrideIt != rollupLowWaterBySeriesKey.end() &&
-                lowWaterOverrideIt->second.has_value()) {
-                series.lowWaterRemainingPercentage = *lowWaterOverrideIt->second;
-            } else {
-                series.lowWaterRemainingPercentage = lowWaterIt->remainingPercentage;
+            series.lowWaterRemainingPercentage = lowWaterIt->remainingPercentage;
+            const auto savedLowWater = rollupLowWaterBySeriesKey.find(entry.first);
+            if (savedLowWater != rollupLowWaterBySeriesKey.end()) {
+                series.lowWaterRemainingPercentage =
+                    std::min(series.lowWaterRemainingPercentage, savedLowWater->second);
             }
 
             if (!quotaHistoryUsesRollups) {
