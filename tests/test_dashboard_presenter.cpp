@@ -372,6 +372,7 @@ TEST_CASE("DashboardPresenter tabs through visible Settings controls", "[dashboa
     DashboardPresenter presenter;
     auto model = makeQuotaViewModel();
     model.preferences.startupEnabled = false;
+    model.preferences.scheduledExportEnabled = false;
     presenter.updateViewModel(model);
     REQUIRE(presenter.init());
     REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
@@ -391,18 +392,60 @@ TEST_CASE("DashboardPresenter tabs through visible Settings controls", "[dashboa
     const HWND overlay = FindWindowExW(settings, nullptr, L"Button", L"Enable taskbar overlay");
     const HWND startup = FindWindowExW(settings, nullptr, L"Button", L"Start with Windows");
     const HWND scheduled = FindWindowExW(settings, nullptr, L"Button", L"Enable scheduled HTML export");
+    const HWND close = FindWindowExW(settings, nullptr, L"Button", L"Close");
+    REQUIRE(close != nullptr);
     REQUIRE(tab != nullptr);
     REQUIRE(overlay != nullptr);
     REQUIRE(startup != nullptr);
     REQUIRE(scheduled != nullptr);
     REQUIRE(waitForCondition([&]() { return focusedControl() == tab; }));
 
-    REQUIRE(PostMessageW(tab, WM_KEYDOWN, VK_TAB, 0));
-    REQUIRE(waitForCondition([&]() { return focusedControl() == overlay; }));
-    REQUIRE(PostMessageW(overlay, WM_KEYDOWN, VK_TAB, 0));
-    REQUIRE(waitForCondition([&]() { return focusedControl() == startup; }));
-    REQUIRE(PostMessageW(startup, WM_KEYDOWN, VK_TAB, 0));
-    CHECK(waitForCondition([&]() { return focusedControl() == scheduled; }));
+    const auto tabTo = [&](HWND current, HWND next) {
+        return PostMessageW(current, WM_KEYDOWN, VK_TAB, 0) &&
+               waitForCondition([&]() { return focusedControl() == next; });
+    };
+    const auto shiftTabTo = [&](HWND current, HWND next) {
+        const DWORD testThread = GetCurrentThreadId();
+        if (!AttachThreadInput(testThread, settingsThread, TRUE)) {
+            return false;
+        }
+        BYTE keys[256]{};
+        keys[VK_SHIFT] = 0x80;
+        const bool moved = SetKeyboardState(keys) && tabTo(current, next);
+        keys[VK_SHIFT] = 0;
+        SetKeyboardState(keys);
+        AttachThreadInput(testThread, settingsThread, FALSE);
+        return moved;
+    };
+
+    SECTION("General skips disabled controls and wraps backwards") {
+        REQUIRE(tabTo(tab, overlay));
+        REQUIRE(tabTo(overlay, startup));
+        REQUIRE(tabTo(startup, scheduled));
+        REQUIRE(tabTo(scheduled, close));
+        REQUIRE(tabTo(close, tab));
+        REQUIRE(shiftTabTo(tab, close));
+        CHECK(shiftTabTo(close, scheduled));
+    }
+
+    SECTION("MiniMax keeps focus when pending validation disables its action buttons") {
+        REQUIRE(presenter.selectPreferencesTabForTesting(2));
+        const HWND validate = FindWindowExW(settings, nullptr, L"Button", L"Validate");
+        REQUIRE(validate != nullptr);
+        REQUIRE(waitForCondition([&]() { return IsWindowVisible(validate) != FALSE; }));
+        REQUIRE(shiftTabTo(tab, close));
+        REQUIRE(shiftTabTo(close, validate));
+
+        MiniMaxCredentialProfileSummary pending;
+        pending.planKey = "coding_plan";
+        pending.validationState = "pending";
+        model.minimaxCredentialProfiles = {pending};
+        presenter.updateViewModel(model);
+
+        REQUIRE(waitForCondition([&]() { return !IsWindowEnabled(validate); }));
+        CHECK(focusedControl() == close);
+        CHECK(tabTo(close, tab));
+    }
 }
 
 TEST_CASE("DashboardPresenter routes the separate Codex attribution checkbox",

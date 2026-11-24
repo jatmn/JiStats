@@ -3757,6 +3757,10 @@ public:
             }
             const bool validationPending =
                 selectedSummary != nullptr && selectedSummary->validationState == "pending";
+            if (const HWND focus = GetFocus();
+                validationPending && focus != nullptr && (focus == saveButton || focus == validateButton)) {
+                SetFocus(preferencesCloseButton);
+            }
             if (saveButton != nullptr) {
                 EnableWindow(saveButton, validationPending ? FALSE : TRUE);
             }
