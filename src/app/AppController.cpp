@@ -1468,21 +1468,20 @@ void appendAccountFilterClause(
     sql += ")";
 }
 
-std::optional<std::pair<std::time_t, std::time_t>> fullyCoveredDailyRange(
-    std::time_t from,
-    std::time_t to) {
+std::optional<std::pair<std::time_t, std::time_t>> fullyCoveredDailyRange(std::time_t from, std::time_t to) {
     if (from > to) {
         return std::nullopt;
     }
 
+    constexpr std::time_t kSecondsPerDay = 86400;
     std::time_t startDay = utcDayStart(from);
     if (from > startDay) {
-        startDay += 86400;
+        startDay += kSecondsPerDay;
     }
 
     std::time_t endDay = utcDayStart(to);
-    if (to == endDay) {
-        endDay -= 86400;
+    if (to - endDay < kSecondsPerDay - 1) {
+        endDay -= kSecondsPerDay;
     }
 
     if (endDay < startDay) {
@@ -1567,12 +1566,14 @@ ReportAggregateData buildReportAggregateData(
         bucket.totalCostMinorUnits += totalCostMinorUnits;
     };
 
+    bool containsBackfilledData = false;
     auto accumulateDailyBuckets = [&](const QueryResult& result,
                                       std::map<std::string, ReportSummaryBucket>& buckets) {
         if (!result.success()) {
             return;
         }
         for (size_t row = 0; row < result.rowCount(); ++row) {
+            containsBackfilledData = containsBackfilledData || result.getInt64(row, 4) > 0;
             appendDailyBucket(
                 buckets,
                 result.getString(row, 0),
@@ -1590,13 +1591,13 @@ ReportAggregateData buildReportAggregateData(
             return;
         }
 
-        std::string sql =
-            "SELECT substr(ue.event_time_utc, 1, 10), COUNT(*), "
-            "COALESCE(SUM(ue.total_tokens), 0), COALESCE(SUM(ue.cost_minor_units), 0) "
-            "FROM usage_events ue "
-            "JOIN providers p ON p.id = ue.provider_id "
-            "JOIN accounts a ON a.id = ue.account_id "
-            "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
+        std::string sql = "SELECT substr(ue.event_time_utc, 1, 10), COUNT(*), "
+                          "COALESCE(SUM(ue.total_tokens), 0), COALESCE(SUM(ue.cost_minor_units), 0), "
+                          "MAX(CASE WHEN ue.is_backfilled = 1 THEN 1 ELSE 0 END) "
+                          "FROM usage_events ue "
+                          "JOIN providers p ON p.id = ue.provider_id "
+                          "JOIN accounts a ON a.id = ue.account_id "
+                          "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
         std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
         appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
         sql += " AND ue.source_type != 'codex_local_rollout'";
@@ -1621,15 +1622,14 @@ ReportAggregateData buildReportAggregateData(
             return;
         }
 
-        std::string sql =
-            "SELECT substr(r.rollup_period_start_utc, 1, 10), "
-            "COALESCE(SUM(r.request_count), 0), "
-            "COALESCE(SUM(r.total_tokens), 0), "
-            "COALESCE(SUM(r.total_cost_minor_units), 0) "
-            "FROM usage_rollups_daily r "
-            "JOIN providers p ON p.id = r.provider_id "
-            "JOIN accounts a ON a.id = r.account_id "
-            "WHERE r.rollup_period_start_utc >= ? AND r.rollup_period_start_utc <= ?";
+        std::string sql = "SELECT substr(r.rollup_period_start_utc, 1, 10), "
+                          "COALESCE(SUM(r.request_count), 0), "
+                          "COALESCE(SUM(r.total_tokens), 0), "
+                          "COALESCE(SUM(r.total_cost_minor_units), 0), MAX(r.backfilled_request_count) "
+                          "FROM usage_rollups_daily r "
+                          "JOIN providers p ON p.id = r.provider_id "
+                          "JOIN accounts a ON a.id = r.account_id "
+                          "WHERE r.rollup_period_start_utc >= ? AND r.rollup_period_start_utc <= ?";
         std::vector<std::string> params{formatTimeUtcIso(fromDayStart), formatTimeUtcIso(toDayStart)};
         appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
         sql += " GROUP BY substr(r.rollup_period_start_utc, 1, 10) ORDER BY substr(r.rollup_period_start_utc, 1, 10) ASC;";
@@ -1978,6 +1978,7 @@ ReportAggregateData buildReportAggregateData(
         sortBreakdowns(aggregateData.modelBreakdown);
     }
 
+    bool gapMarkersLoaded = false;
     long long reconstructedGapCount = 0;
     long long unknownGapCount = 0;
     {
@@ -1990,10 +1991,10 @@ ReportAggregateData buildReportAggregateData(
             "JOIN accounts a ON a.id = gm.account_id "
             "WHERE gm.period_end_utc >= ? AND gm.period_start_utc <= ?";
         std::vector<std::string> params{fromIso, toIso};
-        appendProviderFilterClause(sql, params, providerKeys, "p.provider_key");
-        appendAccountFilterClause(sql, params, accountIds, "a.account_key");
+        appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
         QueryResult result = storage.execute(sql, params);
         if (result.success() && result.rowCount() > 0) {
+            gapMarkersLoaded = true;
             reconstructedGapCount = result.getInt64(0, 0);
             unknownGapCount = result.getInt64(0, 1);
         }
@@ -2014,16 +2015,20 @@ ReportAggregateData buildReportAggregateData(
             // The legacy OpenAI and MiniMax adapters wrote these outcomes without querying history.
             "WHERE rc.sync_kind = ? AND NOT (rc.fetched_event_count = 0 AND ("
             "(p.provider_key = 'openai' AND rc.outcome = 'no_data') OR "
-            "(p.provider_key = 'minimax' AND rc.outcome = 'fetch_failed')))";
-        std::vector<std::string> params{kRuntimeBackfillSyncKind};
-        appendProviderFilterClause(sql, params, providerKeys, "p.provider_key");
-        appendAccountFilterClause(sql, params, accountIds, "a.account_key");
+            "(p.provider_key = 'minimax' AND rc.outcome = 'fetch_failed'))) "
+            "AND rc.recovery_end_utc >= ? AND rc.recovery_start_utc <= ?";
+        std::vector<std::string> params{kRuntimeBackfillSyncKind, fromIso, toIso};
+        appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
         QueryResult result = storage.execute(sql, params);
         if (result.success() && result.rowCount() > 0) {
             importedBackfillCount = result.getInt64(0, 0);
             mismatchCount = result.getInt64(0, 1);
             failedBackfillCount = result.getInt64(0, 2);
         }
+    }
+
+    if (gapMarkersLoaded) {
+        aggregateData.recoveryCoverage = ReportRecoveryCoverage{containsBackfilledData, unknownGapCount > 0};
     }
 
     std::ostringstream summary;
@@ -2078,7 +2083,7 @@ ReportAggregateData buildReportAggregateData(
         wroteSummary = true;
     }
     if (!wroteSummary) {
-        if (metadata.containsBackfilledData || metadata.containsUnknownGaps) {
+        if (!aggregateData.recoveryCoverage && (metadata.containsBackfilledData || metadata.containsUnknownGaps)) {
             summary << "Current quotas indicate backfilled or gap-affected data within the report scope.";
         } else {
             summary << "No persisted gap or recovery warnings were found for the current report scope.";
@@ -5577,7 +5582,7 @@ public:
         DashboardHtmlExportResult result;
 
         const DashboardPreferences preferences = currentDashboardPreferences();
-        const std::time_t requestedAt = std::time(nullptr);
+        const std::time_t requestedAt = currentTime();
         ReportRequest request =
             buildAnalysisScopedHtmlExportRequest(preferences, outputPath, requestedAt);
 

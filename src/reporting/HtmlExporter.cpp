@@ -423,8 +423,12 @@ std::string HtmlExporter::generateHtml(const DashboardViewModel& viewModel,
     // Backfill status
     html << "                <div class=\"metadata-item\">\n";
     html << "                    <div class=\"label\">Backfill Status</div>\n";
-    std::string backfillBadgeClass = metadata.containsBackfilledData ? "badge-backfill" : 
-                                    (metadata.containsUnknownGaps ? "badge-unknown" : "badge-fresh");
+    const char* backfillBadgeClass = "badge-fresh";
+    if (metadata.containsUnknownGaps) {
+        backfillBadgeClass = "badge-unknown";
+    } else if (metadata.containsBackfilledData) {
+        backfillBadgeClass = "badge-backfill";
+    }
     std::string backfillLabel = metadata.backfillLabel();
     html << "                    <div class=\"value\"><span class=\"badge " << backfillBadgeClass << "\">" << pImpl->escapeHtml(backfillLabel) << "</span></div>\n";
     html << "                </div>\n";
