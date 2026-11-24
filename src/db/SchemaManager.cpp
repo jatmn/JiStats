@@ -15,6 +15,7 @@ namespace JiStats {
 namespace {
 constexpr int kBaselineVersion = 12;
 constexpr int kClaudeRedactionVersion = 13;
+constexpr int kChatGptDedupVersion = 14;
 }
 
 class SchemaManager::Impl {
@@ -48,7 +49,7 @@ int SchemaManager::getCurrentVersion() const {
 }
 
 int SchemaManager::getLatestVersion() const {
-    int latest = kClaudeRedactionVersion;
+    int latest = kChatGptDedupVersion;
     try {
         for (const auto& entry : std::filesystem::directory_iterator(pImpl->migrationsPath)) {
             const std::string name = entry.path().filename().string();
@@ -391,6 +392,10 @@ std::optional<int> SchemaManager::getRejectedVersion() const {
 }
 
 std::string SchemaManager::loadMigration(int version) const {
+    if (version == kChatGptDedupVersion) {
+        return kChatGptDedupSql;
+    }
+
     // Build the version prefix (e.g. "001")
     std::ostringstream prefixStream;
     prefixStream << std::setfill('0') << std::setw(3) << version;

@@ -10,6 +10,9 @@ inline constexpr char kBaselineSchemaSql[] =
 inline constexpr char kClaudeRedactionSql[] =
     R"jistats_sql(@JISTATS_CLAUDE_REDACTION_SQL@)jistats_sql";
 
+inline constexpr char kChatGptDedupSql[] =
+    R"jistats_sql(@JISTATS_CHATGPT_DEDUP_SQL@)jistats_sql";
+
 // Use the same DDL for fresh and historical version 12 databases.
 inline constexpr std::string_view kBaselineSchema(kBaselineSchemaSql);
 inline constexpr auto kRecoveryAndExportStart = kBaselineSchema.find("-- Recovery and export metadata");

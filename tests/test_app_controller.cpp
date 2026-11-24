@@ -1166,7 +1166,7 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     StorageService storage;
     REQUIRE(storage.init(dbPath.path()));
     REQUIRE(storage.execute("PRAGMA main.journal_mode = WAL;").getString(0, 0) == "wal");
-    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version >= 13;").success());
     storage.close();
 
     sqlite3* raw = nullptr;
@@ -1196,7 +1196,7 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     CHECK(stage == std::future_status::timeout);
     CHECK_FALSE(app.getDashboardViewModelForTesting().startupPending);
     REQUIRE(storage.init(dbPath.path()));
-    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 13);
+    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 14);
 #else
     requireSqlite();
 #endif

@@ -32,7 +32,7 @@ The freshness check considers WAL and SHM sidecars. Overview uses 5-minute model
 
 Extract the official export. In **File → Import OpenAI Export…**, select the extracted `conversations.json`. Keep at least one recognized companion file beside it (`chat.html`, `message_feedback.json`, or `user.json`). The [importer](../../src/providers/openai/OpenAIExportImport.cpp) accepts the extracted directory or its `conversations.json`. The app picker selects the JSON file. Raw ZIP import is deferred.
 
-The importer records timestamped user messages as historical activity. Later exports add only new conversation and message IDs, even if the export folder name or date coverage changes. Live quota, reset times, and exact token or cost totals come from their own sources. Use the [export fixture and redaction note](../fixtures/openai/chatgpt-export-derived-fixture-note.md) and the [augmentation fixture checklist](../fixtures/openai/subscription-augmentation-fixture-guide.md) when changing the parser or import flow.
+The importer records timestamped user messages as historical activity. Later exports add only new conversation and message IDs, even if the export folder name or date coverage changes. When JiStats upgrades an existing database, it removes repeated ChatGPT import rows and keeps the first saved row for each message. Live quota, reset times, and exact token or cost totals come from their own sources. Use the [export fixture and redaction note](../fixtures/openai/chatgpt-export-derived-fixture-note.md) and the [augmentation fixture checklist](../fixtures/openai/subscription-augmentation-fixture-guide.md) when changing the parser or import flow.
 
 ## Organization usage and costs
 
