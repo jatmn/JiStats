@@ -44,6 +44,7 @@
 #include "taskbar/TaskbarPresenter.hpp"
 #include "app_controller_test_support.hpp"
 #include "runtime_test_support.hpp"
+#include "settings_window_test_support.hpp"
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
 
@@ -1544,7 +1545,7 @@ TEST_CASE("AppController applies a custom Analysis edit alongside a Settings cha
     REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
     HWND overlay = nullptr;
     REQUIRE(waitForCondition([&]() {
-        overlay = GetDlgItem(FindWindowW(L"JiStatsPreferencesWindow", nullptr), 1101);
+        overlay = GetDlgItem(settingsPage(FindWindowW(L"JiStatsPreferencesWindow", nullptr)), 1101);
         return overlay != nullptr;
     }));
 
@@ -1632,8 +1633,8 @@ TEST_CASE("AppController keeps Settings edits through a stale provider refresh",
     HWND exportPath = nullptr;
     REQUIRE(waitForCondition([&]() {
         settingsWindow = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
-        overlay = GetDlgItem(settingsWindow, 1101);
-        exportPath = GetDlgItem(settingsWindow, 1115);
+        overlay = GetDlgItem(settingsPage(settingsWindow), 1101);
+        exportPath = GetDlgItem(settingsPage(settingsWindow), 1115);
         return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences) && overlay != nullptr &&
                SendMessageW(overlay, BM_GETCHECK, 0, 0) == BST_CHECKED && exportPath != nullptr &&
                IsWindowEnabled(exportPath);
@@ -1703,7 +1704,7 @@ TEST_CASE("AppController reports and retries a rejected Settings save while keep
         [&app]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
     REQUIRE(app.selectDashboardPreferencesTabForTesting(1));
     const HWND window = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
-    const HWND tracking = GetDlgItem(window, 1102);
+    const HWND tracking = GetDlgItem(settingsPage(window), 1102);
     const HWND saveStatus = GetDlgItem(window, 1122);
     const HWND retry = GetDlgItem(window, 1123);
     REQUIRE(tracking != nullptr);
@@ -1776,8 +1777,8 @@ TEST_CASE("AppController schedules exports only after an accepted Settings save"
     REQUIRE(waitForCondition(
         [&]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
     const HWND window = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
-    const HWND overlay = GetDlgItem(window, 1101);
-    const HWND schedule = GetDlgItem(window, 1108);
+    const HWND overlay = GetDlgItem(settingsPage(window), 1101);
+    const HWND schedule = GetDlgItem(settingsPage(window), 1108);
     const HWND saveStatus = GetDlgItem(window, 1122);
     const HWND retry = GetDlgItem(window, 1123);
     REQUIRE(overlay != nullptr);
@@ -1849,8 +1850,8 @@ TEST_CASE("AppController restores quota after queued provider tracking is turned
     HWND tracking = nullptr;
     REQUIRE(waitForCondition([&]() {
         settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
-        overlay = GetDlgItem(settings, 1101);
-        tracking = GetDlgItem(settings, 1102);
+        overlay = GetDlgItem(settingsPage(settings), 1101);
+        tracking = GetDlgItem(settingsPage(settings), 1102);
         return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences) && overlay != nullptr &&
                SendMessageW(overlay, BM_GETCHECK, 0, 0) == BST_CHECKED && tracking != nullptr &&
                SendMessageW(tracking, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -1914,7 +1915,7 @@ TEST_CASE("AppController skips new quota requests after Settings dequeues an opt
 
     HWND checkbox = nullptr;
     REQUIRE(waitForCondition([&]() {
-        checkbox = GetDlgItem(FindWindowW(L"JiStatsPreferencesWindow", nullptr), 1102);
+        checkbox = GetDlgItem(settingsPage(FindWindowW(L"JiStatsPreferencesWindow", nullptr)), 1102);
         return checkbox != nullptr && SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
     }));
     const int fetchedBeforeOptOut = openai->getQuotaFetchCount();
@@ -2296,9 +2297,9 @@ TEST_CASE("AppController shows the accepted MiniMax account name after saving a 
         [&app]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
     REQUIRE(app.selectDashboardPreferencesTabForTesting(2));
     const HWND window = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
-    const HWND name = GetDlgItem(window, 1111);
-    const HWND secret = GetDlgItem(window, 1112);
-    const HWND save = GetDlgItem(window, 1113);
+    const HWND name = GetDlgItem(settingsPage(window), 1111);
+    const HWND secret = GetDlgItem(settingsPage(window), 1112);
+    const HWND save = GetDlgItem(settingsPage(window), 1113);
     REQUIRE(name != nullptr);
     REQUIRE(secret != nullptr);
     REQUIRE(save != nullptr);
@@ -5365,12 +5366,13 @@ TEST_CASE("AppController preserves queued Codex revocation and retries a failed 
         [&app]() { return app.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
     const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
     REQUIRE(settings != nullptr);
-    const HWND startup = FindWindowExW(settings, nullptr, L"Button", L"Start with Windows");
+    const HWND startup = FindWindowExW(settingsPage(settings), nullptr, L"Button", L"Start with Windows");
     REQUIRE(startup != nullptr);
 
     const auto selectAttributionTab = [&]() {
         REQUIRE(app.selectDashboardPreferencesTabForTesting(1));
-        const HWND checkbox = FindWindowExW(settings, nullptr, L"Button", L"Enable Codex model attribution");
+        const HWND checkbox =
+            FindWindowExW(settingsPage(settings), nullptr, L"Button", L"Enable Codex model attribution");
         REQUIRE(checkbox != nullptr);
         REQUIRE(waitForCondition([checkbox]() { return IsWindowVisible(checkbox) != FALSE; }));
         return checkbox;

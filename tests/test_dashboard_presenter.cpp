@@ -24,9 +24,12 @@
 #include "db/StorageService.hpp"
 #include "gui/AnalysisPresenter.hpp"
 #include "gui/DashboardPresenter.hpp"
+#include "settings_window_test_support.hpp"
 #include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::settingsPage;
+using JiStats::TestSupport::settingsViewport;
 using JiStats::TestSupport::TempTestDirectory;
 
 namespace {
@@ -368,6 +371,106 @@ TEST_CASE("DashboardPresenter syncs scheduled export controls from the view mode
     presenter.shutdown();
 }
 
+TEST_CASE("DashboardPresenter rescales Settings fonts and controls on a DPI change",
+          "[dashboard_presenter][settings]") {
+    DashboardPresenter presenter;
+    REQUIRE(presenter.init());
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(
+        waitForCondition([&]() { return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+
+    const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    REQUIRE(settings != nullptr);
+    const HWND checkbox = FindWindowExW(settingsPage(settings), nullptr, L"Button", L"Enable taskbar overlay");
+    const HWND close = FindWindowExW(settings, nullptr, L"Button", L"Close");
+    REQUIRE(checkbox != nullptr);
+    REQUIRE(close != nullptr);
+
+    const UINT initialDpi = GetDpiForWindow(settings);
+    REQUIRE(initialDpi != 0);
+    const auto height = [](HWND control) {
+        RECT bounds{};
+        REQUIRE(GetWindowRect(control, &bounds));
+        return bounds.bottom - bounds.top;
+    };
+    const auto fontHeight = [](HWND control) {
+        const HGDIOBJ font = reinterpret_cast<HGDIOBJ>(SendMessageW(control, WM_GETFONT, 0, 0));
+        LOGFONTW info{};
+        REQUIRE(GetObjectW(font, sizeof(info), &info) == sizeof(info));
+        return -info.lfHeight;
+    };
+    CHECK(height(checkbox) == MulDiv(22, initialDpi, 96));
+    CHECK(fontHeight(checkbox) == MulDiv(9, initialDpi, 72));
+
+    RECT original{};
+    REQUIRE(GetWindowRect(settings, &original));
+    const UINT largerDpi = initialDpi * 2;
+    SendMessageW(settings, WM_DPICHANGED, MAKEWPARAM(largerDpi, largerDpi), reinterpret_cast<LPARAM>(&original));
+
+    CHECK(height(checkbox) == MulDiv(22, largerDpi, 96));
+    CHECK(height(close) == MulDiv(28, largerDpi, 96));
+    CHECK(fontHeight(checkbox) == MulDiv(9, largerDpi, 72));
+    CHECK(fontHeight(close) == fontHeight(checkbox));
+
+    // Simulate the size cap on a 200% display with a short work area.
+    RECT bounds{};
+    REQUIRE(GetWindowRect(settings, &bounds));
+    const int crampedHeight = std::min(720L, bounds.bottom - bounds.top);
+    REQUIRE(SetWindowPos(settings, nullptr, 0, 0, bounds.right - bounds.left, crampedHeight,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+    const HWND viewport = settingsViewport(settings);
+    const HWND lastRun = FindWindowExW(settingsPage(settings), nullptr, L"STATIC", L"Last Run:");
+    REQUIRE(viewport != nullptr);
+    REQUIRE(lastRun != nullptr);
+    RECT viewportBounds{};
+    RECT lastRunBounds{};
+    RECT footerBefore{};
+    REQUIRE(GetWindowRect(viewport, &viewportBounds));
+    REQUIRE(GetWindowRect(lastRun, &lastRunBounds));
+    REQUIRE(GetWindowRect(close, &footerBefore));
+    CHECK(lastRunBounds.bottom > viewportBounds.bottom);
+    CHECK(footerBefore.top >= viewportBounds.bottom);
+
+    // The tab must leave the page controls visible to the window manager.
+    const HDC checkboxDc = GetDC(checkbox);
+    REQUIRE(checkboxDc != nullptr);
+    RECT visibleCheckbox{};
+    const int clip = GetClipBox(checkboxDc, &visibleCheckbox);
+    ReleaseDC(checkbox, checkboxDc);
+    CHECK((clip == SIMPLEREGION || clip == COMPLEXREGION));
+    CHECK_FALSE(IsRectEmpty(&visibleCheckbox));
+
+    // Use the actual non-client scrollbar position for hit testing.
+    SCROLLBARINFO bar{};
+    bar.cbSize = sizeof(bar);
+    REQUIRE(GetScrollBarInfo(viewport, OBJID_VSCROLL, &bar));
+    const int scrollbarX = (bar.rcScrollBar.left + bar.rcScrollBar.right) / 2;
+    const int arrowY = bar.rcScrollBar.top + bar.dxyLineButton / 2;
+    const int thumbY = bar.rcScrollBar.top + (bar.xyThumbTop + bar.xyThumbBottom) / 2;
+    CHECK(SendMessageW(viewport, WM_NCHITTEST, 0, MAKELPARAM(scrollbarX, arrowY)) == HTVSCROLL);
+    CHECK(SendMessageW(viewport, WM_NCHITTEST, 0, MAKELPARAM(scrollbarX, thumbY)) == HTVSCROLL);
+
+    SendMessageW(viewport, WM_VSCROLL, SB_BOTTOM, 0);
+    REQUIRE(GetWindowRect(lastRun, &lastRunBounds));
+    CHECK(lastRunBounds.top >= viewportBounds.top);
+    CHECK(lastRunBounds.bottom <= viewportBounds.bottom);
+    RECT footerAfter{};
+    REQUIRE(GetWindowRect(close, &footerAfter));
+    CHECK(EqualRect(&footerAfter, &footerBefore));
+
+    // Windows can suggest dimensions scaled from the clamped rectangle on the return trip.
+    REQUIRE(GetWindowRect(settings, &bounds));
+    RECT suggested{bounds.left, bounds.top, bounds.left + (bounds.right - bounds.left) / 2,
+                   bounds.top + (bounds.bottom - bounds.top) / 2};
+    SendMessageW(settings, WM_DPICHANGED, MAKEWPARAM(initialDpi, initialDpi), reinterpret_cast<LPARAM>(&suggested));
+    RECT restored{};
+    REQUIRE(GetWindowRect(settings, &restored));
+    CHECK(restored.right - restored.left == original.right - original.left);
+    CHECK(restored.bottom - restored.top == original.bottom - original.top);
+    CHECK(height(checkbox) == MulDiv(22, initialDpi, 96));
+    CHECK(fontHeight(checkbox) == MulDiv(9, initialDpi, 72));
+}
+
 TEST_CASE("DashboardPresenter tabs through visible Settings controls", "[dashboard_presenter][settings]") {
     DashboardPresenter presenter;
     auto model = makeQuotaViewModel();
@@ -389,9 +492,9 @@ TEST_CASE("DashboardPresenter tabs through visible Settings controls", "[dashboa
     };
 
     const HWND tab = FindWindowExW(settings, nullptr, WC_TABCONTROLW, nullptr);
-    const HWND overlay = FindWindowExW(settings, nullptr, L"Button", L"Enable taskbar overlay");
-    const HWND startup = FindWindowExW(settings, nullptr, L"Button", L"Start with Windows");
-    const HWND scheduled = FindWindowExW(settings, nullptr, L"Button", L"Enable scheduled HTML export");
+    const HWND overlay = FindWindowExW(settingsPage(settings), nullptr, L"Button", L"Enable taskbar overlay");
+    const HWND startup = FindWindowExW(settingsPage(settings), nullptr, L"Button", L"Start with Windows");
+    const HWND scheduled = FindWindowExW(settingsPage(settings), nullptr, L"Button", L"Enable scheduled HTML export");
     const HWND close = FindWindowExW(settings, nullptr, L"Button", L"Close");
     REQUIRE(close != nullptr);
     REQUIRE(tab != nullptr);
@@ -430,7 +533,7 @@ TEST_CASE("DashboardPresenter tabs through visible Settings controls", "[dashboa
 
     SECTION("MiniMax keeps focus when pending validation disables its action buttons") {
         REQUIRE(presenter.selectPreferencesTabForTesting(2));
-        const HWND validate = FindWindowExW(settings, nullptr, L"Button", L"Validate");
+        const HWND validate = FindWindowExW(settingsPage(settings), nullptr, L"Button", L"Validate");
         REQUIRE(validate != nullptr);
         REQUIRE(waitForCondition([&]() { return IsWindowVisible(validate) != FALSE; }));
         REQUIRE(shiftTabTo(tab, close));
@@ -464,7 +567,7 @@ TEST_CASE("DashboardPresenter routes the separate Codex attribution checkbox",
 
     const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
     REQUIRE(settings != nullptr);
-    const HWND checkbox = FindWindowExW(settings, nullptr, L"Button", L"Enable Codex model attribution");
+    const HWND checkbox = FindWindowExW(settingsPage(settings), nullptr, L"Button", L"Enable Codex model attribution");
     REQUIRE(checkbox != nullptr);
     REQUIRE(waitForCondition([checkbox]() { return IsWindowVisible(checkbox) != FALSE; }));
     CHECK(SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_UNCHECKED);
@@ -533,10 +636,10 @@ TEST_CASE("Dashboard, Settings and Analysis share panel and label backgrounds", 
     const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
     REQUIRE(dashboard != nullptr);
     REQUIRE(settings != nullptr);
-    const HWND checkbox = FindWindowExW(settings, nullptr, L"BUTTON", L"Enable taskbar overlay");
+    const HWND checkbox = FindWindowExW(settingsPage(settings), nullptr, L"BUTTON", L"Enable taskbar overlay");
     const HWND dashboardTab = FindWindowExW(dashboard, nullptr, WC_TABCONTROLW, nullptr);
     const HWND settingsTab = FindWindowExW(settings, nullptr, WC_TABCONTROLW, nullptr);
-    const HWND intervalField = FindWindowExW(settings, nullptr, L"EDIT", nullptr);
+    const HWND intervalField = FindWindowExW(settingsPage(settings), nullptr, L"EDIT", nullptr);
     const HWND history = FindWindowExW(dashboard, nullptr, L"BUTTON", L"&History...");
     REQUIRE(checkbox != nullptr);
     REQUIRE(dashboardTab != nullptr);
