@@ -2348,7 +2348,9 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
     REQUIRE(app.submitMiniMaxCredentialActionForTesting(save));
     REQUIRE(waitForCondition([&app]() {
         const auto summary = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "token_plan");
-        return summary.has_value() && summary->hasPersistedProfile;
+        // The profile can be published before the presenter processes Save completion.
+        return summary.has_value() && summary->hasPersistedProfile &&
+               app.getDashboardStatusTextForTesting() == "Stored MiniMax Token Plan credential.";
     }));
 
     DashboardMiniMaxCredentialRequest validate;
