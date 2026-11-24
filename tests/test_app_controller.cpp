@@ -1199,7 +1199,7 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     CHECK(stage == std::future_status::timeout);
     CHECK_FALSE(app.getDashboardViewModelForTesting().startupPending);
     REQUIRE(storage.init(dbPath.path()));
-    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 16);
+    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 17);
 #else
     requireSqlite();
 #endif

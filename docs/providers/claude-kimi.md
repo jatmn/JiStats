@@ -18,6 +18,8 @@ The local aggregate requires a recorded token or message counter. An explicit ze
 
 [KimiAdapter](../../src/providers/kimi/KimiAdapter.cpp) reads selected configuration and runtime metadata under `~/.kimi`. An existing root can indicate the client is installed before session activity is available. The local path reports activity from approved session, task, and notification metadata. Those records carry no token usage.
 
+Activity counts each local task once per session or run. Importing a later runtime snapshot updates the stored status and duration. Replaying an unfinished snapshot preserves a stored terminal outcome.
+
 Subscription quota comes from the validated OAuth-backed `/coding/v1/usages` endpoint. The adapter reads the Kimi client's `~/.kimi/credentials/kimi-code.json` file. It can refresh when the access token is unusable or quota returns HTTP 401. A successful refresh writes the rotated credentials back to the same file before using them. A write failure causes the quota fetch to fail. Keep credential contents out of activity ingestion, app storage, logs, and fixtures. Without usable OAuth, quota stays empty. The 5-hour and 7-day percentages describe the returned subscription windows.
 
 The 7-day balance stays unknown until Kimi reports a positive allowance and either used or remaining quota. JiStats displays and records a weekly balance once it has those values, including an explicit zero remaining.

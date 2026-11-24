@@ -662,6 +662,76 @@ TEST_CASE("Kimi importLocalActivity persists approved local runtime snapshots", 
     CHECK(result.getString(0, 2) == "kimi_local_runtime");
 }
 
+TEST_CASE("Kimi task imports preserve one activity across lifecycle updates", "[kimi][persistence]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    TempFixtureDirectory fixture;
+    const auto runtimePath = "sessions/session-one/tasks/task-one/runtime.json";
+    const auto starting = R"json({
+        "status": "starting",
+        "started_at": "2026-04-20T10:01:00Z",
+        "updated_at": "2026-04-20T10:01:00Z"
+    })json";
+    const auto running = R"json({
+        "status": "running",
+        "started_at": "2026-04-20T10:01:00Z",
+        "updated_at": "2026-04-20T10:01:10Z"
+    })json";
+    const auto completed = R"json({
+        "status": "completed",
+        "started_at": "2026-04-20T10:01:00Z",
+        "updated_at": "2026-04-20T10:02:30Z",
+        "finished_at": "2026-04-20T10:02:30Z"
+    })json";
+    const auto awaitingApproval = R"json({
+        "status": "awaiting_approval",
+        "started_at": "2026-04-20T10:01:00Z",
+        "updated_at": "2026-04-20T10:03:00Z"
+    })json";
+    const auto loadActivity = [&] {
+        return storage.execute(
+            "SELECT id, surface_key, ended_at_utc, duration_seconds, raw_reference FROM activity_events;");
+    };
+
+    fixture.makeFile(runtimePath, starting);
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+    const auto first = loadActivity();
+    REQUIRE(first.success());
+    REQUIRE(first.rowCount() == 1);
+    CHECK(first.getString(0, 1) == "starting");
+
+    fixture.makeFile(runtimePath, running);
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+    const auto initial = loadActivity();
+    REQUIRE(initial.success());
+    REQUIRE(initial.rowCount() == 1);
+    CHECK(initial.getInt64(0, 0) == first.getInt64(0, 0));
+    CHECK(initial.getString(0, 1) == "running");
+    CHECK(initial.getInt64(0, 3) == 10);
+
+    fixture.makeFile(runtimePath, completed);
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+    fixture.makeFile(runtimePath, running);
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+
+    fixture.makeFile(runtimePath, awaitingApproval);
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+
+    const auto final = loadActivity();
+    REQUIRE(final.success());
+    REQUIRE(final.rowCount() == 1);
+    CHECK(final.getInt64(0, 0) == initial.getInt64(0, 0));
+    CHECK(final.getString(0, 1) == "completed");
+    CHECK(final.getString(0, 2) == "2026-04-20T10:02:30Z");
+    CHECK(final.getInt64(0, 3) == 90);
+    CHECK(final.getString(0, 4) == "kimi_local_runtime:session-one/task-one");
+}
+
 TEST_CASE("Kimi adapter parses provider usages API response", "[kimi]") {
     const std::time_t before = std::time(nullptr);
     const std::string apiResponse = R"json({
