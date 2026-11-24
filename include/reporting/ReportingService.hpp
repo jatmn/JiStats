@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -120,6 +121,11 @@ struct ReportQuotaSnapshot {
     bool hasUnknownGaps = false;
 };
 
+struct ReportRecoveryCoverage {
+    bool containsBackfilledData = false;
+    bool containsUnknownGaps = false;
+};
+
 struct ReportAggregateData {
     std::string dateRangeLabel;
     std::string gapBackfillSummary;
@@ -133,6 +139,7 @@ struct ReportAggregateData {
     std::vector<ReportBreakdownRow> modelBreakdown;
     std::vector<ReportTrendPoint> recentTrend;
     std::vector<ReportQuotaSnapshot> quotaSnapshots;
+    std::optional<ReportRecoveryCoverage> recoveryCoverage;
 };
 
 /**

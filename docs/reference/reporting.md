@@ -16,6 +16,6 @@ Use **File → Export HTML Report…** for a manual report. Configure scheduled 
 
 ### Report metadata
 
-Preserve generation time, provider/account and date scope, freshness, backfilled data, unknown gaps, and the mirror-confidence policy version. Reports show the stored mirror-rule versions when available and `unknown` when none are available. Keep source labels and confidence indicators on rows where available. A historical export describes the captured time range and evidence.
+Preserve generation time, provider/account and date scope, freshness, backfilled data, unknown gaps, and the mirror-confidence policy version. Reports show the stored mirror-rule versions when available and `unknown` when none are available. Keep source labels and confidence indicators on rows where available. A historical export describes the captured time range and evidence. Its gap flags and recovery summary use stored markers and recovery intervals that intersect the selected provider, account, and dates. The current quota cards describe the provider state at export time.
 
 [ReportingService](../../src/reporting/ReportingService.cpp) prepares the report and [HtmlExporter](../../src/reporting/HtmlExporter.cpp) renders it. See the [query tests](../../tests/test_analysis_query_engine.cpp) and [reporting tests](../../tests/test_reporting_service.cpp) for effective scope and persistence coverage.

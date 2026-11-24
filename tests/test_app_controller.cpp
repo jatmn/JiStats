@@ -6054,6 +6054,89 @@ TEST_CASE("AppController manual HTML export uses the current analysis scope", "[
     app.shutdown();
 }
 
+TEST_CASE("AppController scopes the HTML recovery summary and badges to historical evidence",
+          "[app][reporting][recovery]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_recovery_report");
+    const std::time_t day = (std::time(nullptr) / 86400 - 2) * 86400;
+    const std::time_t oldDay = day - 120 * 86400;
+    const std::string accountKey = "retained-claude-history";
+
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        const auto account = seedUsageProviderAccount(storage, "claude_code", accountKey, "Retained Claude history");
+        const auto other =
+            seedUsageProviderAccount(storage, "claude_code", "other-claude-history", "Other Claude history");
+
+        PersistedGapMarker marker;
+        marker.providerId = account.providerId;
+        marker.accountId = account.accountId;
+        marker.periodStart = day - 60;
+        marker.periodEnd = day;
+        marker.classification = GapClassification::Unknown;
+        REQUIRE(storage.upsertGapMarker(marker));
+        marker.classification = GapClassification::Reconstructed;
+        marker.periodStart = day + 86400;
+        marker.periodEnd = day + 86460;
+        REQUIRE(storage.upsertGapMarker(marker));
+        marker.accountId = other.accountId;
+        marker.periodStart = day;
+        marker.periodEnd = day + 60;
+        REQUIRE(storage.upsertGapMarker(marker));
+
+        PersistedRecoveryCheckpoint checkpoint;
+        checkpoint.providerId = account.providerId;
+        checkpoint.accountId = account.accountId;
+        checkpoint.syncKind = "runtime_backfill";
+        checkpoint.outcome = "fetch_failed";
+        checkpoint.recoveryStart = oldDay;
+        checkpoint.recoveryEnd = oldDay + 60;
+        checkpoint.attemptAt = oldDay + 60;
+        REQUIRE(storage.insertRecoveryCheckpoint(checkpoint));
+        checkpoint.recoveryStart = day - 60;
+        checkpoint.recoveryEnd = day;
+        checkpoint.attemptAt = day + 86400;
+        REQUIRE(storage.insertRecoveryCheckpoint(checkpoint));
+        checkpoint.recoveryStart = day + 86400;
+        checkpoint.recoveryEnd = day + 86460;
+        checkpoint.attemptAt = day + 86460;
+        REQUIRE(storage.insertRecoveryCheckpoint(checkpoint));
+        checkpoint.accountId = other.accountId;
+        checkpoint.recoveryStart = day;
+        checkpoint.recoveryEnd = day + 60;
+        checkpoint.attemptAt = day + 60;
+        REQUIRE(storage.insertRecoveryCheckpoint(checkpoint));
+    }
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({}));
+    REQUIRE(app.init());
+
+    DashboardPreferences preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.analysisSelectedProviderId = "claude_code";
+    preferences.analysisSelectedAccountId = accountKey;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = day;
+    preferences.analysisCustomRangeEndUtc = day;
+    app.applyDashboardPreferencesForTesting(preferences);
+
+    const auto path = exportDir.path() / "historical-coverage.html";
+    REQUIRE(app.exportHtmlReportForTesting(path.string()).success);
+    std::ifstream report(path);
+    REQUIRE(report.is_open());
+    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+    CHECK(html.find("badge-unknown\">Contains unknown gaps") != std::string::npos);
+    CHECK(html.find("Contains backfilled data: No | Contains unknown gaps: Yes") != std::string::npos);
+    CHECK(html.find("1 unknown gap marker") != std::string::npos);
+    CHECK(html.find("1 recovery fetch failure; 1 unknown gap marker") != std::string::npos);
+    CHECK(html.find("reconstructed gap marker") == std::string::npos);
+}
+
 TEST_CASE("AppController exports the effective Analysis account when no live row matches",
           "[app][analysis][reporting][scheduled]") {
     requireSqlite();

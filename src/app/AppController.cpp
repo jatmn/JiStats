@@ -1978,6 +1978,7 @@ ReportAggregateData buildReportAggregateData(
         sortBreakdowns(aggregateData.modelBreakdown);
     }
 
+    bool gapMarkersLoaded = false;
     long long reconstructedGapCount = 0;
     long long unknownGapCount = 0;
     {
@@ -1990,10 +1991,10 @@ ReportAggregateData buildReportAggregateData(
             "JOIN accounts a ON a.id = gm.account_id "
             "WHERE gm.period_end_utc >= ? AND gm.period_start_utc <= ?";
         std::vector<std::string> params{fromIso, toIso};
-        appendProviderFilterClause(sql, params, providerKeys, "p.provider_key");
-        appendAccountFilterClause(sql, params, accountIds, "a.account_key");
+        appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
         QueryResult result = storage.execute(sql, params);
         if (result.success() && result.rowCount() > 0) {
+            gapMarkersLoaded = true;
             reconstructedGapCount = result.getInt64(0, 0);
             unknownGapCount = result.getInt64(0, 1);
         }
@@ -2014,16 +2015,21 @@ ReportAggregateData buildReportAggregateData(
             // The legacy OpenAI and MiniMax adapters wrote these outcomes without querying history.
             "WHERE rc.sync_kind = ? AND NOT (rc.fetched_event_count = 0 AND ("
             "(p.provider_key = 'openai' AND rc.outcome = 'no_data') OR "
-            "(p.provider_key = 'minimax' AND rc.outcome = 'fetch_failed')))";
-        std::vector<std::string> params{kRuntimeBackfillSyncKind};
-        appendProviderFilterClause(sql, params, providerKeys, "p.provider_key");
-        appendAccountFilterClause(sql, params, accountIds, "a.account_key");
+            "(p.provider_key = 'minimax' AND rc.outcome = 'fetch_failed'))) "
+            "AND rc.recovery_end_utc >= ? AND rc.recovery_start_utc <= ?";
+        std::vector<std::string> params{kRuntimeBackfillSyncKind, fromIso, toIso};
+        appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
         QueryResult result = storage.execute(sql, params);
         if (result.success() && result.rowCount() > 0) {
             importedBackfillCount = result.getInt64(0, 0);
             mismatchCount = result.getInt64(0, 1);
             failedBackfillCount = result.getInt64(0, 2);
         }
+    }
+
+    if (gapMarkersLoaded) {
+        aggregateData.recoveryCoverage =
+            ReportRecoveryCoverage{reconstructedGapCount > 0 || importedBackfillCount > 0, unknownGapCount > 0};
     }
 
     std::ostringstream summary;
@@ -2078,7 +2084,7 @@ ReportAggregateData buildReportAggregateData(
         wroteSummary = true;
     }
     if (!wroteSummary) {
-        if (metadata.containsBackfilledData || metadata.containsUnknownGaps) {
+        if (!aggregateData.recoveryCoverage && (metadata.containsBackfilledData || metadata.containsUnknownGaps)) {
             summary << "Current quotas indicate backfilled or gap-affected data within the report scope.";
         } else {
             summary << "No persisted gap or recovery warnings were found for the current report scope.";

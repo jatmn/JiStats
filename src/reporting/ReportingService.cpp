@@ -323,6 +323,11 @@ ReportResult ReportingService::generateReport(const ReportRequest& request) {
                     metadata);
             }
 
+            if (aggregateData.recoveryCoverage) {
+                metadata.containsBackfilledData = aggregateData.recoveryCoverage->containsBackfilledData;
+                metadata.containsUnknownGaps = aggregateData.recoveryCoverage->containsUnknownGaps;
+            }
+
             if (!exporter.exportToFile(reportViewModel, metadata, aggregateData, outputPath, options)) {
                 result.errorMessage = exporter.getLastError();
                 return result;
