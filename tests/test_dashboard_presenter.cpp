@@ -1239,6 +1239,49 @@ TEST_CASE("DashboardPresenter scrolls to the final chart after a native resize",
     presenter.shutdown();
 }
 
+TEST_CASE("DashboardPresenter restores startup placement after being minimized", "[dashboard_presenter][navigation]") {
+    StorageService storage;
+    REQUIRE(storage.init());
+    SettingsService settings(storage);
+    const std::array<std::string, 4> keys = {"ui.dashboard_window_x", "ui.dashboard_window_y",
+                                             "ui.dashboard_window_width", "ui.dashboard_window_height"};
+    const std::array<int, 4> expected = {20, 30, 720, 560};
+    std::array<std::optional<std::string>, 4> original;
+    for (size_t index = 0; index < keys.size(); ++index) {
+        original[index] = settings.getString(keys[index]);
+        CHECK(settings.setInt(keys[index], expected[index]));
+    }
+
+    DashboardPresenter presenter;
+    presenter.setVisible(true);
+    const bool initialized = presenter.init(true);
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    bool minimized = false;
+    bool restored = false;
+    if (initialized && dashboard != nullptr) {
+        ShowWindow(dashboard, SW_MINIMIZE);
+        minimized = waitForCondition([&]() { return IsIconic(dashboard) != FALSE; });
+        presenter.restoreStartupPlacement();
+        presenter.setVisible(true);
+        restored = waitForCondition([&]() {
+            RECT rect{};
+            return GetWindowRect(dashboard, &rect) && rect.left == expected[0] && rect.top == expected[1] &&
+                   rect.right - rect.left == expected[2] && rect.bottom - rect.top == expected[3];
+        });
+    }
+    presenter.shutdown();
+    for (size_t index = 0; index < keys.size(); ++index) {
+        if (original[index]) {
+            CHECK(settings.setString(keys[index], *original[index]));
+        } else {
+            settings.remove(keys[index]);
+        }
+    }
+    CHECK(initialized);
+    CHECK(minimized);
+    CHECK(restored);
+}
+
 TEST_CASE("DashboardPresenter shows the dashboard while saved Analysis placement is loading",
           "[dashboard_presenter][navigation]") {
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)

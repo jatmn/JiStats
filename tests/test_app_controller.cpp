@@ -21,6 +21,10 @@
 #include <windows.h>
 #include <sddl.h>
 
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+#include <sqlite3.h>
+#endif
+
 #include "app/AppController.hpp"
 #include "app/TrayController.hpp"
 #include "core/Logger.hpp"
@@ -935,6 +939,266 @@ TEST_CASE("AppController honors launch-in-background startup mode", "[app][start
     CHECK_FALSE(app.isDashboardVisibleForTesting());
 
     app.shutdown();
+}
+
+TEST_CASE("AppController shows the dashboard and tray while startup quota is pending", "[app][startup][shell]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    const auto now = std::time(nullptr);
+    std::promise<void> releaseQuota;
+    auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 20, 100, "interval", "openai_subscription_codex_local"),
+        releaseQuota.get_future().share());
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(provider);
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+
+    auto startup = std::async(std::launch::async, [&]() { return app.init(true); });
+    const bool fetchPending =
+        waitForCondition([&]() { return provider->getQuotaFetchCount() > provider->getCompletedQuotaFetchCount(); });
+    const auto starting = app.getDashboardViewModelForTesting();
+    const auto trayStarting = app.getTrayStateForTesting();
+    const bool hiddenAtLaunch = !app.isDashboardVisibleForTesting();
+    const bool trayShowHandled = app.dispatchTrayEventForTesting(TrayController::TestEvent::MenuShowDashboard);
+    const bool dashboardShown = waitForCondition([&]() { return app.isDashboardVisibleForTesting(); });
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    const HWND settings = FindWindowExW(dashboard, nullptr, L"Button", L"&Settings...");
+    const bool settingsDisabled = settings != nullptr && !IsWindowEnabled(settings);
+    releaseQuota.set_value();
+
+    REQUIRE(startup.get());
+    CHECK(fetchPending);
+    CHECK(starting.startupPending);
+    CHECK(starting.providers.empty());
+    CHECK(trayStarting.initialized);
+    CHECK(trayStarting.status == TrayStatus::Syncing);
+    CHECK(trayStarting.tooltip.find("Starting") != std::string::npos);
+    CHECK(hiddenAtLaunch);
+    CHECK(trayShowHandled);
+    CHECK(dashboardShown);
+    CHECK(settingsDisabled);
+    CHECK(waitForCondition([settings]() { return settings != nullptr && IsWindowEnabled(settings) != FALSE; }));
+    const auto ready = app.getDashboardViewModelForTesting();
+    CHECK_FALSE(ready.startupPending);
+    const auto* openai = findProviderStatus(ready, "openai");
+    REQUIRE(openai != nullptr);
+    REQUIRE_FALSE(openai->quotas.empty());
+    CHECK(openai->quotas.front().used == 20);
+}
+
+TEST_CASE("AppController stops starting provider requests when exiting during startup", "[app][startup][shell]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, false, true);
+    const auto now = std::time(nullptr);
+    std::promise<void> releaseQuota;
+    auto first = std::make_shared<ControlledQuotaProviderAdapter>(
+        "claude_code", "Claude Code", makeQuotaResponse(now, 10, 100, "interval", "claude_code_local"),
+        releaseQuota.get_future().share());
+    auto later = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 20, 100, "interval", "openai_subscription_codex_local"));
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(first);
+    providers->addProvider(later);
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+
+    auto startup = std::async(std::launch::async, [&]() { return app.init(); });
+    const bool fetchPending =
+        waitForCondition([&]() { return first->getQuotaFetchCount() > first->getCompletedQuotaFetchCount(); });
+    const bool exitHandled = app.dispatchTrayEventForTesting(TrayController::TestEvent::MenuExit);
+    releaseQuota.set_value();
+
+    REQUIRE(startup.get());
+    CHECK(fetchPending);
+    CHECK(exitHandled);
+    CHECK(later->getQuotaFetchCount() == 0);
+    CHECK(app.run() == 0);
+}
+
+TEST_CASE("AppController preserves recovery when Exit interrupts the deferred startup refresh",
+          "[app][startup][recovery]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        REQUIRE(SettingsService(storage).setBool("runtime.cursor_subscription_tracking_enabled", true));
+    }
+    const auto now = std::time(nullptr);
+    const auto gapStart = now - 3 * 3600;
+    const std::string marker = "catchup:" + std::to_string(gapStart);
+    seedRuntimeState(dbPath.path(), gapStart, gapStart, marker);
+    seedPersistedQuotaSnapshot(dbPath.path(), "openai", "cached-openai", "OpenAI", "openai_subscription",
+                               "OpenAI Subscription", "interval", now - 300, 30, 100, 70);
+    seedPersistedQuotaSnapshot(dbPath.path(), "cursor", "cached-cursor", "Cursor", "cursor_subscription_api",
+                               "Cursor Subscription", "weekly", now - 300, 30, 100, 70);
+
+    std::promise<void> releaseQuota;
+    auto first = std::make_shared<ControlledQuotaProviderAdapter>(
+        "cursor", "Cursor", makeQuotaResponse(now, 10, 100, "weekly", "cursor_subscription_api"),
+        releaseQuota.get_future().share());
+    auto later = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 10, 100, "interval", "openai_subscription_codex_local"));
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(first);
+    providers->addProvider(later);
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+
+    REQUIRE(app.init());
+    const bool fetchPending =
+        waitForCondition([&]() { return first->getQuotaFetchCount() > first->getCompletedQuotaFetchCount(); });
+    const bool quit = app.dispatchTrayEventForTesting(TrayController::TestEvent::MenuExit);
+    releaseQuota.set_value();
+    app.shutdown();
+
+    CHECK(fetchPending);
+    CHECK(quit);
+    CHECK(later->getQuotaFetchCount() == 0);
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto runtime = storage.getRuntimeState();
+    REQUIRE(runtime.has_value());
+    CHECK(runtime->recoveryMarker == marker);
+}
+
+TEST_CASE("AppController does not count recovery twice after Exit during rollup rebuild", "[app][startup][recovery]") {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    const auto now = std::time(nullptr);
+    const auto gapStart = now - 3 * 3600;
+    const auto retryTime = now + 120;
+    const std::string marker = "catchup:" + std::to_string(gapStart);
+    seedRuntimeState(dbPath.path(), gapStart, gapStart, marker);
+    seedPersistedQuotaSnapshot(dbPath.path(), "openai", "cached-openai", "OpenAI", "openai_subscription",
+                               "OpenAI Subscription", "interval", now - 300, 30, 100, 70);
+
+    auto providers = makeProviderManager(
+        {makeCurrentQuotaProvider("openai", "OpenAI", 10, 100, now, "interval", "openai_subscription_codex_local")});
+    static std::atomic<AppController*> appToExit{nullptr};
+    const auto extension = reinterpret_cast<void (*)()>(+[](sqlite3* db, char**, const sqlite3_api_routines*) {
+        return sqlite3_trace_v2(
+            db, SQLITE_TRACE_STMT,
+            [](unsigned, void*, void* statement, void*) {
+                const char* sql = sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
+                constexpr char rebuildScopeQuery[] = "SELECT DISTINCT provider_id, account_id FROM usage_events ";
+                if (sql != nullptr && sqlite3_strnicmp(sql, rebuildScopeQuery, sizeof(rebuildScopeQuery) - 1) == 0) {
+                    if (auto* app = appToExit.exchange(nullptr)) {
+                        app->requestShutdown();
+                    }
+                }
+                return 0;
+            },
+            nullptr);
+    });
+
+    {
+        AppController app;
+        app.setHeadlessForTesting(true);
+        app.setDatabasePathForTesting(dbPath.path());
+        app.setProviderManagerForTesting(providers);
+        app.setCurrentTimeForTesting(now);
+        REQUIRE(sqlite3_auto_extension(extension) == SQLITE_OK);
+        appToExit.store(&app);
+        const bool started = app.init();
+        const bool interrupted = waitForCondition([&]() { return appToExit.load() == nullptr; });
+        app.shutdown();
+        appToExit.store(nullptr);
+        sqlite3_cancel_auto_extension(extension);
+        REQUIRE(started);
+        REQUIRE(interrupted);
+    }
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto interruptedRuntime = storage.getRuntimeState();
+    REQUIRE(interruptedRuntime.has_value());
+    CHECK(interruptedRuntime->recoveryMarker == marker);
+    const auto countBeforeRetry =
+        storage.execute("SELECT COUNT(*) FROM gap_markers WHERE source_kind = 'runtime_recovery';");
+    REQUIRE(countBeforeRetry.success());
+    CHECK(countBeforeRetry.getInt(0, 0) == 0);
+
+    AppController restarted;
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(providers);
+    restarted.setCurrentTimeForTesting(retryTime);
+    REQUIRE(restarted.init());
+    REQUIRE(waitForCondition([&]() {
+        const auto runtime = storage.getRuntimeState();
+        return runtime && runtime->recoveryMarker.empty();
+    }));
+    restarted.shutdown();
+
+    const auto completed = storage.execute(
+        "SELECT period_start_utc, period_end_utc FROM gap_markers WHERE source_kind = 'runtime_recovery';");
+    REQUIRE(completed.success());
+    REQUIRE(completed.rowCount() == 1);
+    CHECK(completed.getString(0, 0) == toUtcIso(gapStart));
+    CHECK(completed.getString(0, 1) == toUtcIso(retryTime));
+#else
+    requireSqlite();
+#endif
+}
+
+TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds startup", "[app][startup][shell]") {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    TempTestDatabase dbPath;
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    REQUIRE(storage.execute("PRAGMA main.journal_mode = WAL;").getString(0, 0) == "wal");
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
+    storage.close();
+
+    sqlite3* raw = nullptr;
+    const int opened = sqlite3_open_v2(dbPath.path().c_str(), &raw, SQLITE_OPEN_READONLY, nullptr);
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> reader(raw, sqlite3_close);
+    REQUIRE(opened == SQLITE_OK);
+    REQUIRE(sqlite3_exec(reader.get(), "BEGIN; SELECT MAX(version) FROM schema_version;", nullptr, nullptr, nullptr) ==
+            SQLITE_OK);
+
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    auto startup = std::async(std::launch::async, [&]() { return app.init(); });
+    const bool visibleWithReader = waitForCondition([]() {
+        const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+        return dashboard != nullptr && IsWindowVisible(dashboard) != FALSE;
+    });
+    const auto starting = app.getDashboardViewModelForTesting();
+    const auto stage = startup.wait_for(std::chrono::milliseconds(150));
+    reader.reset();
+
+    REQUIRE(startup.get());
+    CHECK(visibleWithReader);
+    CHECK(starting.startupPending);
+    CHECK(stage == std::future_status::timeout);
+    CHECK_FALSE(app.getDashboardViewModelForTesting().startupPending);
+    REQUIRE(storage.init(dbPath.path()));
+    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 13);
+#else
+    requireSqlite();
+#endif
 }
 
 TEST_CASE("AppController explains a rejected database during background startup", "[app][startup]") {

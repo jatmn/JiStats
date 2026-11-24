@@ -3906,7 +3906,7 @@ public:
     };
 
     bool initialized = false;
-    std::string state = "uninitialized";
+    std::atomic<const char*> state{"constructed"};
     DashboardPresenter dashboardPresenter;
     AnalysisPresenter analysisPresenter;
     TaskbarPresenter taskbarPresenter;
@@ -4015,6 +4015,7 @@ public:
     std::time_t lastScheduledExportAt = 0;
     std::time_t lastRetentionRunAt = 0;
     std::atomic<bool> shuttingDown{false};
+    std::atomic<bool> exitRequested{false};
 #ifdef JISTATS_ENABLE_TEST_HOOKS
     bool forceDashboardInitFailureForTesting = false;
     std::shared_ptr<ProviderManager> testProviderManager;
@@ -4356,7 +4357,7 @@ public:
         for (auto nextProvider = providers.begin(); nextProvider != providers.end();) {
             const auto& provider = *nextProvider;
             const auto key = provider->getProviderKey();
-            if (hasProviderOptOutInProgress(key)) {
+            if (exitRequested.load() || hasProviderOptOutInProgress(key)) {
                 nextProvider = providers.erase(nextProvider);
                 continue;
             }
@@ -4845,10 +4846,7 @@ public:
             if (shouldStopMiniMaxValidation()) {
                 return;
             }
-            refreshProviderRuntimeState(
-                std::time(nullptr),
-                refreshProviderDiscovery,
-                importLocalActivity);
+            refreshProviderRuntimeState(currentTime(), refreshProviderDiscovery, importLocalActivity);
         });
     }
 
@@ -6583,12 +6581,18 @@ public:
                 continue;
             }
 
+            if (exitRequested.load()) {
+                return false;
+            }
             if (hasProviderOptOutInProgress(provider.providerKey)) {
                 continue;
             }
 
             // Attempt provider-side backfill for this provider's gap window
             UsageResponse usageResp = adapter->fetchUsage(recoveryStart, now);
+            if (exitRequested.load()) {
+                return false;
+            }
             std::string backfillOutcome = usageResp.success ? "no_data" : "fetch_failed";
             std::string backfillFailureCategory;
             std::size_t fetchedEventCount = usageResp.events.size();
@@ -6718,10 +6722,11 @@ public:
         }
 
         // Rebuild usage rollups for the recovery range
-        if (!rebuildUsageRollupsForRange(storageService, recoveryStart, now)) {
+        if (!rebuildUsageRollupsForRange(storageService, recoveryStart, now) || exitRequested.load()) {
             return false;
         }
 
+        // Once gap writes start, finish the recovery marker update even if Exit arrives.
         for (const auto& provider : viewModel.providers) {
             const auto providerId = findProviderIdByKey(storageService, provider.providerKey);
             const auto runtimeAccountId =
@@ -7240,6 +7245,9 @@ public:
         }
         QuotaRefresh refresh{++quotaRefreshGeneration, {}, {}};
         DashboardViewModel viewModel = buildDashboardViewModel(now, refresh);
+        if (exitRequested.load()) {
+            return preferences;
+        }
         viewModel.preferences = preferences;
         ProviderConnectivityUpdates connectivityUpdates;
         applyRecoveryPersistenceCycle(viewModel, preferences, now, refresh, connectivityUpdates);
@@ -7533,15 +7541,16 @@ public:
     }
 };
 
-AppController::AppController() : pImpl(std::make_unique<Impl>()) {
-    pImpl->state = "constructed";
-}
+AppController::AppController() : pImpl(std::make_unique<Impl>()) {}
 
 AppController::~AppController() {
     shutdown();
 }
 
 std::string AppController::getStartupWarning() const {
+    if (pImpl->exitRequested.load()) {
+        return {};
+    }
     const auto version = pImpl->storageService.getRejectedSchemaVersion();
     if (!version) {
         return {};
@@ -7562,10 +7571,91 @@ bool AppController::init(bool launchInBackground) {
     }
 
     try {
+        pImpl->exitRequested.store(false);
         pImpl->shuttingDown.store(false);
         // Initialize logging first so all subsequent init steps can log
         Logger::init();
         JISTATS_LOG_INFO(LogCategory::Startup, "JiStats initializing");
+
+        DashboardViewModel startupView;
+        startupView.startupPending = true;
+        startupView.runtimeState = RuntimeState::CatchingUp;
+        pImpl->dashboardPresenter.updateViewModel(startupView);
+        pImpl->dashboardPresenter.setVisible(!launchInBackground);
+        pImpl->dashboardPresenter.setExitRequestedCallback([this]() { requestShutdown(); });
+
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (pImpl->forceDashboardInitFailureForTesting) {
+            JISTATS_LOG_ERROR(LogCategory::Startup, "DashboardPresenter unavailable: forced init failure for test");
+            pImpl->state = "error";
+            pImpl->releaseResources(false);
+            return false;
+        }
+#endif
+
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (!pImpl->headlessForTesting) {
+            if (!pImpl->dashboardPresenter.init(true)) {
+                JISTATS_LOG_ERROR(LogCategory::Startup,
+                                  "DashboardPresenter unavailable: " + pImpl->dashboardPresenter.getLastError());
+                pImpl->state = "error";
+                pImpl->releaseResources(false);
+                return false;
+            }
+        }
+#else
+        if (!pImpl->dashboardPresenter.init(true)) {
+            JISTATS_LOG_ERROR(LogCategory::Startup,
+                              "DashboardPresenter unavailable: " + pImpl->dashboardPresenter.getLastError());
+            pImpl->state = "error";
+            pImpl->releaseResources(false);
+            return false;
+        }
+#endif
+
+        {
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+            if (!pImpl->headlessForTesting)
+#endif
+            {
+                const auto showDashboard = [this]() {
+                    pImpl->dashboardPresenter.setVisible(true);
+                    if (!pImpl->dashboardPresenter.getViewModel().startupPending) {
+                        pImpl->requestPersistedActivityRefresh();
+                    }
+                };
+                pImpl->trayController.setOnShowDashboardCallback(showDashboard);
+                pImpl->trayController.setOnPreferencesCallback(showDashboard);
+                pImpl->trayController.setOnRetryNowCallback(
+                    [this]() { pImpl->dashboardPresenter.requestOfflineRetry(); });
+                pImpl->trayController.setOnDismissOfflineNoticeCallback(
+                    [this]() { pImpl->dashboardPresenter.requestOfflineDismiss(); });
+                pImpl->trayController.setOnExitCallback([this]() { requestShutdown(); });
+                pImpl->taskbarPresenter.setOnShowDashboardCallback(showDashboard);
+                pImpl->taskbarPresenter.setOnPreferencesCallback(showDashboard);
+                pImpl->taskbarPresenter.setOnRetryNowCallback(
+                    [this]() { pImpl->dashboardPresenter.requestOfflineRetry(); });
+                pImpl->taskbarPresenter.setOnDismissOfflineNoticeCallback(
+                    [this]() { pImpl->dashboardPresenter.requestOfflineDismiss(); });
+                pImpl->taskbarPresenter.setOnExitCallback([this]() { requestShutdown(); });
+
+                pImpl->trayController.setState(TrayStatus::Syncing, "JiStats - Starting...");
+                if (!pImpl->trayController.init()) {
+                    JISTATS_LOG_WARN(LogCategory::Startup,
+                                     "TrayController unavailable: " + pImpl->trayController.getLastError());
+                    if (launchInBackground) {
+                        pImpl->dashboardPresenter.setVisible(true);
+                        JISTATS_LOG_WARN(
+                            LogCategory::Startup,
+                            "TrayController init failed during background launch; showing dashboard instead");
+                    }
+                }
+            }
+        }
+        pImpl->initialized = true;
+        if (pImpl->exitRequested.load()) {
+            return true;
+        }
 
         // Initialize storage service (optional - app works without it)
         if (pImpl->storageService.init(pImpl->databasePath)) {
@@ -7579,6 +7669,16 @@ bool AppController::init(bool launchInBackground) {
             JISTATS_LOG_WARN(LogCategory::Startup,
                 "StorageService unavailable: " + pImpl->storageService.getLastError());
             JISTATS_LOG_WARN(LogCategory::Startup, "Preferences will use safe defaults");
+        }
+
+        if (pImpl->exitRequested.load()) {
+            return true;
+        }
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (!pImpl->headlessForTesting)
+#endif
+        {
+            pImpl->dashboardPresenter.restoreStartupPlacement();
         }
 
         pImpl->codexModelAttributionEnabled.store(false);
@@ -7619,46 +7719,9 @@ bool AppController::init(bool launchInBackground) {
             [this](const std::string& outputPath) {
                 return pImpl->handleManualHtmlExport(outputPath);
             });
-        pImpl->dashboardPresenter.setOfflineRetryActionCallback([this]() {
-            return pImpl->handleOfflineRetryAction();
-        });
-        pImpl->dashboardPresenter.setOfflineDismissActionCallback([this]() {
-            return pImpl->handleOfflineDismissAction();
-        });
-        pImpl->dashboardPresenter.setExitRequestedCallback([this]() {
-            requestShutdown();
-        });
-
-#ifdef JISTATS_ENABLE_TEST_HOOKS
-        if (pImpl->forceDashboardInitFailureForTesting) {
-            JISTATS_LOG_ERROR(LogCategory::Startup,
-                "DashboardPresenter unavailable: forced init failure for test");
-            pImpl->state = "error";
-            pImpl->releaseResources(false);
-            return false;
-        }
-#endif
-
-#ifdef JISTATS_ENABLE_TEST_HOOKS
-        if (!pImpl->headlessForTesting) {
-            if (!pImpl->dashboardPresenter.init()) {
-                JISTATS_LOG_ERROR(LogCategory::Startup,
-                    "DashboardPresenter unavailable: " + pImpl->dashboardPresenter.getLastError());
-                pImpl->state = "error";
-                pImpl->releaseResources(false);
-                return false;
-            }
-        }
-#else
-        if (!pImpl->dashboardPresenter.init()) {
-            JISTATS_LOG_ERROR(LogCategory::Startup,
-                "DashboardPresenter unavailable: " + pImpl->dashboardPresenter.getLastError());
-            pImpl->state = "error";
-            pImpl->releaseResources(false);
-            return false;
-        }
-#endif
-
+        pImpl->dashboardPresenter.setOfflineRetryActionCallback([this]() { return pImpl->handleOfflineRetryAction(); });
+        pImpl->dashboardPresenter.setOfflineDismissActionCallback(
+            [this]() { return pImpl->handleOfflineDismissAction(); });
         pImpl->dashboardPresenter.setAnalysisPresenter(&pImpl->analysisPresenter);
 
         const std::time_t now = pImpl->currentTime();
@@ -7701,6 +7764,9 @@ bool AppController::init(bool launchInBackground) {
             pImpl->importEnabledLocalProviderActivity(loadedPreferences);
             Impl::QuotaRefresh refresh{++pImpl->quotaRefreshGeneration, {}, {}, true};
             viewModel = pImpl->buildDashboardViewModel(now, refresh);
+            if (pImpl->exitRequested.load()) {
+                return true;
+            }
             viewModel.preferences = loadedPreferences; // Use persisted preferences
             executedStartupCatchUp =
                 pImpl->applyRecoveryPersistenceCycle(
@@ -7716,7 +7782,6 @@ bool AppController::init(bool launchInBackground) {
         pImpl->applyPersistedActivitySummaries(viewModel, now);
         pImpl->applyDashboardOperationalStatus(viewModel);
         pImpl->applyAnalysisSurface(viewModel, now);
-        pImpl->applyRuntimeViewModel(viewModel, now, std::move(connectivityUpdates));
         pImpl->reportingService.setDashboardDataProvider([this](DashboardViewModel& reportViewModel) {
             reportViewModel = pImpl->dashboardPresenter.getViewModel();
             return true;
@@ -7724,28 +7789,12 @@ bool AppController::init(bool launchInBackground) {
         pImpl->reportingService.setMirrorPolicyVersionProvider([this](const DashboardViewModel& reportViewModel) {
             return buildMirrorPolicyVersionLabel(pImpl->storageService, reportViewModel);
         });
-        pImpl->reportingService.setAggregateDataProvider(
-            [this](
-                const ReportRequest& request,
-                const DashboardViewModel& reportViewModel,
-                const ReportMetadata& metadata) {
-                return buildReportAggregateData(
-                    pImpl->storageService,
-                    request,
-                    reportViewModel,
-                    metadata,
-                    std::time(nullptr));
-            });
-        pImpl->dashboardPresenter.setVisible(!launchInBackground);
-#ifdef JISTATS_ENABLE_TEST_HOOKS
-        if (!pImpl->disableTaskbarForTesting) {
-            pImpl->applyTaskbarPreference(viewModel.preferences);
-        }
-#else
-        pImpl->applyTaskbarPreference(viewModel.preferences);
-#endif
-
-        pImpl->startInteractionWorkThread();
+        pImpl->reportingService.setAggregateDataProvider([this](const ReportRequest& request,
+                                                                const DashboardViewModel& reportViewModel,
+                                                                const ReportMetadata& metadata) {
+            return buildReportAggregateData(pImpl->storageService, request, reportViewModel, metadata,
+                                            std::time(nullptr));
+        });
         pImpl->dashboardPresenter.setPreferencesChangedCallback(
             [this](const DashboardPreferences& preferences) { pImpl->requestPreferencesChange(preferences); });
         pImpl->dashboardPresenter.setCodexModelAttributionChangedCallback([this](bool enabled, std::uint64_t request) {
@@ -7760,52 +7809,19 @@ bool AppController::init(bool launchInBackground) {
             pImpl->requestAnalysisScopeChange(state);
         });
 
-        // Initialize tray controller
-#ifdef JISTATS_ENABLE_TEST_HOOKS
-        if (!pImpl->headlessForTesting) {
-#endif
-        if (pImpl->trayController.init()) {
-            const auto showDashboard = [this]() {
-                pImpl->dashboardPresenter.setVisible(true);
-                pImpl->requestPersistedActivityRefresh();
-            };
-            pImpl->trayController.setOnShowDashboardCallback(showDashboard);
-            pImpl->trayController.setOnPreferencesCallback(showDashboard);
-            pImpl->trayController.setOnRetryNowCallback([this]() {
-                pImpl->dashboardPresenter.requestOfflineRetry();
-            });
-            pImpl->trayController.setOnDismissOfflineNoticeCallback([this]() {
-                pImpl->dashboardPresenter.requestOfflineDismiss();
-            });
-            pImpl->trayController.setOnExitCallback([this]() {
-                requestShutdown();
-            });
-            pImpl->taskbarPresenter.setOnShowDashboardCallback(showDashboard);
-            pImpl->taskbarPresenter.setOnPreferencesCallback(showDashboard);
-            pImpl->taskbarPresenter.setOnRetryNowCallback([this]() {
-                pImpl->dashboardPresenter.requestOfflineRetry();
-            });
-            pImpl->taskbarPresenter.setOnDismissOfflineNoticeCallback([this]() {
-                pImpl->dashboardPresenter.requestOfflineDismiss();
-            });
-            pImpl->taskbarPresenter.setOnExitCallback([this]() {
-                requestShutdown();
-            });
-            JISTATS_LOG_INFO(LogCategory::Startup, "TrayController ready");
-        } else {
-            JISTATS_LOG_WARN(LogCategory::Startup,
-                "TrayController unavailable: " + pImpl->trayController.getLastError());
-            if (launchInBackground) {
-                pImpl->dashboardPresenter.setVisible(true);
-                JISTATS_LOG_WARN(LogCategory::Startup,
-                    "TrayController init failed during background launch; showing dashboard instead");
-            }
+        if (pImpl->exitRequested.load()) {
+            return true;
         }
+        pImpl->applyRuntimeViewModel(viewModel, now, std::move(connectivityUpdates));
 #ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (!pImpl->disableTaskbarForTesting) {
+            pImpl->applyTaskbarPreference(viewModel.preferences);
         }
+#else
+        pImpl->applyTaskbarPreference(viewModel.preferences);
 #endif
 
-        pImpl->syncTrayRuntimeIndicator(viewModel);
+        pImpl->startInteractionWorkThread();
         if (pImpl->shouldQueueDeferredStartupRefresh(
                 loadedPreferences,
                 usedPersistedStartupHydration,
@@ -7821,7 +7837,6 @@ bool AppController::init(bool launchInBackground) {
         pImpl->startScheduledExportWatcher();
         pImpl->startRetentionWatcher();
 
-        pImpl->initialized = true;
         pImpl->state = "running";
         JISTATS_LOG_INFO(LogCategory::Startup, "JiStats initialized");
         return true;
@@ -7846,10 +7861,7 @@ int AppController::run() {
 }
 
 void AppController::requestShutdown() {
-    if (!pImpl->initialized) {
-        return;
-    }
-
+    pImpl->exitRequested.store(true);
     pImpl->state = "stopping";
     pImpl->dashboardPresenter.requestClose();
 }
@@ -7862,7 +7874,7 @@ void AppController::shutdown() {
 }
 
 std::string AppController::getState() const {
-    return pImpl->state;
+    return pImpl->state.load();
 }
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
