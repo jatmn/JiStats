@@ -103,6 +103,8 @@ jobs:
         with:
           filter: blob:none
           persist-credentials: false
+      - name: Run Pullfrog authorization tests
+        run: node --test scripts/pullfrog-*.test.mjs
       - name: Install ccache
         env:
           GH_TOKEN: ${{ github.token }}
@@ -170,12 +172,23 @@ jobs:
           if ! command -v ninja >/dev/null; then
             packages+=(ninja-build)
           fi
-          versions=$(LC_ALL=C apt-cache policy "${packages[@]}" | sed -n '/^[^ ]/p; /Candidate: /p')
-          fingerprint=$(printf '%s\n' "${ImageVersion:-}" "${packages[*]}" "$versions" | sha256sum | cut -d ' ' -f1)
-          prefix="jistats-mingw-apt-v1-$VERSION_CODENAME-$RUNNER_ARCH-"
+          # Use signed index metadata as the version fingerprint without
+          # resolving packages against the entire APT cache.
+          shopt -s nullglob
+          releases=(/var/lib/apt/lists/*_InRelease /var/lib/apt/lists/*_Release)
+          fingerprint=$(
+            {
+              printf '%s\n' "${ImageVersion:-}" "${packages[*]}"
+              if (( ${#releases[@]} )); then
+                sha256sum "${releases[@]}"
+              fi
+            } | sha256sum | cut -d ' ' -f1
+          )
+          prefix="jistats-mingw-apt-v2-$VERSION_CODENAME-$RUNNER_ARCH-"
           {
             echo "key=$prefix$fingerprint"
             echo "prefix=$prefix"
+            echo "legacy-prefix=jistats-mingw-apt-v1-$VERSION_CODENAME-$RUNNER_ARCH-"
             echo "names=${packages[*]}"
           } >> "$GITHUB_OUTPUT"
       - name: Restore MinGW package archives
@@ -185,7 +198,9 @@ jobs:
         with:
           path: ${{ runner.temp }}/jistats-apt/*.deb
           key: ${{ steps.packages.outputs.key }}
-          restore-keys: ${{ steps.packages.outputs.prefix }}
+          restore-keys: |
+            ${{ steps.packages.outputs.prefix }}
+            ${{ steps.packages.outputs.legacy-prefix }}
       - name: Install MinGW-w64 and ImageMagick in parallel with checkout and cache restore
         id: toolchain
         if: steps.packages.outputs.key != ''
@@ -228,8 +243,6 @@ jobs:
           ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
               needs.changes.outputs.selector != 'success' }}
         run: bash scripts/check_native_ci_selection.sh
-      - name: Run Pullfrog authorization tests
-        run: node --test scripts/pullfrog-*.test.mjs
       - name: Restore compiler results
         id: compiler-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
