@@ -430,16 +430,33 @@ TEST_CASE("MiniMax capture writers keep output outside source trees", "[minimax]
     CHECK_FALSE(std::filesystem::exists(privateOutput));
 
     if (GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") == nullptr) {
+        const auto makeJunction = [](const auto& junction, const auto& target) {
+            const std::wstring command =
+                L"cmd.exe /d /c mklink /J \"" + junction.wstring() + L"\" \"" + target.wstring() + L"\"";
+            REQUIRE(_wsystem(command.c_str()) == 0);
+        };
         const auto junction = temp.path() / "external-junction";
         const auto target = source / "src";
-        const std::wstring command =
-            L"cmd.exe /d /c mklink /J \"" + junction.wstring() + L"\" \"" + target.wstring() + L"\"";
-        REQUIRE(_wsystem(command.c_str()) == 0);
+        makeJunction(junction, target);
         CHECK_FALSE(capture.writeCaptureJson({}, (junction / "captures" / "quota.json").string(), error));
         CHECK(error == "Capture output must be outside the JiStats source checkout.");
         CHECK_FALSE(capture.writeDiagnosticJson({}, (junction / "captures" / "diagnostics.json").string(), error));
         CHECK(error == "Capture output must be outside the JiStats source checkout.");
         CHECK_FALSE(std::filesystem::exists(target / "captures"));
+
+        auto deep = temp.path() / "external-output";
+        while (deep.native().size() < 205) {
+            deep /= std::string(32, 'd');
+        }
+        std::filesystem::create_directories(deep);
+        const auto deepJunction = temp.path() / "deep-junction";
+        makeJunction(deepJunction, deep);
+        const std::string fileName = std::string(80, 's') + ".json";
+        const auto deepOutput = std::filesystem::path(LR"(\\?\)" + (deep / fileName).wstring());
+        REQUIRE((deep / fileName).native().size() >= MAX_PATH);
+        REQUIRE(capture.writeCaptureJson({}, (deepJunction / fileName).string(), error));
+        CHECK(std::filesystem::is_regular_file(deepOutput));
+        CHECK(std::filesystem::remove(deepOutput));
     }
 
     const auto sibling = temp.path() / "checkout-captures";

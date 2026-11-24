@@ -5,7 +5,6 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
-#include <string_view>
 
 #include <windows.h>
 
@@ -70,14 +69,7 @@ std::filesystem::path resolveCaptureOutputPath(std::filesystem::path path) {
             }
 
             resolved.resize(length);
-            // Convert the Win32 device prefix to an ordinary drive or UNC path for std::filesystem.
-            constexpr std::wstring_view devicePrefix = LR"(\\?\)";
-            constexpr std::wstring_view uncPrefix = LR"(\\?\UNC\)";
-            if (resolved.compare(0, uncPrefix.size(), uncPrefix) == 0) {
-                resolved.replace(0, uncPrefix.size(), LR"(\\)");
-            } else if (resolved.compare(0, devicePrefix.size(), devicePrefix) == 0) {
-                resolved.erase(0, devicePrefix.size());
-            }
+            // Keep Win32's extended prefix for marker checks and writes to deep paths.
             auto resolvedPath = std::filesystem::path(resolved);
             return suffix.empty() ? resolvedPath : resolvedPath / suffix;
         }
@@ -115,7 +107,8 @@ std::optional<std::filesystem::path> prepareCaptureOutputPath(const std::string&
         // Recognize a source tree even for an out-of-tree build or an extracted source archive.
         if (std::filesystem::is_regular_file(directory / "CMakeLists.txt", ec) &&
             std::filesystem::is_regular_file(directory / "AGENTS.md", ec) &&
-            std::filesystem::is_regular_file(directory / "src/providers/minimax/MiniMaxLiveCapture.cpp", ec)) {
+            std::filesystem::is_regular_file(directory / "src" / "providers" / "minimax" / "MiniMaxLiveCapture.cpp",
+                                             ec)) {
             error = "Capture output must be outside the JiStats source checkout.";
             return std::nullopt;
         }
