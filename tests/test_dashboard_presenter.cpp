@@ -368,6 +368,57 @@ TEST_CASE("DashboardPresenter syncs scheduled export controls from the view mode
     presenter.shutdown();
 }
 
+TEST_CASE("DashboardPresenter rescales Settings fonts and controls on a DPI change",
+          "[dashboard_presenter][settings]") {
+    DashboardPresenter presenter;
+    REQUIRE(presenter.init());
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+    REQUIRE(
+        waitForCondition([&]() { return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+
+    const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    REQUIRE(settings != nullptr);
+    const HWND checkbox = FindWindowExW(settings, nullptr, L"Button", L"Enable taskbar overlay");
+    const HWND close = FindWindowExW(settings, nullptr, L"Button", L"Close");
+    REQUIRE(checkbox != nullptr);
+    REQUIRE(close != nullptr);
+
+    const UINT initialDpi = GetDpiForWindow(settings);
+    REQUIRE(initialDpi != 0);
+    const auto height = [](HWND control) {
+        RECT bounds{};
+        REQUIRE(GetWindowRect(control, &bounds));
+        return bounds.bottom - bounds.top;
+    };
+    const auto fontHeight = [](HWND control) {
+        const HGDIOBJ font = reinterpret_cast<HGDIOBJ>(SendMessageW(control, WM_GETFONT, 0, 0));
+        LOGFONTW info{};
+        REQUIRE(GetObjectW(font, sizeof(info), &info) == sizeof(info));
+        return -info.lfHeight;
+    };
+    CHECK(height(checkbox) == MulDiv(22, initialDpi, 96));
+    CHECK(fontHeight(checkbox) == MulDiv(9, initialDpi, 72));
+
+    RECT original{};
+    REQUIRE(GetWindowRect(settings, &original));
+    RECT suggested = original;
+    suggested.right -= 20;
+    const UINT largerDpi = initialDpi * 2;
+    SendMessageW(settings, WM_DPICHANGED, MAKEWPARAM(largerDpi, largerDpi), reinterpret_cast<LPARAM>(&suggested));
+
+    RECT actual{};
+    REQUIRE(GetWindowRect(settings, &actual));
+    CHECK(EqualRect(&actual, &suggested));
+    CHECK(height(checkbox) == MulDiv(22, largerDpi, 96));
+    CHECK(height(close) == MulDiv(28, largerDpi, 96));
+    CHECK(fontHeight(checkbox) == MulDiv(9, largerDpi, 72));
+    CHECK(fontHeight(close) == fontHeight(checkbox));
+
+    SendMessageW(settings, WM_DPICHANGED, MAKEWPARAM(initialDpi, initialDpi), reinterpret_cast<LPARAM>(&original));
+    CHECK(height(checkbox) == MulDiv(22, initialDpi, 96));
+    CHECK(fontHeight(checkbox) == MulDiv(9, initialDpi, 72));
+}
+
 TEST_CASE("DashboardPresenter tabs through visible Settings controls", "[dashboard_presenter][settings]") {
     DashboardPresenter presenter;
     auto model = makeQuotaViewModel();

@@ -1152,6 +1152,8 @@ public:
     std::condition_variable readyCv;
     HWND window = nullptr;
     HWND preferencesWindow = nullptr;
+    UINT preferencesDpi = 96;
+    HFONT preferencesFont = nullptr;
     HWND analysisWindow = nullptr;
     HWND titleLabel = nullptr;
     HWND dashboardViewport = nullptr;
@@ -1376,6 +1378,8 @@ public:
     static constexpr int kPreferencesScheduledExportCheckboxId = 1108;
     static constexpr int kPreferencesScheduledExportIntervalEditId = 1109;
     static constexpr int kPreferencesCloseButtonId = 1106;
+    static constexpr int kPreferencesWidth = 560;
+    static constexpr int kPreferencesHeight = 620;
     static constexpr int kPreferencesTabId = 1107;
     static constexpr int kPreferencesScheduledExportPathEditId = 1115;
     static constexpr int kMiniMaxPlanComboId = 1110;
@@ -2315,12 +2319,13 @@ public:
             return;
         }
 
+        const auto px = [this](int value) { return MulDiv(value, preferencesDpi, 96); };
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
-        const int margin = 12;
-        const int buttonWidth = 88;
-        const int buttonHeight = 28;
-        const int closeBottomMargin = 16;
+        const int margin = px(12);
+        const int buttonWidth = px(88);
+        const int buttonHeight = px(28);
+        const int closeBottomMargin = px(16);
         const int tabTop = margin;
         const int contentWidth = clientRect.right - (margin * 2);
         const int tabHeight = clientRect.bottom - tabTop - buttonHeight - closeBottomMargin - (margin * 2);
@@ -2334,169 +2339,171 @@ public:
         const int pageWidth = tabRect.right - tabRect.left;
         const int pageHeight = tabRect.bottom - tabRect.top;
 
-        const int innerLeft = pageLeft + 14;
-        const int innerTop = pageTop + 18;
-        const int innerWidth = pageWidth - 28;
-        const int rowHeight = 22;
+        const int innerLeft = pageLeft + px(14);
+        const int innerTop = pageTop + px(18);
+        const int innerWidth = pageWidth - px(28);
+        const int rowHeight = px(22);
 
         if (preferencesGeneralGroup != nullptr) {
-            MoveWindow(preferencesGeneralGroup, pageLeft, pageTop, pageWidth, 170, TRUE);
+            MoveWindow(preferencesGeneralGroup, pageLeft, pageTop, pageWidth, px(170), TRUE);
         }
         if (preferencesInfo != nullptr) {
-            MoveWindow(preferencesInfo, innerLeft, innerTop + 8, innerWidth - 12, 36, TRUE);
+            MoveWindow(preferencesInfo, innerLeft, innerTop + px(8), innerWidth - px(12), px(36), TRUE);
         }
         if (overlayCheckbox != nullptr) {
-            MoveWindow(overlayCheckbox, innerLeft, innerTop + 56, 240, rowHeight, TRUE);
+            MoveWindow(overlayCheckbox, innerLeft, innerTop + px(56), px(240), rowHeight, TRUE);
         }
         if (startupCheckbox != nullptr) {
-            MoveWindow(startupCheckbox, innerLeft, innerTop + 86, 220, rowHeight, TRUE);
+            MoveWindow(startupCheckbox, innerLeft, innerTop + px(86), px(220), rowHeight, TRUE);
         }
         if (startupBackgroundCheckbox != nullptr) {
-            MoveWindow(startupBackgroundCheckbox, innerLeft + 20, innerTop + 114, 320, rowHeight, TRUE);
+            MoveWindow(startupBackgroundCheckbox, innerLeft + px(20), innerTop + px(114), px(320), rowHeight, TRUE);
         }
         if (scheduledExportGroup != nullptr) {
-            MoveWindow(scheduledExportGroup, pageLeft, pageTop + 182, pageWidth, 194, TRUE);
+            MoveWindow(scheduledExportGroup, pageLeft, pageTop + px(182), pageWidth, px(194), TRUE);
         }
         if (scheduledExportInfo != nullptr) {
-            MoveWindow(scheduledExportInfo, innerLeft, innerTop + 190, innerWidth - 12, 36, TRUE);
+            MoveWindow(scheduledExportInfo, innerLeft, innerTop + px(190), innerWidth - px(12), px(36), TRUE);
         }
         if (scheduledExportCheckbox != nullptr) {
-            MoveWindow(scheduledExportCheckbox, innerLeft, innerTop + 226, 260, rowHeight, TRUE);
+            MoveWindow(scheduledExportCheckbox, innerLeft, innerTop + px(226), px(260), rowHeight, TRUE);
         }
         if (scheduledExportIntervalLabel != nullptr) {
-            MoveWindow(scheduledExportIntervalLabel, innerLeft, innerTop + 256, 60, 20, TRUE);
+            MoveWindow(scheduledExportIntervalLabel, innerLeft, innerTop + px(256), px(60), px(20), TRUE);
         }
         if (scheduledExportIntervalEdit != nullptr) {
-            MoveWindow(scheduledExportIntervalEdit, innerLeft + 66, innerTop + 252, 72, 22, TRUE);
+            MoveWindow(scheduledExportIntervalEdit, innerLeft + px(66), innerTop + px(252), px(72), px(22), TRUE);
         }
         if (scheduledExportIntervalSuffix != nullptr) {
-            MoveWindow(scheduledExportIntervalSuffix, innerLeft + 146, innerTop + 256, 70, 20, TRUE);
+            MoveWindow(scheduledExportIntervalSuffix, innerLeft + px(146), innerTop + px(256), px(70), px(20), TRUE);
         }
         if (scheduledExportPathLabel != nullptr) {
-            MoveWindow(scheduledExportPathLabel, innerLeft, innerTop + 286, 86, 20, TRUE);
+            MoveWindow(scheduledExportPathLabel, innerLeft, innerTop + px(286), px(86), px(20), TRUE);
         }
         if (scheduledExportPathEdit != nullptr) {
-            MoveWindow(scheduledExportPathEdit, innerLeft + 88, innerTop + 282, innerWidth - 106, 22, TRUE);
+            MoveWindow(scheduledExportPathEdit, innerLeft + px(88), innerTop + px(282), innerWidth - px(106), px(22),
+                       TRUE);
         }
         if (scheduledExportLastRunLabel != nullptr) {
-            MoveWindow(scheduledExportLastRunLabel, innerLeft, innerTop + 316, 70, 20, TRUE);
+            MoveWindow(scheduledExportLastRunLabel, innerLeft, innerTop + px(316), px(70), px(20), TRUE);
         }
         if (scheduledExportLastRunValue != nullptr) {
-            MoveWindow(scheduledExportLastRunValue, innerLeft + 88, innerTop + 316, innerWidth - 106, 20, TRUE);
+            MoveWindow(scheduledExportLastRunValue, innerLeft + px(88), innerTop + px(316), innerWidth - px(106),
+                       px(20), TRUE);
         }
 
         if (openAISettingsGroup != nullptr) {
             MoveWindow(openAISettingsGroup, pageLeft, pageTop, pageWidth, pageHeight, TRUE);
         }
         if (openAISettingsInfo != nullptr) {
-            MoveWindow(openAISettingsInfo, innerLeft, innerTop + 8, innerWidth - 12, 72, TRUE);
+            MoveWindow(openAISettingsInfo, innerLeft, innerTop + px(8), innerWidth - px(12), px(72), TRUE);
         }
         if (openaiSubscriptionCheckbox != nullptr) {
-            MoveWindow(openaiSubscriptionCheckbox, innerLeft, innerTop + 92, 320, rowHeight, TRUE);
+            MoveWindow(openaiSubscriptionCheckbox, innerLeft, innerTop + px(92), px(320), rowHeight, TRUE);
         }
         if (codexModelAttributionCheckbox != nullptr) {
-            MoveWindow(codexModelAttributionCheckbox, innerLeft, innerTop + 122, 320, rowHeight, TRUE);
+            MoveWindow(codexModelAttributionCheckbox, innerLeft, innerTop + px(122), px(320), rowHeight, TRUE);
         }
 
         if (miniMaxAccountsGroup != nullptr) {
             MoveWindow(miniMaxAccountsGroup, pageLeft, pageTop, pageWidth, pageHeight, TRUE);
         }
         if (miniMaxAccountsInfo != nullptr) {
-            MoveWindow(miniMaxAccountsInfo, innerLeft, innerTop + 8, innerWidth - 12, 36, TRUE);
+            MoveWindow(miniMaxAccountsInfo, innerLeft, innerTop + px(8), innerWidth - px(12), px(36), TRUE);
         }
         if (miniMaxSubscriptionCheckbox != nullptr) {
-            MoveWindow(miniMaxSubscriptionCheckbox, innerLeft, innerTop + 50, 320, rowHeight, TRUE);
+            MoveWindow(miniMaxSubscriptionCheckbox, innerLeft, innerTop + px(50), px(320), rowHeight, TRUE);
         }
         if (miniMaxCodingStatus != nullptr) {
-            MoveWindow(miniMaxCodingStatus, innerLeft, innerTop + 86, innerWidth - 12, 18, TRUE);
+            MoveWindow(miniMaxCodingStatus, innerLeft, innerTop + px(86), innerWidth - px(12), px(18), TRUE);
         }
         if (miniMaxCodingDetail != nullptr) {
-            MoveWindow(miniMaxCodingDetail, innerLeft + 16, innerTop + 106, innerWidth - 28, 18, TRUE);
+            MoveWindow(miniMaxCodingDetail, innerLeft + px(16), innerTop + px(106), innerWidth - px(28), px(18), TRUE);
         }
         if (miniMaxTokenStatus != nullptr) {
-            MoveWindow(miniMaxTokenStatus, innerLeft, innerTop + 134, innerWidth - 12, 18, TRUE);
+            MoveWindow(miniMaxTokenStatus, innerLeft, innerTop + px(134), innerWidth - px(12), px(18), TRUE);
         }
         if (miniMaxTokenDetail != nullptr) {
-            MoveWindow(miniMaxTokenDetail, innerLeft + 16, innerTop + 154, innerWidth - 28, 18, TRUE);
+            MoveWindow(miniMaxTokenDetail, innerLeft + px(16), innerTop + px(154), innerWidth - px(28), px(18), TRUE);
         }
         if (miniMaxPlanLabel != nullptr) {
-            MoveWindow(miniMaxPlanLabel, innerLeft, innerTop + 190, 64, 20, TRUE);
+            MoveWindow(miniMaxPlanLabel, innerLeft, innerTop + px(190), px(64), px(20), TRUE);
         }
         if (miniMaxPlanCombo != nullptr) {
-            MoveWindow(miniMaxPlanCombo, innerLeft + 74, innerTop + 186, 170, 300, TRUE);
+            MoveWindow(miniMaxPlanCombo, innerLeft + px(74), innerTop + px(186), px(170), px(300), TRUE);
         }
         if (miniMaxAccountLabel != nullptr) {
-            MoveWindow(miniMaxAccountLabel, innerLeft, innerTop + 222, 86, 20, TRUE);
+            MoveWindow(miniMaxAccountLabel, innerLeft, innerTop + px(222), px(86), px(20), TRUE);
         }
         if (miniMaxAccountEdit != nullptr) {
-            MoveWindow(miniMaxAccountEdit, innerLeft + 92, innerTop + 218, 250, 22, TRUE);
+            MoveWindow(miniMaxAccountEdit, innerLeft + px(92), innerTop + px(218), px(250), px(22), TRUE);
         }
         if (miniMaxSecretLabel != nullptr) {
-            MoveWindow(miniMaxSecretLabel, innerLeft, innerTop + 254, 96, 20, TRUE);
+            MoveWindow(miniMaxSecretLabel, innerLeft, innerTop + px(254), px(96), px(20), TRUE);
         }
         if (miniMaxSecretEdit != nullptr) {
-            MoveWindow(miniMaxSecretEdit, innerLeft + 102, innerTop + 250, 240, 22, TRUE);
+            MoveWindow(miniMaxSecretEdit, innerLeft + px(102), innerTop + px(250), px(240), px(22), TRUE);
         }
         if (miniMaxSaveButton != nullptr) {
-            MoveWindow(miniMaxSaveButton, pageLeft + pageWidth - 118, innerTop + 216, 92, 26, TRUE);
+            MoveWindow(miniMaxSaveButton, pageLeft + pageWidth - px(118), innerTop + px(216), px(92), px(26), TRUE);
         }
         if (miniMaxValidateButton != nullptr) {
-            MoveWindow(miniMaxValidateButton, pageLeft + pageWidth - 118, innerTop + 248, 92, 26, TRUE);
+            MoveWindow(miniMaxValidateButton, pageLeft + pageWidth - px(118), innerTop + px(248), px(92), px(26), TRUE);
         }
         if (miniMaxFeedbackLabel != nullptr) {
-            MoveWindow(miniMaxFeedbackLabel, innerLeft, innerTop + 286, innerWidth - 12, 42, TRUE);
+            MoveWindow(miniMaxFeedbackLabel, innerLeft, innerTop + px(286), innerWidth - px(12), px(42), TRUE);
         }
 
         if (claudeCodeGroup != nullptr) {
             MoveWindow(claudeCodeGroup, pageLeft, pageTop, pageWidth, pageHeight, TRUE);
         }
         if (claudeCodeInfo != nullptr) {
-            MoveWindow(claudeCodeInfo, innerLeft, innerTop + 8, innerWidth - 12, 84, TRUE);
+            MoveWindow(claudeCodeInfo, innerLeft, innerTop + px(8), innerWidth - px(12), px(84), TRUE);
         }
         if (claudeCodeEnableCheckbox != nullptr) {
-            MoveWindow(claudeCodeEnableCheckbox, innerLeft, innerTop + 106, 280, rowHeight, TRUE);
+            MoveWindow(claudeCodeEnableCheckbox, innerLeft, innerTop + px(106), px(280), rowHeight, TRUE);
         }
         if (claudeCodeStatus != nullptr) {
-            MoveWindow(claudeCodeStatus, innerLeft, innerTop + 138, innerWidth - 12, 20, TRUE);
+            MoveWindow(claudeCodeStatus, innerLeft, innerTop + px(138), innerWidth - px(12), px(20), TRUE);
         }
         if (claudeCodeDetail != nullptr) {
-            MoveWindow(claudeCodeDetail, innerLeft, innerTop + 166, innerWidth - 12, 84, TRUE);
+            MoveWindow(claudeCodeDetail, innerLeft, innerTop + px(166), innerWidth - px(12), px(84), TRUE);
         }
 
         if (futureProviderGroup != nullptr) {
             MoveWindow(futureProviderGroup, pageLeft, pageTop, pageWidth, pageHeight, TRUE);
         }
         if (futureProviderInfo != nullptr) {
-            MoveWindow(futureProviderInfo, innerLeft, innerTop + 18, innerWidth - 12, 120, TRUE);
+            MoveWindow(futureProviderInfo, innerLeft, innerTop + px(18), innerWidth - px(12), px(120), TRUE);
         }
 
         if (externalSubscriptionsGroup != nullptr) {
             MoveWindow(externalSubscriptionsGroup, pageLeft, pageTop, pageWidth, pageHeight, TRUE);
-            MoveWindow(externalSubscriptionsInfo, innerLeft, innerTop + 8, innerWidth - 12, 80, TRUE);
-            MoveWindow(grokSubscriptionCheckbox, innerLeft, innerTop + 100, 300, rowHeight, TRUE);
-            MoveWindow(cursorSubscriptionCheckbox, innerLeft, innerTop + 132, 300, rowHeight, TRUE);
+            MoveWindow(externalSubscriptionsInfo, innerLeft, innerTop + px(8), innerWidth - px(12), px(80), TRUE);
+            MoveWindow(grokSubscriptionCheckbox, innerLeft, innerTop + px(100), px(300), rowHeight, TRUE);
+            MoveWindow(cursorSubscriptionCheckbox, innerLeft, innerTop + px(132), px(300), rowHeight, TRUE);
         }
 
         if (kimiCodeGroup != nullptr) {
             MoveWindow(kimiCodeGroup, pageLeft, pageTop, pageWidth, pageHeight, TRUE);
         }
         if (kimiCodeInfo != nullptr) {
-            MoveWindow(kimiCodeInfo, innerLeft, innerTop + 8, innerWidth - 12, 84, TRUE);
+            MoveWindow(kimiCodeInfo, innerLeft, innerTop + px(8), innerWidth - px(12), px(84), TRUE);
         }
         if (kimiCodeEnableCheckbox != nullptr) {
-            MoveWindow(kimiCodeEnableCheckbox, innerLeft, innerTop + 106, 280, rowHeight, TRUE);
+            MoveWindow(kimiCodeEnableCheckbox, innerLeft, innerTop + px(106), px(280), rowHeight, TRUE);
         }
         if (kimiCodeStatus != nullptr) {
-            MoveWindow(kimiCodeStatus, innerLeft, innerTop + 138, innerWidth - 12, 20, TRUE);
+            MoveWindow(kimiCodeStatus, innerLeft, innerTop + px(138), innerWidth - px(12), px(20), TRUE);
         }
         if (kimiCodeDetail != nullptr) {
-            MoveWindow(kimiCodeDetail, innerLeft, innerTop + 166, innerWidth - 12, 84, TRUE);
+            MoveWindow(kimiCodeDetail, innerLeft, innerTop + px(166), innerWidth - px(12), px(84), TRUE);
         }
 
         const int buttonsTop = clientRect.bottom - closeBottomMargin - buttonHeight;
         if (preferencesSaveStatus != nullptr) {
-            MoveWindow(preferencesSaveStatus, margin, buttonsTop + 5, contentWidth - 2 * (buttonWidth + margin), 20,
-                       TRUE);
+            MoveWindow(preferencesSaveStatus, margin, buttonsTop + px(5), contentWidth - 2 * (buttonWidth + margin),
+                       px(20), TRUE);
         }
         if (preferencesRetryButton != nullptr) {
             MoveWindow(preferencesRetryButton, clientRect.right - 2 * (margin + buttonWidth), buttonsTop, buttonWidth,
@@ -4242,6 +4249,26 @@ public:
         }
     }
 
+    void applyPreferencesFont(HWND hwnd) {
+        LOGFONTW font{};
+        font.lfHeight = -MulDiv(9, preferencesDpi, 72);
+        font.lfWeight = FW_NORMAL;
+        font.lfQuality = CLEARTYPE_QUALITY;
+        wcscpy_s(font.lfFaceName, L"Segoe UI");
+        const HFONT newFont = CreateFontIndirectW(&font);
+        if (newFont == nullptr) {
+            return;
+        }
+
+        const HFONT oldFont = std::exchange(preferencesFont, newFont);
+        for (HWND control = GetWindow(hwnd, GW_CHILD); control != nullptr; control = GetWindow(control, GW_HWNDNEXT)) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(preferencesFont), FALSE);
+        }
+        if (oldFont != nullptr) {
+            DeleteObject(oldFont);
+        }
+    }
+
     void createPreferencesControls(HWND hwnd) {
         preferencesTab = CreateWindowExW(
             0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED, 12, 12,
@@ -4861,61 +4888,7 @@ public:
             }
         }
 
-        applyBodyFont(preferencesTab);
-        applyBodyFont(preferencesGeneralGroup);
-        applyBodyFont(preferencesInfo);
-        applyBodyFont(overlayCheckbox);
-        applyBodyFont(startupCheckbox);
-        applyBodyFont(startupBackgroundCheckbox);
-        applyBodyFont(scheduledExportGroup);
-        applyBodyFont(scheduledExportInfo);
-        applyBodyFont(scheduledExportCheckbox);
-        applyBodyFont(scheduledExportIntervalLabel);
-        applyBodyFont(scheduledExportIntervalEdit);
-        applyBodyFont(scheduledExportIntervalSuffix);
-        applyBodyFont(scheduledExportPathLabel);
-        applyBodyFont(scheduledExportPathEdit);
-        applyBodyFont(scheduledExportLastRunLabel);
-        applyBodyFont(scheduledExportLastRunValue);
-        applyBodyFont(openAISettingsGroup);
-        applyBodyFont(openAISettingsInfo);
-        applyBodyFont(openaiSubscriptionCheckbox);
-        applyBodyFont(codexModelAttributionCheckbox);
-        applyBodyFont(miniMaxSubscriptionCheckbox);
-        applyBodyFont(claudeCodeGroup);
-        applyBodyFont(claudeCodeInfo);
-        applyBodyFont(claudeCodeEnableCheckbox);
-        applyBodyFont(claudeCodeStatus);
-        applyBodyFont(claudeCodeDetail);
-        applyBodyFont(miniMaxAccountsGroup);
-        applyBodyFont(miniMaxAccountsInfo);
-        applyBodyFont(miniMaxCodingStatus);
-        applyBodyFont(miniMaxCodingDetail);
-        applyBodyFont(miniMaxTokenStatus);
-        applyBodyFont(miniMaxTokenDetail);
-        applyBodyFont(miniMaxPlanLabel);
-        applyBodyFont(miniMaxPlanCombo);
-        applyBodyFont(miniMaxAccountLabel);
-        applyBodyFont(miniMaxAccountEdit);
-        applyBodyFont(miniMaxSecretLabel);
-        applyBodyFont(miniMaxSecretEdit);
-        applyBodyFont(miniMaxSaveButton);
-        applyBodyFont(miniMaxValidateButton);
-        applyBodyFont(miniMaxFeedbackLabel);
-        applyBodyFont(futureProviderGroup);
-        applyBodyFont(futureProviderInfo);
-        applyBodyFont(externalSubscriptionsGroup);
-        applyBodyFont(externalSubscriptionsInfo);
-        applyBodyFont(grokSubscriptionCheckbox);
-        applyBodyFont(cursorSubscriptionCheckbox);
-        applyBodyFont(kimiCodeGroup);
-        applyBodyFont(kimiCodeInfo);
-        applyBodyFont(kimiCodeEnableCheckbox);
-        applyBodyFont(kimiCodeStatus);
-        applyBodyFont(kimiCodeDetail);
-        applyBodyFont(preferencesSaveStatus);
-        applyBodyFont(preferencesRetryButton);
-        applyBodyFont(preferencesCloseButton);
+        applyPreferencesFont(hwnd);
         layoutPreferencesControls(hwnd);
         syncPreferencesWindowState();
     }
@@ -4940,23 +4913,31 @@ public:
             return;
         }
 
-        HWND hwnd = CreateWindowExW(
-            WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW,
-            preferencesWindowClassName(),
-            L"JiStats Settings",
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            560,
-            620,
-            owner,
-            nullptr,
-            GetModuleHandleW(nullptr),
-            this);
+        const int width = scaledPixels(kPreferencesWidth, owner);
+        const int height = scaledPixels(kPreferencesHeight, owner);
+        RECT ownerRect{};
+        RECT bounds{0, 0, width, height};
+        int x = CW_USEDEFAULT;
+        int y = CW_USEDEFAULT;
+        if (GetWindowRect(owner, &ownerRect)) {
+            const LONG left = ownerRect.left + (ownerRect.right - ownerRect.left - width) / 2;
+            const LONG top = ownerRect.top + (ownerRect.bottom - ownerRect.top - height) / 2;
+            bounds = {left, top, left + width, top + height};
+            RECT workArea{};
+            if (tryGetMonitorWorkArea(MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST), workArea)) {
+                clampRectToWorkArea(bounds, workArea);
+            }
+            x = bounds.left;
+            y = bounds.top;
+        }
+
+        HWND hwnd =
+            CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW, preferencesWindowClassName(), L"JiStats Settings",
+                            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, x, y, bounds.right - bounds.left,
+                            bounds.bottom - bounds.top, owner, nullptr, GetModuleHandleW(nullptr), this);
 
         if (hwnd != nullptr) {
             applyWindowIcons(hwnd);
-            centerWindowOnOwner(hwnd, owner);
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 preferencesWindow = hwnd;
@@ -5184,6 +5165,10 @@ public:
                 desktopTheme.refreshWindow(hwnd, msg);
                 return DefWindowProcW(hwnd, msg, wParam, lParam);
             case WM_CREATE:
+                preferencesDpi = GetDpiForWindow(hwnd);
+                if (preferencesDpi == 0) {
+                    preferencesDpi = 96;
+                }
                 createPreferencesControls(hwnd);
                 return 0;
             case WM_DRAWITEM: {
@@ -5193,6 +5178,23 @@ public:
                     return TRUE;
                 }
                 return DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
+            case WM_DPICHANGED: {
+                if (lParam == 0 || HIWORD(wParam) == 0) {
+                    return 0;
+                }
+                preferencesDpi = HIWORD(wParam);
+                applyPreferencesFont(hwnd);
+                RECT bounds = *reinterpret_cast<const RECT*>(lParam);
+                RECT workArea{};
+                if (tryGetMonitorWorkArea(bounds, workArea)) {
+                    clampRectToWorkArea(bounds, workArea);
+                }
+                SetWindowPos(hwnd, nullptr, bounds.left, bounds.top, bounds.right - bounds.left,
+                             bounds.bottom - bounds.top, SWP_NOZORDER | SWP_NOACTIVATE);
+                layoutPreferencesControls(hwnd);
+                InvalidateRect(hwnd, nullptr, TRUE);
+                return 0;
             }
         case WM_SIZE:
             layoutPreferencesControls(hwnd);
@@ -5428,8 +5430,14 @@ public:
                 preferencesCloseButton = nullptr;
             }
             return 0;
-        default:
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            case WM_NCDESTROY:
+                if (preferencesFont != nullptr) {
+                    DeleteObject(preferencesFont);
+                    preferencesFont = nullptr;
+                }
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            default:
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
     }
 
