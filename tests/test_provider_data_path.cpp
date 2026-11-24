@@ -285,6 +285,24 @@ TEST_CASE("Subscription quota reads provider percentages and skips unsupported b
         CHECK_FALSE(invalid.success);
         CHECK(invalid.unavailable);
     }
+    SECTION("Grok rejects a supplied negative value even with a complete period") {
+        const auto quota = subscriptionFixture(SubscriptionProvider::Grok, R"json({
+          "config": {
+            "creditUsagePercent": -0.25,
+            "currentPeriod": {"type":"WEEKLY","start":"2026-04-20T12:00:00Z","end":"2026-04-27T12:00:00Z"}
+          }
+        })json",
+                                               now);
+        CHECK_FALSE(quota.success);
+        CHECK(quota.unavailable);
+    }
+    SECTION("Grok accepts measured zero without period metadata") {
+        const auto quota =
+            subscriptionFixture(SubscriptionProvider::Grok, R"({"config":{"creditUsagePercent":0}})", now);
+        REQUIRE(quota.success);
+        CHECK(quota.used == 0);
+        CHECK(quota.remaining == 100);
+    }
     SECTION("A rejected Grok sign-in returns an actionable quota state") {
         const auto expired = SubscriptionQuotaAdapter::parseQuotaResponse(
             SubscriptionProvider::Grok, HttpResponse{false, 401, "private response", {}}, now);
@@ -315,6 +333,20 @@ TEST_CASE("Subscription quota reads provider percentages and skips unsupported b
             subscriptionFixture(SubscriptionProvider::Cursor, R"({"onDemandUsage":{"totalSpend":42}})", now);
         CHECK_FALSE(unsupported.success);
         CHECK(unsupported.unavailable);
+    }
+    SECTION("Cursor skips negative percentages and retains valid split usage") {
+        const auto unsupported =
+            subscriptionFixture(SubscriptionProvider::Cursor, R"({"planUsage":{"totalPercentUsed":-1}})", now);
+        CHECK_FALSE(unsupported.success);
+        CHECK(unsupported.unavailable);
+
+        const auto quota = subscriptionFixture(
+            SubscriptionProvider::Cursor,
+            R"({"planUsage":{"totalPercentUsed":-1,"autoPercentUsed":20,"apiPercentUsed":-1}})", now);
+        REQUIRE(quota.success);
+        CHECK(quota.windowType == "auto");
+        CHECK(quota.remaining == 80);
+        CHECK(quota.secondaryLimit == 0);
     }
 }
 
