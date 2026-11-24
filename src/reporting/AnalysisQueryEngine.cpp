@@ -1163,7 +1163,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
         std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
         appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
         appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");
-        sql += " AND ue.source_type != 'codex_local_rollout'";
+        sql += " AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')";
         if (missingDailyRollupsOnly) {
             sql +=
                 " AND NOT EXISTS ("
@@ -1363,7 +1363,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
             std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
             appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
             appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");
-            sql += " AND ue.source_type != 'codex_local_rollout'";
+            sql += " AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')";
             if (missingHourlyRollupsOnly) {
                 sql +=
                     " AND NOT EXISTS ("

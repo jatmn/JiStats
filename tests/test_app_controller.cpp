@@ -5342,6 +5342,61 @@ TEST_CASE("AppController counts providers from hourly rollups after raw usage re
     app.shutdown();
 }
 
+TEST_CASE("AppController excludes Codex SQLite model deltas from general usage", "[app][runtime][rollups][codex]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_codex_usage_export");
+    seedAllProviderTrackingEnabled(dbPath.path());
+    const std::time_t now = utcDayStartForTest(std::time(nullptr) - 12 * 3600) + 12 * 3600 + 15 * 60;
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto codex =
+        seedUsageProviderAccount(storage, "openai", "openai.codex_local_sqlite", "Codex Model Attribution");
+    const auto billable = seedUsageProviderAccount(storage, "minimax", "billable", "Billable Account");
+
+    // The recent event uses the raw path and the older event falls in an hour without a rollup.
+    for (const auto eventTime : {now - 60, now - 2 * 3600}) {
+        PersistedUsageEvent delta;
+        delta.providerId = codex.providerId;
+        delta.accountId = codex.accountId;
+        delta.eventTime = eventTime;
+        delta.sourceType = "codex_local_sqlite";
+        delta.modelKey = "codex-test-model";
+        delta.requestType = "codex_thread_delta";
+        delta.totalTokens = 321;
+        delta.rawReference = "codex-state:example:" + std::to_string(eventTime);
+        REQUIRE(storage.insertUsageEvents({delta}));
+        insertUsageEvent(storage, billable.providerId, billable.accountId, toUtcIso(eventTime), "billable-test-model",
+                         125, 5);
+    }
+    storage.close();
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setCurrentTimeForTesting(now);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    REQUIRE(app.init());
+
+    const auto summaries = app.getDashboardUsageProgressSummariesForTesting();
+    const auto lastFiveMinutes = findUsageSummary(summaries, "Last 5 Minutes");
+    const auto lastFiveHours = findUsageSummary(summaries, "Last 5 Hours");
+    REQUIRE(lastFiveMinutes.has_value());
+    REQUIRE(lastFiveHours.has_value());
+    CHECK(lastFiveMinutes->detail == "1 request, 125 tokens");
+    CHECK(lastFiveHours->detail == "2 requests, 250 tokens");
+
+    const auto path = exportDir.path() / "codex-usage.html";
+    REQUIRE(app.exportHtmlReportForTesting(path.string()).success);
+    std::ifstream report(path);
+    REQUIRE(report.is_open());
+    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+    CHECK(html.find("billable-test-model</td><td>2</td><td>250</td>") != std::string::npos);
+    CHECK(html.find("codex-test-model") == std::string::npos);
+}
+
 TEST_CASE("AppController keeps taskbar overlay on subscription quota when Codex local usage exists", "[app][runtime][taskbar][codex]") {
     requireSqlite();
 

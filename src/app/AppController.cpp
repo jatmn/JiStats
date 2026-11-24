@@ -871,11 +871,11 @@ QuantifiedUsageAggregate queryRawUsageAggregate(
         return aggregate;
     }
 
-    QueryResult result = storage.execute(
-        "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_minor_units), 0) "
-        "FROM usage_events WHERE event_time_utc >= ? AND event_time_utc <= ? "
-        "AND source_type != 'codex_local_rollout';",
-        {formatTimeUtcIso(from), formatTimeUtcIso(to)});
+    QueryResult result =
+        storage.execute("SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_minor_units), 0) "
+                        "FROM usage_events WHERE event_time_utc >= ? AND event_time_utc <= ? "
+                        "AND source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite');",
+                        {formatTimeUtcIso(from), formatTimeUtcIso(to)});
     if (!result.success() || result.rowCount() == 0) {
         return {};
     }
@@ -919,19 +919,19 @@ QuantifiedUsageAggregate queryRawUsageAggregateForMissingHourlyRollups(
         return aggregate;
     }
 
-    QueryResult result = storage.execute(
-        "SELECT COUNT(*), COALESCE(SUM(ue.total_tokens), 0), COALESCE(SUM(ue.cost_minor_units), 0) "
-        "FROM usage_events ue "
-        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
-        "AND ue.source_type != 'codex_local_rollout' "
-        "AND NOT EXISTS ("
-        "    SELECT 1 FROM usage_rollups_hourly r "
-        "    WHERE r.provider_id = ue.provider_id "
-        "      AND r.account_id = ue.account_id "
-        "      AND r.model_key = COALESCE(ue.model_key, '') "
-        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
-        ");",
-        {formatTimeUtcIso(fromHourStart), formatTimeUtcIso(toHourStart)});
+    QueryResult result =
+        storage.execute("SELECT COUNT(*), COALESCE(SUM(ue.total_tokens), 0), COALESCE(SUM(ue.cost_minor_units), 0) "
+                        "FROM usage_events ue "
+                        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
+                        "AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite') "
+                        "AND NOT EXISTS ("
+                        "    SELECT 1 FROM usage_rollups_hourly r "
+                        "    WHERE r.provider_id = ue.provider_id "
+                        "      AND r.account_id = ue.account_id "
+                        "      AND r.model_key = COALESCE(ue.model_key, '') "
+                        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
+                        ");",
+                        {formatTimeUtcIso(fromHourStart), formatTimeUtcIso(toHourStart)});
     if (!result.success() || result.rowCount() == 0) {
         return {};
     }
@@ -950,11 +950,10 @@ long long queryRawUsageProviderCount(
         return 0;
     }
 
-    QueryResult result = storage.execute(
-        "SELECT COUNT(DISTINCT provider_id) FROM usage_events "
-        "WHERE event_time_utc >= ? AND event_time_utc <= ? "
-        "AND source_type != 'codex_local_rollout';",
-        {formatTimeUtcIso(from), formatTimeUtcIso(to)});
+    QueryResult result = storage.execute("SELECT COUNT(DISTINCT provider_id) FROM usage_events "
+                                         "WHERE event_time_utc >= ? AND event_time_utc <= ? "
+                                         "AND source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite');",
+                                         {formatTimeUtcIso(from), formatTimeUtcIso(to)});
     if (!result.success() || result.rowCount() == 0) {
         return 0;
     }
@@ -998,49 +997,40 @@ long long queryHybridUsageProviderCount(
         return 0;
     }
 
-    QueryResult missingRollupProviders = storage.execute(
-        "SELECT DISTINCT ue.provider_id FROM usage_events ue "
-        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
-        "AND ue.source_type != 'codex_local_rollout' "
-        "AND NOT EXISTS ("
-        "    SELECT 1 FROM usage_rollups_hourly r "
-        "    WHERE r.provider_id = ue.provider_id "
-        "      AND r.account_id = ue.account_id "
-        "      AND r.model_key = COALESCE(ue.model_key, '') "
-        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
-        ");",
-        {
-            formatTimeUtcIso(fullHours->first),
-            formatTimeUtcIso(fullHours->second + 3599)
-        });
+    QueryResult missingRollupProviders =
+        storage.execute("SELECT DISTINCT ue.provider_id FROM usage_events ue "
+                        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
+                        "AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite') "
+                        "AND NOT EXISTS ("
+                        "    SELECT 1 FROM usage_rollups_hourly r "
+                        "    WHERE r.provider_id = ue.provider_id "
+                        "      AND r.account_id = ue.account_id "
+                        "      AND r.model_key = COALESCE(ue.model_key, '') "
+                        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
+                        ");",
+                        {formatTimeUtcIso(fullHours->first), formatTimeUtcIso(fullHours->second + 3599)});
     if (!appendProviderIds(missingRollupProviders)) {
         return 0;
     }
 
     const std::time_t trailingStart = fullHours->second + 3600;
     if (from < fullHours->first) {
-        QueryResult leadingProviders = storage.execute(
-            "SELECT DISTINCT provider_id FROM usage_events "
-            "WHERE event_time_utc >= ? AND event_time_utc <= ? "
-            "AND source_type != 'codex_local_rollout';",
-            {
-                formatTimeUtcIso(from),
-                formatTimeUtcIso(fullHours->first - 1)
-            });
+        QueryResult leadingProviders =
+            storage.execute("SELECT DISTINCT provider_id FROM usage_events "
+                            "WHERE event_time_utc >= ? AND event_time_utc <= ? "
+                            "AND source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite');",
+                            {formatTimeUtcIso(from), formatTimeUtcIso(fullHours->first - 1)});
         if (!appendProviderIds(leadingProviders)) {
             return 0;
         }
     }
 
     if (trailingStart <= to) {
-        QueryResult trailingProviders = storage.execute(
-            "SELECT DISTINCT provider_id FROM usage_events "
-            "WHERE event_time_utc >= ? AND event_time_utc <= ? "
-            "AND source_type != 'codex_local_rollout';",
-            {
-                formatTimeUtcIso(trailingStart),
-                formatTimeUtcIso(to)
-            });
+        QueryResult trailingProviders =
+            storage.execute("SELECT DISTINCT provider_id FROM usage_events "
+                            "WHERE event_time_utc >= ? AND event_time_utc <= ? "
+                            "AND source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite');",
+                            {formatTimeUtcIso(trailingStart), formatTimeUtcIso(to)});
         if (!appendProviderIds(trailingProviders)) {
             return 0;
         }
@@ -1117,15 +1107,15 @@ void accumulateRawProviderUsage(
         return;
     }
 
-    QueryResult result = storage.execute(
-        "SELECT p.provider_key, p.display_name, COUNT(*), COALESCE(SUM(ue.total_tokens), 0), "
-        "COALESCE(SUM(ue.cost_minor_units), 0) "
-        "FROM usage_events ue "
-        "JOIN providers p ON p.id = ue.provider_id "
-        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
-        "AND ue.source_type != 'codex_local_rollout' "
-        "GROUP BY p.provider_key, p.display_name;",
-        {formatTimeUtcIso(from), formatTimeUtcIso(to)});
+    QueryResult result =
+        storage.execute("SELECT p.provider_key, p.display_name, COUNT(*), COALESCE(SUM(ue.total_tokens), 0), "
+                        "COALESCE(SUM(ue.cost_minor_units), 0) "
+                        "FROM usage_events ue "
+                        "JOIN providers p ON p.id = ue.provider_id "
+                        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
+                        "AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite') "
+                        "GROUP BY p.provider_key, p.display_name;",
+                        {formatTimeUtcIso(from), formatTimeUtcIso(to)});
     if (!result.success()) {
         return;
     }
@@ -1182,22 +1172,22 @@ void accumulateRawProviderUsageForMissingHourlyRollups(
         return;
     }
 
-    QueryResult result = storage.execute(
-        "SELECT p.provider_key, p.display_name, COUNT(*), COALESCE(SUM(ue.total_tokens), 0), "
-        "COALESCE(SUM(ue.cost_minor_units), 0) "
-        "FROM usage_events ue "
-        "JOIN providers p ON p.id = ue.provider_id "
-        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
-        "AND ue.source_type != 'codex_local_rollout' "
-        "AND NOT EXISTS ("
-        "    SELECT 1 FROM usage_rollups_hourly r "
-        "    WHERE r.provider_id = ue.provider_id "
-        "      AND r.account_id = ue.account_id "
-        "      AND r.model_key = COALESCE(ue.model_key, '') "
-        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
-        ") "
-        "GROUP BY p.provider_key, p.display_name;",
-        {formatTimeUtcIso(fromHourStart), formatTimeUtcIso(toHourEnd)});
+    QueryResult result =
+        storage.execute("SELECT p.provider_key, p.display_name, COUNT(*), COALESCE(SUM(ue.total_tokens), 0), "
+                        "COALESCE(SUM(ue.cost_minor_units), 0) "
+                        "FROM usage_events ue "
+                        "JOIN providers p ON p.id = ue.provider_id "
+                        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
+                        "AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite') "
+                        "AND NOT EXISTS ("
+                        "    SELECT 1 FROM usage_rollups_hourly r "
+                        "    WHERE r.provider_id = ue.provider_id "
+                        "      AND r.account_id = ue.account_id "
+                        "      AND r.model_key = COALESCE(ue.model_key, '') "
+                        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
+                        ") "
+                        "GROUP BY p.provider_key, p.display_name;",
+                        {formatTimeUtcIso(fromHourStart), formatTimeUtcIso(toHourEnd)});
     if (!result.success()) {
         return;
     }
@@ -1601,7 +1591,7 @@ ReportAggregateData buildReportAggregateData(
                           "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
         std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
         appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
-        sql += " AND ue.source_type != 'codex_local_rollout'";
+        sql += " AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')";
         if (missingDailyRollupsOnly) {
             sql +=
                 " AND NOT EXISTS ("
@@ -1738,7 +1728,7 @@ ReportAggregateData buildReportAggregateData(
                 "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
             std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
             appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
-            sql += " AND ue.source_type != 'codex_local_rollout'";
+            sql += " AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')";
             if (missingDailyRollupsOnly) {
                 sql +=
                     " AND NOT EXISTS ("
@@ -1836,7 +1826,7 @@ ReportAggregateData buildReportAggregateData(
                 "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
             std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
             appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
-            sql += " AND ue.source_type != 'codex_local_rollout'";
+            sql += " AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')";
             if (missingDailyRollupsOnly) {
                 sql +=
                     " AND NOT EXISTS ("
@@ -1928,7 +1918,7 @@ ReportAggregateData buildReportAggregateData(
                 "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
             std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
             appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
-            sql += " AND ue.source_type != 'codex_local_rollout'";
+            sql += " AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')";
             if (missingDailyRollupsOnly) {
                 sql +=
                     " AND NOT EXISTS ("
