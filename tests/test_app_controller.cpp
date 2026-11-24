@@ -3796,6 +3796,9 @@ TEST_CASE("AppController startup hydration shows persisted quota state while liv
         100,
         40);
 
+    std::atomic<bool> sampling{false};
+    std::promise<void> releaseSample;
+    auto released = releaseSample.get_future().share();
     AppController app;
     std::promise<void> releaseQuota;
     auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
@@ -3810,9 +3813,6 @@ TEST_CASE("AppController startup hydration shows persisted quota state while liv
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
-    std::atomic<bool> sampling{false};
-    std::promise<void> releaseSample;
-    auto released = releaseSample.get_future().share();
     app.setBeforeCodexRolloutSampleForTesting([&]() {
         if (!sampling.exchange(true)) {
             released.wait_for(std::chrono::seconds(5));
