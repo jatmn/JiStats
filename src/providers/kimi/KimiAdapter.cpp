@@ -144,7 +144,7 @@ bool tryGetIntegralValue(const JsonValue& value, long long& out) {
     }
 
     if (integerPart < static_cast<double>(std::numeric_limits<long long>::min()) ||
-        integerPart > static_cast<double>(std::numeric_limits<long long>::max())) {
+        integerPart >= static_cast<double>(std::numeric_limits<long long>::max())) {
         return false;
     }
 
@@ -554,19 +554,26 @@ std::optional<KimiOAuthCredentials> refreshOAuthCredentials(
 }
 
 bool tryParseStringNumber(const JsonValue& value, long long& out) {
+    long long number = 0;
     if (value.isString()) {
+        const auto& text = value.getString();
+        std::size_t parsed = 0;
         try {
-            out = std::stoll(value.getString());
-            return out >= 0;
+            number = std::stoll(text, &parsed);
         } catch (...) {
             return false;
         }
+        if (parsed != text.size()) {
+            return false;
+        }
+    } else if (!tryGetIntegralValue(value, number)) {
+        return false;
     }
-    if (value.isNumber()) {
-        out = static_cast<long long>(value.getNumber());
-        return out >= 0;
+    if (number < 0) {
+        return false;
     }
-    return false;
+    out = number;
+    return true;
 }
 
 QuotaResponse parseUsagesResponse(const std::string& jsonBody) {
@@ -668,7 +675,7 @@ QuotaResponse parseUsagesResponse(const std::string& jsonBody) {
     if (hasWeeklyBalance) {
         const auto weeklyStart =
             weeklyResetTime > 0 ? std::max<std::time_t>(0, weeklyResetTime - (7 * 24 * 60 * 60)) : 0;
-        if (fiveHourLimit <= 0 && fiveHourUsed <= 0 && fiveHourRemaining <= 0) {
+        if (fiveHourLimit <= 0) {
             response.windowType = "weekly";
             response.windowStart = weeklyStart;
             response.windowEnd = weeklyResetTime;

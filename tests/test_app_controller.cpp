@@ -3279,6 +3279,15 @@ TEST_CASE("AppController only displays and stores measured Kimi weekly balances"
         payload = R"({"usage":{"limit":"100","used":"18"}})";
         expectedRemaining = 82;
     }
+    SECTION("a malformed remaining field leaves measured usage authoritative") {
+        payload = R"({"usage":{"limit":"100","used":"18","remaining":"0%"}})";
+        expectedRemaining = 82;
+    }
+    SECTION("a partial five-hour reading leaves weekly exhaustion visible") {
+        payload =
+            R"({"usage":{"limit":"100","remaining":"0"},"limits":[{"window":{"duration":300},"detail":{"used":"1"}}]})";
+        expectedRemaining = 0;
+    }
 
     TempTestDatabase dbPath;
     seedAllProviderTrackingEnabled(dbPath.path());
@@ -3307,11 +3316,12 @@ TEST_CASE("AppController only displays and stores measured Kimi weekly balances"
     REQUIRE(snapshots.success());
 
     if (expectedRemaining) {
+        REQUIRE(summary.has_value());
+        CHECK(summary->percentage == *expectedRemaining);
+        CHECK(summary->detail.find(std::to_string(*expectedRemaining) + "% remaining") != std::string::npos);
         REQUIRE(status->quotas.size() == 1);
         CHECK(status->quotas.front().windowType == "weekly");
         CHECK(status->quotas.front().remaining == *expectedRemaining);
-        REQUIRE(summary.has_value());
-        CHECK(summary->percentage == *expectedRemaining);
         REQUIRE(snapshots.rowCount() == 1);
         CHECK(snapshots.getString(0, 0) == "weekly");
         CHECK(snapshots.getInt64(0, 1) == 100 - *expectedRemaining);
