@@ -1042,11 +1042,12 @@ ResolvedAnalysisWindow AnalysisQueryEngine::resolveWindow(
             preferences.analysisCustomRangeEndUtc > 0) {
             window.start = utcDayStart(preferences.analysisCustomRangeStartUtc);
             window.end = utcDayStart(preferences.analysisCustomRangeEndUtc) + 86399;
-            if (window.end > now) {
-                window.end = now;
-            }
-            if (window.start > window.end) {
-                std::swap(window.start, window.end);
+            // Preserve an ordered future selection so callers can leave it empty.
+            if (window.start <= now || window.start > window.end) {
+                window.end = std::min(window.end, now);
+                if (window.start > window.end) {
+                    std::swap(window.start, window.end);
+                }
             }
             window.label = formatReportWindowLabel(window.start, window.end);
             window.effectivePreset = AnalysisDateRangePreset::Custom;
@@ -1174,6 +1175,11 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
     analysis.scopeLabel =
         (providerOption != analysis.availableProviders.end() ? providerOption->label : "All Providers") + " / " +
         accountLabel + " / " + window.label;
+
+    if (window.start > now) {
+        analysis.dataQualityNote = "The custom date range is in the future.";
+        return analysis;
+    }
 
     if (storage_ == nullptr || !storage_->isOpen()) {
         analysis.dataQualityNote = "History analysis is unavailable until JiStats storage is ready.";

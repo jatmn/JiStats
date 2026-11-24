@@ -1204,6 +1204,36 @@ TEST_CASE("AnalysisQueryEngine resolves custom windows to UTC day bounds and cla
     CHECK(toTimeT(window.reportDateRange.end) == window.end);
 }
 
+TEST_CASE("AnalysisQueryEngine keeps wholly future custom windows empty",
+          "[analysis][query_engine][analysis_query_engine]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto now = makeUtcTime(2026, 4, 20, 12, 0, 0);
+    seedUsageEvent(storage, "openai", "OpenAI", now, 777, 1, "current-model");
+
+    DashboardPreferences preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = makeUtcTime(2026, 4, 22);
+    preferences.analysisCustomRangeEndUtc = makeUtcTime(2026, 4, 24);
+    AnalysisQueryEngine engine(storage);
+    const auto window = engine.resolveWindow(preferences, now);
+    CHECK(window.start == preferences.analysisCustomRangeStartUtc);
+    CHECK(window.end == makeUtcTime(2026, 4, 24, 23, 59, 59));
+    CHECK(toTimeT(window.reportDateRange.start) == window.start);
+    CHECK(toTimeT(window.reportDateRange.end) == window.end);
+
+    const auto analysis = engine.buildViewModel({}, preferences, now);
+    CHECK(analysis.scope.dateRangePreset == AnalysisDateRangePreset::Custom);
+    CHECK(analysis.scopeLabel.find("2026-04-22 to 2026-04-24 UTC") != std::string::npos);
+    CHECK(analysis.dataQualityNote.find("future") != std::string::npos);
+    CHECK(analysis.dailySummaries.empty());
+    CHECK(analysis.trendPoints.empty());
+    CHECK(analysis.providerBreakdown.empty());
+    CHECK(analysis.quotaTrendSeries.empty());
+}
+
 TEST_CASE("AnalysisQueryEngine falls back invalid custom preferences to the effective last-7-days preset", "[analysis][query_engine][analysis_query_engine]") {
     StorageService storage;
     AnalysisQueryEngine engine(storage);
