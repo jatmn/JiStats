@@ -238,10 +238,10 @@ QuotaResponse SubscriptionQuotaAdapter::parseQuotaResponse(SubscriptionProvider 
         used = readPercent(plan, "totalPercentUsed");
         result.windowStart = readEpochMilliseconds(&root, "billingCycleStart");
         result.windowEnd = readEpochMilliseconds(&root, "billingCycleEnd");
-        result.windowType = result.windowStart > 0 && result.windowEnd > result.windowStart &&
-                                    result.windowEnd - result.windowStart <= 8 * 86400
-                                ? "weekly"
-                                : "monthly";
+        result.windowType = "subscription";
+        if (result.windowStart > 0 && result.windowEnd > result.windowStart) {
+            result.windowType = result.windowEnd - result.windowStart <= 8 * 86400 ? "weekly" : "monthly";
+        }
         if (const auto autoUsed = readPercent(plan, "autoPercentUsed"); !used && autoUsed) {
             used = autoUsed;
             result.windowType = "auto";
