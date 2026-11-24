@@ -6520,6 +6520,9 @@ public:
 
             // Attempt provider-side backfill for this provider's gap window
             UsageResponse usageResp = adapter->fetchUsage(recoveryStart, now);
+            if (exitRequested.load()) {
+                return false;
+            }
             std::string backfillOutcome = usageResp.success ? "no_data" : "fetch_failed";
             std::string backfillFailureCategory;
             std::size_t fetchedEventCount = usageResp.events.size();
@@ -6684,6 +6687,9 @@ public:
             storageService.upsertGapMarker(marker);
         }
 
+        if (exitRequested.load()) {
+            return false;
+        }
         runtimeState->recoveryMarker.clear();
         runtimeState->lastSuccessfulSyncAt = now;
         storageService.upsertRuntimeState(*runtimeState);
@@ -7169,6 +7175,9 @@ public:
         }
         QuotaRefresh refresh{++quotaRefreshGeneration, {}, {}};
         DashboardViewModel viewModel = buildDashboardViewModel(now, refresh);
+        if (exitRequested.load()) {
+            return preferences;
+        }
         viewModel.preferences = preferences;
         ProviderConnectivityUpdates connectivityUpdates;
         applyRecoveryPersistenceCycle(viewModel, preferences, now, refresh, connectivityUpdates);

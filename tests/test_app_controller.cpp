@@ -1025,6 +1025,58 @@ TEST_CASE("AppController stops starting provider requests when exiting during st
     CHECK(app.run() == 0);
 }
 
+TEST_CASE("AppController preserves recovery when Exit interrupts the deferred startup refresh",
+          "[app][startup][recovery]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        REQUIRE(SettingsService(storage).setBool("runtime.cursor_subscription_tracking_enabled", true));
+    }
+    const auto now = std::time(nullptr);
+    const auto gapStart = now - 3 * 3600;
+    const std::string marker = "catchup:" + std::to_string(gapStart);
+    seedRuntimeState(dbPath.path(), gapStart, gapStart, marker);
+    seedPersistedQuotaSnapshot(dbPath.path(), "openai", "cached-openai", "OpenAI", "openai_subscription",
+                               "OpenAI Subscription", "interval", now - 300, 30, 100, 70);
+    seedPersistedQuotaSnapshot(dbPath.path(), "cursor", "cached-cursor", "Cursor", "cursor_subscription_api",
+                               "Cursor Subscription", "weekly", now - 300, 30, 100, 70);
+
+    std::promise<void> releaseQuota;
+    auto first = std::make_shared<ControlledQuotaProviderAdapter>(
+        "cursor", "Cursor", makeQuotaResponse(now, 10, 100, "weekly", "cursor_subscription_api"),
+        releaseQuota.get_future().share());
+    auto later = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 10, 100, "interval", "openai_subscription_codex_local"));
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(first);
+    providers->addProvider(later);
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+
+    REQUIRE(app.init());
+    const bool fetchPending =
+        waitForCondition([&]() { return first->getQuotaFetchCount() > first->getCompletedQuotaFetchCount(); });
+    const bool quit = app.dispatchTrayEventForTesting(TrayController::TestEvent::MenuExit);
+    releaseQuota.set_value();
+    app.shutdown();
+
+    CHECK(fetchPending);
+    CHECK(quit);
+    CHECK(later->getQuotaFetchCount() == 0);
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto runtime = storage.getRuntimeState();
+    REQUIRE(runtime.has_value());
+    CHECK(runtime->recoveryMarker == marker);
+}
+
 TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds startup", "[app][startup][shell]") {
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     TempTestDatabase dbPath;
