@@ -568,6 +568,7 @@ bool tryMapCodexSnapshotToQuotaResponse(
 
     response.success = true;
     response.snapshotTime = snapshot.snapshotTime;
+    response.snapshotSubsecondNs = snapshot.eventSubsecondNs;
     response.windowEnd = bucket->resetsAt;
     response.windowStart = (bucket->resetsAt > windowDurationSeconds)
         ? (bucket->resetsAt - windowDurationSeconds)

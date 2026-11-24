@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <optional>
 #include <ctime>
 
 namespace JiStats {
@@ -90,6 +91,7 @@ struct QuotaResponse {
     std::string providerSurface; // normalized provenance label when known
     std::string rawResponse;
     bool unavailable = false; // The configured account cannot supply quota.
+    std::optional<int> snapshotSubsecondNs;
 };
 
 // Provider capability

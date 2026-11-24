@@ -68,7 +68,7 @@ Record completed work, the revision and evidence, and any remaining verification
 
 - ChatGPT history import matches saved conversation and message references across export runs. The redacted export regression imports a renamed copy and an overlapping export containing one new message. A second case verifies that a failed sync record write leaves the import retryable. The version 14 upgrade removes older duplicate import rows, preserving the first provenance and other activity records. [Issue #82](https://github.com/jatmn/JiStats/issues/82)
 
-- Codex quota history records percentages and skips repeats of the same dated window and balance. The controller checks late changes in the same second, separate windows, older stored units and retained rollups. MiniMax continues to record counts. [Issue #86](https://github.com/jatmn/JiStats/issues/86) · [Issue #87](https://github.com/jatmn/JiStats/issues/87)
+- Codex quota history records percentages and skips repeats of the same dated window and balance. Regression cases cover a same-second balance that returns to an earlier value, replay and restart, separate windows, older stored units, retained rollups, and Cursor’s cached Auto/API order. The bundled version 15 upgrade keeps fractional capture times for new Codex snapshots. MiniMax continues to record counts. [Issue #86](https://github.com/jatmn/JiStats/issues/86) · [Issue #87](https://github.com/jatmn/JiStats/issues/87)
 
 - Analysis keeps providers and accounts selectable when daily rollups outlive raw usage. The SQLite regression rebuilds five requests into a daily rollup, removes the raw rows, and verifies the saved account selection and totals. [Issue #81](https://github.com/jatmn/JiStats/issues/81)
 

@@ -2587,7 +2587,9 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         "       COALESCE(qs.limit_value, 0), "
         "       COALESCE(qs.remaining_value, "
         "           CASE WHEN qs.limit_value IS NOT NULL THEN qs.limit_value - qs.used_value ELSE 0 END), "
-        "       qs.confidence_tier, qs.window_end_utc, qs.window_start_utc, qs.account_id "
+        "       qs.confidence_tier, qs.window_end_utc, qs.window_start_utc, qs.account_id, "
+        "       p.provider_key = 'openai' AND (pl.plan_key = 'openai_subscription_codex_local' "
+        "           OR pl.plan_key GLOB 'openai_subscription_codex_local:*') AS codex_sample "
         "FROM latest_provider_snapshots latest "
         "JOIN quota_snapshots qs "
         "  ON qs.provider_id = latest.provider_id "
@@ -2595,7 +2597,9 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         "JOIN providers p ON p.id = qs.provider_id "
         "LEFT JOIN plans pl ON pl.id = qs.plan_id "
         "WHERE p.enabled = 1 "
-        "ORDER BY p.display_name ASC, COALESCE(pl.display_name, '') ASC, qs.id DESC;");
+        "ORDER BY p.display_name ASC, COALESCE(pl.display_name, '') ASC, "
+        "         CASE WHEN codex_sample THEN qs.snapshot_subsecond_ns END DESC, "
+        "         CASE WHEN codex_sample THEN -qs.id ELSE qs.id END;");
     if (!result.success() || result.rowCount() == 0) {
         return std::nullopt;
     }
@@ -2636,9 +2640,7 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         }
 
         const auto planKey = result.getString(row, 3);
-        const bool codexPlan =
-            providerKey == "openai" && planKey.substr(0, planKey.find(':')) == "openai_subscription_codex_local";
-        if (codexPlan) {
+        if (result.getBool(row, 13)) {
             const auto window = savedWindow(row);
             const auto start = std::get<1>(window);
             const auto end = std::get<2>(window);
@@ -3338,7 +3340,8 @@ enum class QuotaSnapshotKind { Count, Percentage, CodexPercentage };
 bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accountId, std::optional<int> planId,
                              std::time_t snapshotTime, std::time_t windowStart, std::time_t windowEnd, long long used,
                              long long limit, long long remaining, const std::string& confidenceTier,
-                             const std::string& basisSummary, QuotaSnapshotKind kind) {
+                             const std::string& basisSummary, QuotaSnapshotKind kind,
+                             const std::optional<int>& snapshotSubsecondNs) {
     const bool percentageReading = kind != QuotaSnapshotKind::Count;
     if (percentageReading && !planId.has_value()) {
         return false;
@@ -3358,24 +3361,36 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
     std::string sql =
         "INSERT INTO quota_snapshots ("
         "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
-        "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled"
-        ") ";
+        "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled, "
+        "snapshot_subsecond_ns) ";
     sql += percentageReading ? "SELECT ?, ?, " : "VALUES (?, ?, ";
     sql += planId.has_value() ? "?" : "NULL";
     sql += ", ?, ?, ?, ?, ";
     sql += limit > 0 ? "?" : "NULL";
-    sql += ", ?, ?, ?, ?, ?";
-    if (percentageReading) {
-        // Refreshes may reuse the same provider response until its polling budget expires.
-        sql += " WHERE NOT EXISTS (SELECT 1 FROM quota_snapshots WHERE provider_id = ? AND account_id = ? "
-               "AND plan_id = ? AND snapshot_time_utc = ?";
-        if (kind == QuotaSnapshotKind::CodexPercentage) {
-            sql += " AND ((window_start_utc = ? AND window_end_utc = ?) OR "
-                   "(quota_dimension = 'requests' AND window_start_utc = ? AND window_end_utc = ?)) "
-                   "AND used_value = ? AND COALESCE(limit_value, 0) = CAST(? AS INTEGER) "
-                   "AND COALESCE(remaining_value, limit_value - used_value, 0) = CAST(? AS INTEGER)";
+    sql += ", ?, ?, ?, ?, ?, NULLIF(?, '')";
+    if (kind == QuotaSnapshotKind::CodexPercentage) {
+        // Bound the lookup to this capture second with the existing dimension/time index.
+        sql += " WHERE NOT EXISTS ("
+               "SELECT 1 FROM ("
+               "    SELECT used_value, limit_value, remaining_value, snapshot_subsecond_ns FROM quota_snapshots "
+               "    WHERE provider_id = ? AND account_id = ? AND plan_id = ? AND snapshot_time_utc = ? "
+               "    AND quota_dimension IN ('percent', 'requests') "
+               "    AND ((window_start_utc = ? AND window_end_utc = ?) OR "
+               "         (quota_dimension = 'requests' AND window_start_utc = ? AND window_end_utc = ?)) ";
+        if (snapshotSubsecondNs) {
+            sql += "AND (snapshot_subsecond_ns <= ? OR snapshot_subsecond_ns IS NULL) ";
+        }
+        sql += "    ORDER BY snapshot_subsecond_ns DESC, id DESC LIMIT 1"
+               ") WHERE used_value = CAST(? AS INTEGER) AND COALESCE(limit_value, 0) = CAST(? AS INTEGER) "
+               "AND COALESCE(remaining_value, limit_value - used_value, 0) = CAST(? AS INTEGER)";
+        if (snapshotSubsecondNs) {
+            // A whole-second legacy reading can match until an earlier precise reading establishes ordering.
+            sql += " AND (snapshot_subsecond_ns = ? OR snapshot_subsecond_ns IS NULL)";
         }
         sql += ");";
+    } else if (percentageReading) {
+        sql += " WHERE NOT EXISTS (SELECT 1 FROM quota_snapshots WHERE provider_id = ? AND account_id = ? "
+               "AND plan_id = ? AND snapshot_time_utc = ?);";
     } else {
         sql += ");";
     }
@@ -3401,6 +3416,7 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
     params.push_back(percentageReading ? "percent" : "requests");
     params.push_back(std::to_string(std::max<long long>(0, remaining)));
     params.push_back("0");
+    params.push_back(snapshotSubsecondNs ? std::to_string(*snapshotSubsecondNs) : std::string{});
     if (percentageReading) {
         params.push_back(std::to_string(providerId));
         params.push_back(std::to_string(accountId));
@@ -3415,9 +3431,15 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
         params.push_back(windowEndUtc);
         params.push_back(formatTimeUtcIso(legacyStart));
         params.push_back(formatTimeUtcIso(legacyEnd));
+        if (snapshotSubsecondNs) {
+            params.push_back(std::to_string(*snapshotSubsecondNs));
+        }
         params.push_back(std::to_string(std::max<long long>(0, used)));
         params.push_back(std::to_string(std::max<long long>(0, limit)));
         params.push_back(std::to_string(std::max<long long>(0, remaining)));
+        if (snapshotSubsecondNs) {
+            params.push_back(std::to_string(*snapshotSubsecondNs));
+        }
     }
 
     QueryResult insert = storage.execute(sql, params);
@@ -4475,7 +4497,8 @@ public:
                 reportSourceLabelForSurface(quota.providerSurface.empty() ? providerKey : quota.providerSurface);
             persistQuotaSnapshotRow(storageService, *providerId, *accountId, primaryPlanId, snapshotTime,
                                     quota.windowStart, quota.windowEnd, primaryValues.used, primaryValues.limit,
-                                    primaryValues.remaining, confidenceTier, primaryBasisSummary, snapshotKind);
+                                    primaryValues.remaining, confidenceTier, primaryBasisSummary, snapshotKind,
+                                    quota.snapshotSubsecondNs);
 
             if (quota.secondaryLimit > 0 || quota.secondaryUsed > 0 || quota.secondaryRemaining > 0) {
                 QuotaResponse secondaryQuota = quota;
@@ -4509,7 +4532,7 @@ public:
                 persistQuotaSnapshotRow(storageService, *providerId, *accountId, secondaryPlanId, snapshotTime,
                                         secondaryQuota.windowStart, secondaryQuota.windowEnd, secondaryValues.used,
                                         secondaryValues.limit, secondaryValues.remaining, confidenceTier,
-                                        secondaryBasisSummary, snapshotKind);
+                                        secondaryBasisSummary, snapshotKind, quota.snapshotSubsecondNs);
             }
         }
 

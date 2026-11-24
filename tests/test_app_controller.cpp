@@ -1166,7 +1166,10 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     StorageService storage;
     REQUIRE(storage.init(dbPath.path()));
     REQUIRE(storage.execute("PRAGMA main.journal_mode = WAL;").getString(0, 0) == "wal");
-    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version >= 13;").success());
+    REQUIRE(storage
+                .execute("DELETE FROM schema_version WHERE version >= 13;"
+                         "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
+                .success());
     storage.close();
 
     sqlite3* raw = nullptr;
@@ -1196,7 +1199,7 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     CHECK(stage == std::future_status::timeout);
     CHECK_FALSE(app.getDashboardViewModelForTesting().startupPending);
     REQUIRE(storage.init(dbPath.path()));
-    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 14);
+    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 15);
 #else
     requireSqlite();
 #endif
@@ -3753,6 +3756,136 @@ TEST_CASE("AppController records each dated Codex percentage observation once",
     CHECK(retained.quotaTrendSeries.front().quotaDimension == "percent");
     REQUIRE_FALSE(retained.quotaTrendSeries.front().points.empty());
     CHECK(retained.quotaTrendSeries.front().points.back().dailyRollup);
+}
+
+TEST_CASE("AppController preserves the latest same-second Codex balance across replay and restart",
+          "[app][runtime][codex][quota_history]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    TempTestDirectory codexHome("jistats_codex_quota_replay");
+    ScopedEnvironmentVariable codexHomeEnv("CODEX_HOME", codexHome.path().string());
+    const auto rolloutPath = codexHome.path() / "sessions" / "rollout-balance.jsonl";
+    std::filesystem::create_directories(rolloutPath.parent_path());
+    const std::time_t capturedAt = std::time(nullptr) - 60;
+    const auto writeReading = [&](int used, const char* fraction, int padding) {
+        std::string payload = makeCodexRolloutPayload(used, capturedAt, capturedAt + 3600);
+        payload.insert(payload.find("Z"), fraction);
+        std::ofstream rollout(rolloutPath, std::ios::trunc);
+        REQUIRE(rollout.is_open());
+        rollout << std::string(padding, ' ') << payload;
+        rollout.close();
+        REQUIRE(rollout.good());
+    };
+    bool hasLegacyReading = false;
+    SECTION("All readings have fractional timestamps") {}
+    SECTION("The first reading was persisted without fractional precision") {
+        hasLegacyReading = true;
+    }
+    writeReading(25, hasLegacyReading ? "" : ".100", 1);
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(std::make_shared<OpenAIAdapter>());
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+    if (hasLegacyReading) {
+        writeReading(25, ".100", 2);
+        app.refreshRuntimeForTesting();
+    }
+    writeReading(40, ".200", 3);
+    app.refreshRuntimeForTesting();
+    writeReading(25, ".300", 4);
+    app.refreshRuntimeForTesting();
+    app.refreshRuntimeForTesting();
+    // Reopening an earlier rollout reading must not create a new observation.
+    writeReading(40, ".200", 5);
+    app.refreshRuntimeForTesting();
+    writeReading(25, ".100", 6);
+    app.refreshRuntimeForTesting();
+    const auto dashboard = app.getDashboardViewModelForTesting();
+    app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto snapshots = storage.execute("SELECT remaining_value FROM quota_snapshots ORDER BY id;");
+    REQUIRE(snapshots.success());
+    CHECK(snapshots.rowCount() == 3);
+
+    auto scope = dashboard.preferences;
+    scope.analysisSelectedProviderId = "openai";
+    scope.analysisSelectedAccountId = "openai.runtime_status";
+    AnalysisQueryEngine engine(storage);
+    const auto history = engine.buildViewModel(dashboard, scope, capturedAt + 60);
+    REQUIRE(history.quotaTrendSeries.size() == 1);
+    CHECK(history.quotaTrendSeries.front().points.size() == 3);
+    CHECK(history.quotaTrendSeries.front().latestRemainingValue == 75);
+    storage.close();
+
+    AppController restarted;
+    std::promise<void> releasePublication;
+    const auto ready = releasePublication.get_future().share();
+    restarted.setBeforeRuntimePublicationForTesting([ready]() { ready.wait(); });
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(providers);
+    REQUIRE(restarted.init());
+    const auto cached = restarted.getDashboardViewModelForTesting();
+    const auto* openai = findProviderStatus(cached, "openai");
+    REQUIRE(openai != nullptr);
+    REQUIRE(openai->quotas.size() == 1);
+    CHECK(openai->quotas.front().remaining == 75);
+    releasePublication.set_value();
+    restarted.shutdown();
+}
+
+TEST_CASE("AppController keeps Cursor Auto ahead of API in cached quota", "[app][runtime][quota_history]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    const std::time_t now = std::time(nullptr);
+    seedPersistedQuotaSnapshot(dbPath.path(), "cursor", "cursor.runtime_status", "Cursor",
+                               "cursor_subscription_api:auto", "Cursor Subscription", "auto", now - 60, 20, 100, 80);
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        REQUIRE(SettingsService(storage).setBool("runtime.cursor_subscription_tracking_enabled", true));
+        REQUIRE(
+            storage
+                .execute(
+                    "INSERT INTO plans (account_id, plan_key, plan_type, display_name, quota_window, limit_value) "
+                    "SELECT account_id, 'cursor_subscription_api:api', plan_type, display_name, 'api', limit_value "
+                    "FROM plans "
+                    "WHERE plan_key = 'cursor_subscription_api:auto';"
+                    "INSERT INTO quota_snapshots (provider_id, account_id, plan_id, snapshot_time_utc, "
+                    "window_start_utc, "
+                    "window_end_utc, used_value, limit_value, remaining_value, confidence_tier) "
+                    "SELECT qs.provider_id, qs.account_id, pl.id, qs.snapshot_time_utc, qs.window_start_utc, "
+                    "qs.window_end_utc, "
+                    "65, 100, 35, qs.confidence_tier FROM quota_snapshots qs "
+                    "JOIN plans pl ON pl.account_id = qs.account_id AND pl.plan_key = 'cursor_subscription_api:api';")
+                .success());
+    }
+    AppController app;
+    std::promise<void> releasePublication;
+    const auto ready = releasePublication.get_future().share();
+    app.setBeforeRuntimePublicationForTesting([ready]() { ready.wait(); });
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager(
+        {makeCurrentQuotaProvider("cursor", "Cursor", 25, 100, now, "auto", "cursor_subscription_api")}));
+    REQUIRE(app.init());
+
+    const auto cached = app.getDashboardViewModelForTesting();
+    const auto* cursor = findProviderStatus(cached, "cursor");
+    REQUIRE(cursor != nullptr);
+    REQUIRE(cursor->quotas.size() == 2);
+    CHECK(cursor->quotas.front().windowType == "auto");
+    CHECK(cursor->quotas.front().remaining == 80);
+    CHECK(cursor->quotas.back().windowType == "api");
+    CHECK(cursor->quotas.back().remaining == 35);
+    releasePublication.set_value();
+    app.shutdown();
 }
 
 TEST_CASE("AppController labels Codex-local quota rows without generic API wording", "[app][runtime]") {

@@ -19,7 +19,7 @@ The runtime retention job prunes `usage_events` and `gap_markers` after 90 days,
 
 ## Migration behavior
 
-The portable executable embeds the [version 12 SQLite baseline](../../db_migrations/012_baseline_schema.sql), the [version 13 privacy upgrade](../../db_migrations/013_redact_claude_source_references.sql), and the [version 14 ChatGPT activity repair](../../db_migrations/014_deduplicate_chatgpt_activity.sql). [SchemaManager](../../src/db/SchemaManager.cpp) applies them even when the app starts outside the portable folder. The baseline seeds OpenAI, MiniMax, Claude Code, Kimi Code, and HICAP, the default settings, and the singleton runtime-state row. Settings control which integrations the app enables.
+The portable executable embeds the [version 12 SQLite baseline](../../db_migrations/012_baseline_schema.sql), the [version 13 privacy upgrade](../../db_migrations/013_redact_claude_source_references.sql), the [version 14 ChatGPT activity repair](../../db_migrations/014_deduplicate_chatgpt_activity.sql), and the [version 15 quota precision upgrade](../../db_migrations/015_quota_snapshot_precision.sql). [SchemaManager](../../src/db/SchemaManager.cpp) applies them even when the app starts outside the portable folder. The baseline seeds OpenAI, MiniMax, Claude Code, Kimi Code, and HICAP, the default settings, and the singleton runtime-state row. Settings control which integrations the app enables.
 
 The version 13 migration upgrades existing version 12 databases in place before applying version 14. One transaction replaces raw Claude stats-cache references in activity and usage rows with hashed references and preserves the original events. SQLite then rebuilds the database to remove plaintext left in unused page space. The rebuild can require free disk space up to twice the size of the database. WAL checkpoint attempts share a five-second lock-wait budget. JiStats records version 13 after the rebuild and any WAL checkpoint succeed. If either fails, the next open retries the upgrade.
 
@@ -29,4 +29,6 @@ JiStats rejects development databases at versions 1 through 11 without modifying
 
 Version 14 keeps the first stored imported ChatGPT activity row for each conversation/message reference. The delete and schema version update commit together.
 
-Use `015` for the next numbered SQL migration in [`db_migrations/`](../../db_migrations/). The loader discovers later files relative to the working directory. Advance `schema_version` in the same transaction as the schema change. When a release includes a later migration, verify its discovery during actual [packaged startup and sign-in](../validation/desktop.md#dashboard-and-background-checks).
+Version 15 adds nullable source timestamp precision to raw quota snapshots. Existing rows keep their original whole-second timestamps and values.
+
+Use `016` for the next numbered SQL migration in [`db_migrations/`](../../db_migrations/). The loader discovers later files relative to the working directory. Advance `schema_version` in the same transaction as the schema change. When a release includes a later migration, verify its discovery during actual [packaged startup and sign-in](../validation/desktop.md#dashboard-and-background-checks).

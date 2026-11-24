@@ -9,7 +9,6 @@
 #include <cstdlib>
 #include <map>
 #include <new>
-#include <set>
 #include <tuple>
 
 #ifdef _WIN32
@@ -2233,11 +2232,12 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
         "SELECT qs.id, qs.provider_id, qs.account_id, qs.plan_id, qs.snapshot_time_utc, "
         "qs.window_start_utc, qs.window_end_utc, qs.used_value, qs.limit_value, qs.remaining_value, "
         "qs.confidence_tier, qs.quota_dimension, qs.is_reconciled, COALESCE(qs.basis_summary, ''), qs.created_at_utc, "
-        "(pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB 'openai_subscription_codex_local:*') "
+        "(pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB 'openai_subscription_codex_local:*'), "
+        "qs.snapshot_subsecond_ns "
         "FROM quota_snapshots qs "
         "LEFT JOIN plans pl ON pl.id = qs.plan_id AND pl.account_id = qs.account_id "
         "WHERE qs.provider_id = ? AND qs.account_id = ? AND qs.snapshot_time_utc >= ? AND qs.snapshot_time_utc <= ? "
-        "ORDER BY qs.snapshot_time_utc ASC, qs.id ASC;",
+        "ORDER BY qs.snapshot_time_utc ASC, qs.snapshot_subsecond_ns ASC, qs.id ASC;",
         {std::to_string(providerId), std::to_string(accountId), toUtcIsoString(snapshotTimeFrom),
          toUtcIsoString(snapshotTimeTo)});
     if (!result.success()) {
@@ -2245,9 +2245,9 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
         return snapshots;
     }
 
-    using CodexReading =
-        std::tuple<int, std::time_t, std::time_t, long long, std::optional<long long>, std::optional<long long>>;
-    std::set<CodexReading> codexReadingsAtTime;
+    using CodexWindow = std::tuple<int, std::time_t, std::time_t>;
+    using CodexReading = std::tuple<std::string, long long, std::optional<long long>, std::optional<long long>>;
+    std::map<CodexWindow, CodexReading> previousCodexReadingByWindow;
     std::time_t codexReadingTime = 0;
     for (size_t row = 0; row < result.rowCount(); ++row) {
         PersistedQuotaSnapshot snapshot;
@@ -2282,14 +2282,18 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
         }
         if (codexReading) {
             if (snapshot.snapshotTime != codexReadingTime) {
-                codexReadingsAtTime.clear();
+                previousCodexReadingByWindow.clear();
                 codexReadingTime = snapshot.snapshotTime;
             }
-            if (!codexReadingsAtTime
-                     .emplace(snapshot.planId.value_or(0), snapshot.windowStart, snapshot.windowEnd, snapshot.usedValue,
-                              snapshot.limitValue, normalizedQuotaRemainingValue(snapshot))
-                     .second) {
-                continue;
+            const CodexWindow window{snapshot.planId.value_or(0), snapshot.windowStart, snapshot.windowEnd};
+            const CodexReading reading{result.getString(row, 16), snapshot.usedValue, snapshot.limitValue,
+                                       normalizedQuotaRemainingValue(snapshot)};
+            auto [previous, inserted] = previousCodexReadingByWindow.try_emplace(window, reading);
+            if (!inserted) {
+                if (previous->second == reading) {
+                    continue;
+                }
+                previous->second = reading;
             }
         }
         snapshot.isReconciled = result.getInt(row, 12) != 0;
