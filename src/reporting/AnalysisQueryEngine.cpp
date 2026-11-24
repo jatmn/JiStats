@@ -1548,13 +1548,21 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
 
     std::map<std::string, DayGapRollup> dayGapRollups;
     {
-        std::string sql =
-            "SELECT gm.period_start_utc, gm.period_end_utc, gm.classification, "
-            "COALESCE(gm.basis_summary, ''), COALESCE(gm.source_kind, '') "
-            "FROM gap_markers gm "
-            "JOIN providers p ON p.id = gm.provider_id "
-            "JOIN accounts a ON a.id = gm.account_id "
-            "WHERE gm.period_end_utc >= ? AND gm.period_start_utc <= ?";
+        std::string sql = "SELECT gm.period_start_utc, gm.period_end_utc, gm.classification, "
+                          "CASE WHEN gm.classification = 'unknown' AND gm.source_kind = 'runtime_recovery' AND ("
+                          "  (p.provider_key = 'openai' AND gm.basis_summary IN ("
+                          "    'Provider backfill returned no history, but JiStats has local quantified evidence for "
+                          "the same recovery window',"
+                          "    'No provider-imported history or local quantified evidence was available for the "
+                          "recovery window')) OR "
+                          "  (p.provider_key = 'minimax' AND gm.basis_summary = "
+                          "    'JiStats could not retrieve provider backfill during the recovery window')) "
+                          "THEN 'JiStats was not fully observing provider state during the recovery window' "
+                          "ELSE COALESCE(gm.basis_summary, '') END, COALESCE(gm.source_kind, '') "
+                          "FROM gap_markers gm "
+                          "JOIN providers p ON p.id = gm.provider_id "
+                          "JOIN accounts a ON a.id = gm.account_id "
+                          "WHERE gm.period_end_utc >= ? AND gm.period_start_utc <= ?";
         std::vector<std::string> params{
             formatTimeUtcIso(window.start),
             formatTimeUtcIso(window.end)
@@ -2540,7 +2548,10 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(
             "FROM recovery_checkpoints rc "
             "JOIN providers p ON p.id = rc.provider_id "
             "JOIN accounts a ON a.id = rc.account_id "
-            "WHERE rc.sync_kind = ?";
+            // The legacy OpenAI and MiniMax adapters wrote these outcomes without querying history.
+            "WHERE rc.sync_kind = ? AND NOT (rc.fetched_event_count = 0 AND ("
+            "(p.provider_key = 'openai' AND rc.outcome = 'no_data') OR "
+            "(p.provider_key = 'minimax' AND rc.outcome = 'fetch_failed')))";
         std::vector<std::string> params{kRuntimeBackfillSyncKind};
         appendScopeFilter(sql, params, analysis.scope.selectedProviderId, "p.provider_key");
         appendScopeFilter(sql, params, analysis.scope.selectedAccountId, "a.account_key");

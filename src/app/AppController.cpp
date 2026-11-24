@@ -2072,7 +2072,10 @@ ReportAggregateData buildReportAggregateData(
             "FROM recovery_checkpoints rc "
             "JOIN providers p ON p.id = rc.provider_id "
             "JOIN accounts a ON a.id = rc.account_id "
-            "WHERE rc.sync_kind = ?";
+            // The legacy OpenAI and MiniMax adapters wrote these outcomes without querying history.
+            "WHERE rc.sync_kind = ? AND NOT (rc.fetched_event_count = 0 AND ("
+            "(p.provider_key = 'openai' AND rc.outcome = 'no_data') OR "
+            "(p.provider_key = 'minimax' AND rc.outcome = 'fetch_failed')))";
         std::vector<std::string> params{kRuntimeBackfillSyncKind};
         appendProviderFilterClause(sql, params, providerKeys, "p.provider_key");
         appendAccountFilterClause(sql, params, accountIds, "a.account_key");
@@ -5222,6 +5225,10 @@ public:
                 continue;
             }
 
+            const auto adapter = activeProviderManager().getProvider(provider.providerKey);
+            if (adapter && !adapter->supportsUsageHistory()) {
+                continue;
+            }
             const auto checkpoint =
                 storageService.getLatestRecoveryCheckpoint(*providerId, *accountId, kRuntimeBackfillSyncKind);
             if (!checkpoint.has_value()) {
