@@ -23,6 +23,7 @@ struct CodexRateLimitSnapshot {
     std::string error;
     std::time_t snapshotTime = 0;
     std::time_t eventTime = 0;
+    std::optional<int> eventSubsecondNs;
     CodexRateLimitBucket primary;
     CodexRateLimitBucket secondary;
     std::string limitId;
