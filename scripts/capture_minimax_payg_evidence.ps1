@@ -190,12 +190,12 @@ $metadata = [ordered]@{
     }
 }
 
-$completionBody | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 (Join-Path $resolvedOutputDir "completion-$timestamp.json")
-(New-HeaderText -Response $completionResponse) | Set-Content -Encoding utf8 (Join-Path $resolvedOutputDir "completion-$timestamp.headers.txt")
-$probeResults | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 (Join-Path $resolvedOutputDir "endpoint-probes-$timestamp.json")
-$metadata | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 (Join-Path $resolvedOutputDir "capture-$timestamp.metadata.json")
+$completionBody | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedOutputDir "completion-$timestamp.json")
+(New-HeaderText -Response $completionResponse) | Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedOutputDir "completion-$timestamp.headers.txt")
+$probeResults | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedOutputDir "endpoint-probes-$timestamp.json")
+$metadata | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedOutputDir "capture-$timestamp.metadata.json")
 (New-NotesTemplate -Model $Model -PromptTokens $promptTokens -CompletionTokens $completionTokens -EstimatedCost $estimatedCost -ProbeSummary $probeSummary) |
-    Set-Content -Encoding utf8 (Join-Path $resolvedOutputDir "capture-$timestamp.notes.md")
+    Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedOutputDir "capture-$timestamp.notes.md")
 
 Write-Host "Captured MiniMax PAYG evidence to $resolvedOutputDir"
 Write-Host "Completion body: completion-$timestamp.json"

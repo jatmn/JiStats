@@ -3,6 +3,7 @@
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -12,6 +13,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <windows.h>
 
 #include "db/StorageService.hpp"
 #include "platform/WindowsCredentialStore.hpp"
@@ -425,6 +428,19 @@ TEST_CASE("MiniMax capture writers keep output outside source trees", "[minimax]
     CHECK_FALSE(capture.writeDiagnosticJson({}, (privateOutput / "diagnostics.json").string(), error));
     CHECK(error == "Capture output must be outside the JiStats source checkout.");
     CHECK_FALSE(std::filesystem::exists(privateOutput));
+
+    if (GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") == nullptr) {
+        const auto junction = temp.path() / "external-junction";
+        const auto target = source / "src";
+        const std::wstring command =
+            L"cmd.exe /d /c mklink /J \"" + junction.wstring() + L"\" \"" + target.wstring() + L"\"";
+        REQUIRE(_wsystem(command.c_str()) == 0);
+        CHECK_FALSE(capture.writeCaptureJson({}, (junction / "captures" / "quota.json").string(), error));
+        CHECK(error == "Capture output must be outside the JiStats source checkout.");
+        CHECK_FALSE(capture.writeDiagnosticJson({}, (junction / "captures" / "diagnostics.json").string(), error));
+        CHECK(error == "Capture output must be outside the JiStats source checkout.");
+        CHECK_FALSE(std::filesystem::exists(target / "captures"));
+    }
 
     const auto sibling = temp.path() / "checkout-captures";
     REQUIRE(capture.writeCaptureJson({}, (sibling / "quota.json").string(), error));

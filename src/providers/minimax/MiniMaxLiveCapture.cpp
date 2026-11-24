@@ -5,6 +5,9 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string_view>
+
+#include <windows.h>
 
 namespace JiStats {
 
@@ -50,15 +53,59 @@ std::string jsonEscape(const std::string& value) {
     return stream.str();
 }
 
+std::filesystem::path resolveCaptureOutputPath(std::filesystem::path path) {
+    std::filesystem::path suffix;
+    while (!path.empty()) {
+        const HANDLE handle =
+            CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (handle != INVALID_HANDLE_VALUE) {
+            const DWORD capacity = GetFinalPathNameByHandleW(handle, nullptr, 0, FILE_NAME_NORMALIZED);
+            std::wstring resolved(capacity, L'\0');
+            const DWORD length =
+                capacity == 0 ? 0 : GetFinalPathNameByHandleW(handle, resolved.data(), capacity, FILE_NAME_NORMALIZED);
+            CloseHandle(handle);
+            if (length == 0 || length >= capacity) {
+                return {};
+            }
+
+            resolved.resize(length);
+            // Convert the Win32 device prefix to an ordinary drive or UNC path for std::filesystem.
+            constexpr std::wstring_view devicePrefix = LR"(\\?\)";
+            constexpr std::wstring_view uncPrefix = LR"(\\?\UNC\)";
+            if (resolved.compare(0, uncPrefix.size(), uncPrefix) == 0) {
+                resolved.replace(0, uncPrefix.size(), LR"(\\)");
+            } else if (resolved.compare(0, devicePrefix.size(), devicePrefix) == 0) {
+                resolved.erase(0, devicePrefix.size());
+            }
+            auto resolvedPath = std::filesystem::path(resolved);
+            return suffix.empty() ? resolvedPath : resolvedPath / suffix;
+        }
+
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+            return {};
+        }
+        // A dangling reparse point is not a missing path component we can append safely.
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            return {};
+        }
+        const auto parent = path.parent_path();
+        if (parent == path) {
+            return {};
+        }
+        suffix = suffix.empty() ? path.filename() : path.filename() / suffix;
+        path = parent;
+    }
+    return {};
+}
+
 std::optional<std::filesystem::path> prepareCaptureOutputPath(const std::string& outputPath, std::string& error) {
     std::error_code ec;
     const auto absolutePath = std::filesystem::absolute(std::filesystem::path(outputPath), ec);
-    if (ec) {
-        error = "Failed to resolve output path: " + outputPath;
-        return std::nullopt;
-    }
-    const auto path = std::filesystem::weakly_canonical(absolutePath, ec);
-    if (ec) {
+    const auto path = ec ? std::filesystem::path{} : resolveCaptureOutputPath(absolutePath.lexically_normal());
+    if (path.empty()) {
         error = "Failed to resolve output path: " + outputPath;
         return std::nullopt;
     }

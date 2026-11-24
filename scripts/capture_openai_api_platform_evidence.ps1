@@ -164,7 +164,7 @@ $readiness = New-ReadinessReport `
     -OrganizationHeaderPresent (-not [string]::IsNullOrEmpty($organization)) `
     -ProjectIdPresent (-not [string]::IsNullOrEmpty($projectId)) `
     -MissingRequirements $missingRequirements
-$readiness | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 (Join-Path $resolvedOutputDir "readiness-$capturedAt.json")
+$readiness | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedOutputDir "readiness-$capturedAt.json")
 
 if ([string]::IsNullOrEmpty($token)) {
     [Console]::Error.WriteLine("Missing OPENAI_ADMIN_KEY or OPENAI_API_KEY. A separate OpenAI API-platform credential is required.")
@@ -228,11 +228,11 @@ $metadata = [ordered]@{
     }
 }
 
-(ConvertTo-ArchivePayload -Response $usageResponse) | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 (Join-Path $resolvedOutputDir "usage-$capturedAt.json")
-(ConvertTo-ArchivePayload -Response $costsResponse) | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 (Join-Path $resolvedOutputDir "costs-$capturedAt.json")
-$metadata | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 (Join-Path $resolvedOutputDir "capture-$capturedAt.metadata.json")
+(ConvertTo-ArchivePayload -Response $usageResponse) | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedOutputDir "usage-$capturedAt.json")
+(ConvertTo-ArchivePayload -Response $costsResponse) | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedOutputDir "costs-$capturedAt.json")
+$metadata | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedOutputDir "capture-$capturedAt.metadata.json")
 $notes = New-CaptureNotesTemplate -CapturedAt $capturedAt -BucketWidth $BucketWidth -StartTime $StartTime -EndTime $EndTime
-$notes | Set-Content -Encoding utf8 (Join-Path $resolvedOutputDir "capture-$capturedAt.notes.md")
+$notes | Set-Content -Encoding utf8 -LiteralPath (Join-Path $resolvedOutputDir "capture-$capturedAt.notes.md")
 
 Write-Host "Captured OpenAI API-platform evidence to $resolvedOutputDir"
 Write-Host "Readiness: readiness-$capturedAt.json"
