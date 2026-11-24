@@ -3543,15 +3543,16 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     std::filesystem::create_directories(codexHome.path() / "sessions");
     const std::time_t now = std::time(nullptr);
     const bool paired = GENERATE(false, true);
-    const std::time_t reset = now + 86400;
+    const std::time_t primaryReset = now + 5 * 3600;
+    const std::time_t weeklyReset = now + 86400;
     const std::string primary =
-        paired ? R"json({"used_percent":6,"window_minutes":300,"resets_at":)json" + std::to_string(reset) + "}"
+        paired ? R"json({"used_percent":6,"window_minutes":300,"resets_at":)json" + std::to_string(primaryReset) + "}"
                : "null";
     std::ofstream rollout(codexHome.path() / "sessions" / "rollout-windows.jsonl");
     REQUIRE(rollout.is_open());
     rollout << R"json({"type":"event_msg","timestamp":")json" << toUtcIso(now)
             << R"json(","payload":{"type":"token_count","rate_limits":{"primary":)json" << primary
-            << R"json(,"secondary":{"used_percent":6,"window_minutes":10080,"resets_at":)json" << reset << "}}}}";
+            << R"json(,"secondary":{"used_percent":6,"window_minutes":10080,"resets_at":)json" << weeklyReset << "}}}}";
     rollout.close();
     REQUIRE(rollout.good());
 
@@ -3638,6 +3639,11 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     const auto* openai = findProviderStatus(startup, "openai");
     REQUIRE(openai != nullptr);
     REQUIRE(openai->quotas.size() == (paired ? 2 : 1));
+    for (const auto& cachedQuota : openai->quotas) {
+        CAPTURE(cachedQuota.windowType);
+        CHECK(cachedQuota.providerSurface == quota.providerSurface);
+        CHECK(cachedQuota.windowResetAt == (cachedQuota.windowType == "weekly" ? weeklyReset : primaryReset));
+    }
     const auto startupBars = restarted.getDashboardUsageProgressSummariesForTesting();
     CHECK(std::count_if(startupBars.begin(), startupBars.end(),
                         [](const DashboardSummaryItem& item) { return item.badge == "7-day: 94% remaining"; }) == 1);

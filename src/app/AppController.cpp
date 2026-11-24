@@ -2640,7 +2640,8 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         }
 
         const auto planKey = result.getString(row, 3);
-        if (result.getBool(row, 13)) {
+        const bool isCodexSample = result.getBool(row, 13);
+        if (isCodexSample) {
             const auto window = savedWindow(row);
             const auto start = std::get<1>(window);
             const auto end = std::get<2>(window);
@@ -2685,7 +2686,11 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         const long long remaining = result.getInt64(row, 8);
         QuotaInfo quota = makeQuota(quotaPlanLabelForProvider(providerKey, "", planKey, result.getString(row, 4)),
                                     result.getString(row, 5), used, limit, result.getString(row, 9), remaining);
-        if (providerKey == "grok" || providerKey == "cursor") {
+        if (isCodexSample) {
+            quota.providerSurface = "openai_subscription_codex_local";
+            const auto resetTime = parseRuntimeTimestamp(result.getString(row, 10));
+            quota.windowResetAt = resetTime > snapshotTime ? resetTime : 0;
+        } else if (providerKey == "grok" || providerKey == "cursor") {
             quota.providerSurface = providerKey + "_subscription_api";
             const auto resetTime = parseRuntimeTimestamp(result.getString(row, 10));
             quota.windowResetAt = resetTime > snapshotTime ? resetTime : 0;
