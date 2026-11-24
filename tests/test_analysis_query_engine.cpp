@@ -1667,9 +1667,10 @@ TEST_CASE("Quota rollups preserve the lowest percentage across changing limits",
     if (includeUnquantifiedReading) {
         insert("2026-04-01T10:00:00Z", "0", "", "1");
     }
-    insert("2026-04-01T11:00:00Z", "50", "100", "50");
+    insert("2026-04-02T11:00:00Z", "50", "100", "50");
 
     const auto day = makeUtcTime(2026, 4, 1);
+    const auto nextDay = makeUtcTime(2026, 4, 2);
     const auto now = makeUtcTime(2026, 4, 20, 12);
     DashboardPreferences preferences;
     preferences.analysisSelectedProviderId = "openai";
@@ -1682,20 +1683,35 @@ TEST_CASE("Quota rollups preserve the lowest percentage across changing limits",
     const auto raw = engine.buildViewModel({}, preferences, now);
     REQUIRE(raw.quotaTrendSeries.size() == 1);
     CHECK(raw.quotaTrendSeries.front().lowWaterRemainingPercentage == Catch::Approx(10));
-    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, day, day));
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, day, nextDay));
 
-    const auto saved = storage.getQuotaSnapshotRollups(providerId, accountId, day, day);
-    REQUIRE(saved.size() == 1);
+    const auto saved = storage.getQuotaSnapshotRollups(providerId, accountId, day, nextDay);
+    REQUIRE(saved.size() == 2);
     CHECK(saved.front().lowWaterRemainingValue == 100);
     CHECK(saved.front().lowWaterLimitValue == 1000);
 
     const auto rebuilt = engine.buildViewModel({}, preferences, now);
     REQUIRE(rebuilt.quotaTrendSeries.size() == 1);
     const auto& series = rebuilt.quotaTrendSeries.front();
-    REQUIRE(series.points.size() == 1);
-    CHECK(series.points.front().dailyRollup);
+    REQUIRE(series.points.size() == (includeUnquantifiedReading ? 1 : 2));
+    CHECK(series.points.back().dailyRollup);
     CHECK(series.latestRemainingPercentage == Catch::Approx(50));
     CHECK(series.lowWaterRemainingPercentage == Catch::Approx(10));
+
+    // Emulate a daily minimum saved by the old count-based aggregation rule.
+    REQUIRE(storage
+                .execute("UPDATE quota_snapshot_rollups_daily SET low_water_remaining_value = 20, "
+                         "low_water_limit_value = 100 WHERE rollup_period_start_utc = '2026-04-01T00:00:00Z';")
+                .success());
+    const auto legacyWithRaw = engine.buildViewModel({}, preferences, now);
+    REQUIRE(legacyWithRaw.quotaTrendSeries.size() == 1);
+    CHECK(legacyWithRaw.quotaTrendSeries.front().lowWaterRemainingPercentage == Catch::Approx(10));
+
+    REQUIRE(storage.execute("DELETE FROM quota_snapshots WHERE snapshot_time_utc < '2026-04-02T00:00:00Z';").success());
+    const auto legacyWithoutRaw = engine.buildViewModel({}, preferences, now);
+    REQUIRE(legacyWithoutRaw.quotaTrendSeries.size() == 1);
+    const double retainedMinimum = includeUnquantifiedReading ? 20.0 : 10.0;
+    CHECK(legacyWithoutRaw.quotaTrendSeries.front().lowWaterRemainingPercentage == Catch::Approx(retainedMinimum));
 }
 
 TEST_CASE("AnalysisQueryEngine prefers daily quota rollups for long-range quota history", "[analysis][query_engine][analysis_query_engine]") {

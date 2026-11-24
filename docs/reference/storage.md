@@ -17,7 +17,7 @@ When local observation lacks a verified provider account, it uses a synthetic `l
 
 The runtime retention job prunes `usage_events` and `gap_markers` after 90 days, `usage_rollups_hourly` after 30 days, and `usage_rollups_daily` after 365 days. This job leaves `activity_events` intact, including local observations and imported ChatGPT activity. The Codex throughput and SQLite model-attribution sources have separate query scopes. General subscription usage excludes both sources from raw queries and rollups, including when raw events fill a missing rollup.
 
-On rebuild, each daily quota rollup records the remaining amount and limit from the reading with the lowest remaining percentage. Only readings with a positive limit can set that minimum. Previously stored minima update when their day is rebuilt from raw snapshots.
+On rebuild, each daily quota rollup records the remaining amount and limit from the reading with the lowest remaining percentage. Only readings with a positive limit can set that minimum. Previously stored minima update when their day is rebuilt from raw snapshots. Analysis keeps a known daily minimum when the latest reading has no limit. Retained raw readings can establish a lower minimum for a previously saved day.
 
 ## Migration behavior
 

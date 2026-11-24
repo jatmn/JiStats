@@ -124,7 +124,7 @@ Record completed work, the revision and evidence, and any remaining verification
 
 - Codex throughput uses subsecond source timestamps when reconciling recorded requests with counters. Subscription histories retain known billing dates across partial observations and start fresh when a reset is established. The dashboard rollup test uses a fixed UTC time of day. Bundled-SQLite CTest passed 126 cases, all three MinGW targets built, and 457 Windows cases passed under Wine.
 
-- Daily quota rebuilds retain the reading with the lowest remaining percentage when the limit changes. The SQLite regression under Wine checks that raw Analysis and rebuilt history both report 10%. A reading without a usable limit cannot replace that minimum. [Issue #110](https://github.com/jatmn/JiStats/issues/110)
+- Daily quota rebuilds retain the reading with the lowest remaining percentage when the limit changes. The SQLite regression under Wine checks that raw Analysis and rebuilt history both report 10%. A reading without a usable limit cannot replace that minimum. [Issue #110](https://github.com/jatmn/JiStats/issues/110) Review regressions also cover a reset-only final reading and a saved legacy minimum with and without original raw readings. [PR #155 review](https://github.com/jatmn/JiStats/pull/155#pullrequestreview-6034991074)
 
 - Codex rollout quota selection compares fractional seconds before breaking timestamp ties by file path. The synthetic adapter regression checks both line orders within the same second and preserves the whole-second time published to consumers. [Issue #71](https://github.com/jatmn/JiStats/issues/71)
 
