@@ -63,11 +63,23 @@ private:
     TempTestDirectory directory_{"jistats_kimi_fixture"};
 };
 
-void setFixtureDacl(const std::filesystem::path& path, SECURITY_INFORMATION attributes, const wchar_t* sddl) {
+void setFixtureDacl(const std::filesystem::path& path, SECURITY_INFORMATION attributes, const wchar_t* sddl,
+                    bool propagate = false) {
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     REQUIRE(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, nullptr));
     const std::unique_ptr<void, decltype(&LocalFree)> security(descriptor, LocalFree);
-    REQUIRE(SetFileSecurityW(path.c_str(), attributes | DACL_SECURITY_INFORMATION, descriptor));
+    if (propagate || attributes == UNPROTECTED_DACL_SECURITY_INFORMATION) {
+        BOOL present = FALSE;
+        BOOL defaulted = FALSE;
+        PACL dacl = nullptr;
+        REQUIRE(GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted));
+        REQUIRE(present);
+        auto objectName = path.native();
+        REQUIRE(SetNamedSecurityInfoW(objectName.data(), SE_FILE_OBJECT, attributes | DACL_SECURITY_INFORMATION,
+                                      nullptr, nullptr, dacl, nullptr) == ERROR_SUCCESS);
+    } else {
+        REQUIRE(SetFileSecurityW(path.c_str(), attributes | DACL_SECURITY_INFORMATION, descriptor));
+    }
 }
 
 std::vector<unsigned char> credentialDacl(const std::filesystem::path& path, bool requireUnprotected = false) {
@@ -338,6 +350,26 @@ std::string sampleKimiUsagesResponse() {
     }
   ]
 })json";
+}
+
+constexpr char expiredKimiCredentials[] = R"json({
+  "access_token": "expired-access-token",
+  "refresh_token": "refresh-token",
+  "scope": "openid profile",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "expires_at": 1.0
+})json";
+
+std::vector<ExpectedHttpExchange> kimiRefreshSequence() {
+    return {{"POST", "/api/oauth/token", 200, R"json({
+  "access_token": "fresh-access-token",
+  "refresh_token": "fresh-refresh-token",
+  "expires_in": 900,
+  "scope": "openid profile",
+  "token_type": "Bearer"
+})json"},
+            {"GET", "/coding/v1/usages", 200, sampleKimiUsagesResponse()}};
 }
 
 } // namespace
@@ -915,16 +947,7 @@ TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting qu
         GENERATE(Rotation::Normal, Rotation::Locked, Rotation::NarrowDacl, Rotation::DeleteDenied);
     CAPTURE(static_cast<int>(rotation));
     ScopedWinsock winsock;
-    LocalHttpSequenceServer server({
-        {"POST", "/api/oauth/token", 200, R"json({
-  "access_token": "fresh-access-token",
-  "refresh_token": "fresh-refresh-token",
-  "expires_in": 900,
-  "scope": "openid profile",
-  "token_type": "Bearer"
-})json"},
-        {"GET", "/coding/v1/usages", 200, sampleKimiUsagesResponse()}
-    });
+    LocalHttpSequenceServer server(kimiRefreshSequence());
     ScopedEnvironmentVariable oauthUrl(
         "JISTATS_KIMI_OAUTH_TOKEN_URL",
         server.baseUrl() + "/api/oauth/token");
@@ -934,15 +957,7 @@ TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting qu
 
     TempFixtureDirectory fixture;
     fixture.makeFile("config.toml", "default_model = \"kimi-code/kimi-for-coding\"\n");
-    const std::string originalCredentials = R"json({
-  "access_token": "expired-access-token",
-  "refresh_token": "refresh-token",
-  "scope": "openid profile",
-  "token_type": "Bearer",
-  "expires_in": 900,
-  "expires_at": 1.0
-})json";
-    const auto credentialsPath = fixture.makeFile("credentials/kimi-code.json", originalCredentials);
+    const auto credentialsPath = fixture.makeFile("credentials/kimi-code.json", expiredKimiCredentials);
     const auto directory = credentialsPath.parent_path();
     const auto restoreDacl = [&directory](void* descriptor) {
         SetFileSecurityW(directory.c_str(), DACL_SECURITY_INFORMATION, descriptor);
@@ -958,9 +973,10 @@ TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting qu
 
     std::vector<unsigned char> originalDacl;
     if (rotation == Rotation::NarrowDacl) {
+        setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;FA;;;OW)");
         setFixtureDacl(credentialsPath, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:(A;;FA;;;OW)");
         originalDacl = credentialDacl(credentialsPath, true);
-        // SetFileSecurityW changes inheritance for new files without rewriting the existing credential DACL.
+        // Change the directory ACL without propagating it to the existing credential.
         setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;FA;;;OW)(A;OIIO;FR;;;WD)");
         REQUIRE(credentialDacl(credentialsPath, true) == originalDacl);
     } else if (rotation == Rotation::DeleteDenied) {
@@ -985,11 +1001,14 @@ TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting qu
     std::ifstream input(credentialsPath, std::ios::binary);
     REQUIRE(input.is_open());
     const std::string savedCredentials(std::istreambuf_iterator<char>(input), {});
-    if (rotation == Rotation::Locked || rotation == Rotation::DeleteDenied) {
+    if (rotation != Rotation::Normal) {
         CHECK(server.handledRequestCount() == 1);
         CHECK_FALSE(quota.success);
         CHECK(quota.error == "Failed to persist refreshed Kimi OAuth credentials");
-        CHECK(savedCredentials == originalCredentials);
+        CHECK(savedCredentials == expiredKimiCredentials);
+        if (rotation == Rotation::NarrowDacl) {
+            CHECK(credentialDacl(credentialsPath, true) == originalDacl);
+        }
         return;
     }
 
@@ -1001,9 +1020,33 @@ TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting qu
 
     CHECK(savedCredentials.find("fresh-access-token") != std::string::npos);
     CHECK(savedCredentials.find("fresh-refresh-token") != std::string::npos);
-    if (rotation == Rotation::NarrowDacl) {
-        CHECK(credentialDacl(credentialsPath) == originalDacl);
-    }
+}
+
+TEST_CASE("Kimi rotated credentials inherit later parent access revocations", "[kimi]") {
+    ScopedWinsock winsock;
+    LocalHttpSequenceServer server(kimiRefreshSequence());
+    ScopedEnvironmentVariable oauthUrl("JISTATS_KIMI_OAUTH_TOKEN_URL", server.baseUrl() + "/api/oauth/token");
+    ScopedEnvironmentVariable usagesUrl("JISTATS_KIMI_USAGES_URL", server.baseUrl() + "/coding/v1/usages");
+
+    TempFixtureDirectory fixture;
+    const auto directory = fixture.makeFile("credentials/profile-marker", "").parent_path();
+    setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;OICI;FA;;;OW)(A;OIIO;FR;;;WD)", true);
+    const auto reference = fixture.makeFile("credentials/inheritance-reference", "");
+    const auto credentialsPath = fixture.makeFile("credentials/kimi-code.json", expiredKimiCredentials);
+    const auto initialDacl = credentialDacl(credentialsPath, true);
+    REQUIRE(credentialDacl(reference, true) == initialDacl);
+
+    KimiAdapter adapter(fixture.path().string());
+    const QuotaResponse quota = adapter.fetchQuota();
+    REQUIRE(server.failure().empty());
+    REQUIRE(quota.success);
+    REQUIRE(server.handledRequestCount() == 2);
+    REQUIRE(credentialDacl(credentialsPath, true) == initialDacl);
+
+    setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;OICI;FA;;;OW)", true);
+    const auto restrictedDacl = credentialDacl(reference, true);
+    REQUIRE(restrictedDacl != initialDacl);
+    CHECK(credentialDacl(credentialsPath, true) == restrictedDacl);
 }
 
 TEST_CASE("Kimi adapter refreshes OAuth credentials after a 401 usages response and retries quota", "[kimi]") {
