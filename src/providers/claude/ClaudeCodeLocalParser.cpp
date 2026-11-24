@@ -79,14 +79,23 @@ std::string tryGetEnvironmentVariable(const char* name) {
     return resolvedValue;
 }
 
-std::time_t parseDateToUnixTime(const std::string& dateStr) {
+enum class CacheDateZone { Local, Utc };
+
+std::time_t parseDateToUnixTime(const std::string& dateStr, CacheDateZone zone) {
     std::tm tm = {};
     std::istringstream ss(dateStr);
     ss >> std::get_time(&tm, "%Y-%m-%d");
     if (ss.fail()) {
         return 0;
     }
-    return std::mktime(&tm);
+    if (zone == CacheDateZone::Local) {
+        return std::mktime(&tm);
+    }
+#ifdef _WIN32
+    return _mkgmtime(&tm);
+#else
+    return timegm(&tm);
+#endif
 }
 
 std::string readFileContents(const std::string& filePath) {
@@ -262,7 +271,7 @@ std::vector<UsageEvent> ClaudeCodeLocalParser::toUsageEvents(const ClaudeCodeLoc
     const std::string reference = localPathReference(result.statsCachePath);
 
     for (const auto& day : result.dailyModelTokens) {
-        const std::time_t dayTime = parseDateToUnixTime(day.date);
+        const std::time_t dayTime = parseDateToUnixTime(day.date, CacheDateZone::Utc);
         if (dayTime <= 0) {
             continue;
         }
@@ -284,7 +293,7 @@ std::vector<UsageEvent> ClaudeCodeLocalParser::toUsageEvents(const ClaudeCodeLoc
 
     // If no daily model tokens, fall back to aggregate modelUsage without specific dates
     if (includeLifetimeFallback && events.empty() && !result.modelUsage.empty()) {
-        const std::time_t aggregateTime = parseDateToUnixTime(result.lastComputedDate);
+        const std::time_t aggregateTime = parseDateToUnixTime(result.lastComputedDate, CacheDateZone::Local);
         for (const auto& model : result.modelUsage) {
             UsageEvent event;
             event.eventTime = aggregateTime > 0 ? aggregateTime : result.parsedAt;
@@ -314,7 +323,7 @@ std::vector<ActivityEvent> ClaudeCodeLocalParser::toActivityEvents(const ClaudeC
     const std::string reference = localPathReference(result.statsCachePath);
 
     for (const auto& day : result.dailyActivity) {
-        const std::time_t dayTime = parseDateToUnixTime(day.date);
+        const std::time_t dayTime = parseDateToUnixTime(day.date, CacheDateZone::Local);
         if (dayTime <= 0) {
             continue;
         }
