@@ -368,6 +368,43 @@ TEST_CASE("DashboardPresenter syncs scheduled export controls from the view mode
     presenter.shutdown();
 }
 
+TEST_CASE("DashboardPresenter tabs through visible Settings controls", "[dashboard_presenter][settings]") {
+    DashboardPresenter presenter;
+    auto model = makeQuotaViewModel();
+    model.preferences.startupEnabled = false;
+    presenter.updateViewModel(model);
+    REQUIRE(presenter.init());
+    REQUIRE(presenter.dispatchShellCommandForTesting(DashboardShellCommand::FileSettings));
+
+    REQUIRE(
+        waitForCondition([&]() { return presenter.isShellDialogOpenForTesting(DashboardShellDialog::Preferences); }));
+    const HWND settings = FindWindowW(L"JiStatsPreferencesWindow", nullptr);
+    REQUIRE(settings != nullptr);
+    const DWORD settingsThread = GetWindowThreadProcessId(settings, nullptr);
+    const auto focusedControl = [settingsThread]() -> HWND {
+        GUITHREADINFO info{};
+        info.cbSize = sizeof(info);
+        return GetGUIThreadInfo(settingsThread, &info) ? info.hwndFocus : nullptr;
+    };
+
+    const HWND tab = FindWindowExW(settings, nullptr, WC_TABCONTROLW, nullptr);
+    const HWND overlay = FindWindowExW(settings, nullptr, L"Button", L"Enable taskbar overlay");
+    const HWND startup = FindWindowExW(settings, nullptr, L"Button", L"Start with Windows");
+    const HWND scheduled = FindWindowExW(settings, nullptr, L"Button", L"Enable scheduled HTML export");
+    REQUIRE(tab != nullptr);
+    REQUIRE(overlay != nullptr);
+    REQUIRE(startup != nullptr);
+    REQUIRE(scheduled != nullptr);
+    REQUIRE(waitForCondition([&]() { return focusedControl() == tab; }));
+
+    REQUIRE(PostMessageW(tab, WM_KEYDOWN, VK_TAB, 0));
+    REQUIRE(waitForCondition([&]() { return focusedControl() == overlay; }));
+    REQUIRE(PostMessageW(overlay, WM_KEYDOWN, VK_TAB, 0));
+    REQUIRE(waitForCondition([&]() { return focusedControl() == startup; }));
+    REQUIRE(PostMessageW(startup, WM_KEYDOWN, VK_TAB, 0));
+    CHECK(waitForCondition([&]() { return focusedControl() == scheduled; }));
+}
+
 TEST_CASE("DashboardPresenter routes the separate Codex attribution checkbox",
           "[dashboard_presenter][settings][codex]") {
     std::atomic<int> requested{-1};

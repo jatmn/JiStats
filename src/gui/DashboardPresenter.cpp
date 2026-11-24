@@ -4849,6 +4849,14 @@ public:
             GetModuleHandleW(nullptr),
             nullptr);
 
+        for (const HWND control : {overlayCheckbox, startupCheckbox, startupBackgroundCheckbox, scheduledExportCheckbox,
+                                   openaiSubscriptionCheckbox, claudeCodeEnableCheckbox, miniMaxSubscriptionCheckbox,
+                                   kimiCodeEnableCheckbox, preferencesCloseButton}) {
+            if (control != nullptr) {
+                SetWindowLongPtrW(control, GWL_STYLE, GetWindowLongPtrW(control, GWL_STYLE) | WS_TABSTOP);
+            }
+        }
+
         applyBodyFont(preferencesTab);
         applyBodyFont(preferencesGeneralGroup);
         applyBodyFont(preferencesInfo);
@@ -4950,6 +4958,7 @@ public:
                 preferencesWindow = hwnd;
             }
             ShowWindow(hwnd, SW_SHOW);
+            SetFocus(preferencesTab);
             UpdateWindow(hwnd);
             if (onOpened) {
                 onOpened();
@@ -7109,6 +7118,10 @@ public:
                 if (IsDialogMessageW(hwnd, &msg)) {
                     continue;
                 }
+            } else if (preferencesWindow != nullptr &&
+                       (msg.hwnd == preferencesWindow || IsChild(preferencesWindow, msg.hwnd)) &&
+                       IsDialogMessageW(preferencesWindow, &msg)) {
+                continue;
             } else if (analysisWindow != nullptr && (msg.hwnd == analysisWindow || IsChild(analysisWindow, msg.hwnd)) &&
                        IsDialogMessageW(analysisWindow, &msg)) {
                 continue;
