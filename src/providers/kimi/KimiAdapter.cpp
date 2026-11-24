@@ -526,14 +526,20 @@ bool replaceCredentialFile(const std::filesystem::path& path, const std::string&
     }
 
     SECURITY_DESCRIPTOR creationSecurity{};
-    if (!InitializeSecurityDescriptor(&creationSecurity, SECURITY_DESCRIPTOR_REVISION) ||
-        !SetSecurityDescriptorOwner(&creationSecurity, owner, FALSE) ||
-        !SetSecurityDescriptorGroup(&creationSecurity, group, FALSE) ||
-        !SetSecurityDescriptorDacl(&creationSecurity, TRUE, creationDacl, FALSE) ||
-        !SetSecurityDescriptorControl(&creationSecurity, SE_DACL_PROTECTED, originalControl & SE_DACL_PROTECTED)) {
-        return false;
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE};
+    // Let NTFS build its default descriptor when the original DACL is entirely inherited.
+    const bool entirelyInherited =
+        !(originalControl & SE_DACL_PROTECTED) && dacl->AceCount != 0 && creationDacl->AceCount == 0;
+    if (!entirelyInherited) {
+        if (!InitializeSecurityDescriptor(&creationSecurity, SECURITY_DESCRIPTOR_REVISION) ||
+            !SetSecurityDescriptorOwner(&creationSecurity, owner, FALSE) ||
+            !SetSecurityDescriptorGroup(&creationSecurity, group, FALSE) ||
+            !SetSecurityDescriptorDacl(&creationSecurity, TRUE, creationDacl, FALSE) ||
+            !SetSecurityDescriptorControl(&creationSecurity, SE_DACL_PROTECTED, originalControl & SE_DACL_PROTECTED)) {
+            return false;
+        }
+        attributes.lpSecurityDescriptor = &creationSecurity;
     }
-    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), &creationSecurity, FALSE};
 
     FILE_RENAME_INFO rename{};
     rename.ReplaceIfExists = TRUE;
