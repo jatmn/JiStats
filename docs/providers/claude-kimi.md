@@ -14,4 +14,6 @@ Replay the [Claude fixtures](../fixtures/claude/) with [the Claude parser tests]
 
 Subscription quota comes from the validated OAuth-backed `/coding/v1/usages` endpoint. The adapter reads the Kimi client's `~/.kimi/credentials/kimi-code.json` file. It can refresh when the access token is unusable or quota returns HTTP 401. A successful refresh writes the rotated credentials back to the same file before using them. A write failure causes the quota fetch to fail. Keep credential contents out of activity ingestion, app storage, logs, and fixtures. Without usable OAuth, quota stays empty. The 5-hour and 7-day percentages describe the returned subscription windows.
 
+The 7-day balance stays unknown until Kimi reports a positive allowance and either used or remaining quota. JiStats displays and records a weekly balance once it has those values, including an explicit zero remaining.
+
 Replay the [Kimi fixtures](../fixtures/kimi/README.md) with [the Kimi adapter tests](../../tests/test_kimi_adapter.cpp). The [dated provider validation](../validation/provider-evidence-2026-04-21.md) records the live OAuth-backed quota check.

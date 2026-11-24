@@ -2750,6 +2750,10 @@ bool shouldExposeQuotaSnapshot(const QuotaResponse& quota) {
         return false;
     }
 
+    if (quota.providerSurface == "kimi_subscription_api") {
+        return quota.success && (quota.limit > 0 || quota.used > 0 || quota.remaining > 0 || quota.secondaryLimit > 0);
+    }
+
     return quota.success &&
         (quota.limit > 0 ||
          quota.used > 0 ||

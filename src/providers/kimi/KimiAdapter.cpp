@@ -144,7 +144,7 @@ bool tryGetIntegralValue(const JsonValue& value, long long& out) {
     }
 
     if (integerPart < static_cast<double>(std::numeric_limits<long long>::min()) ||
-        integerPart > static_cast<double>(std::numeric_limits<long long>::max())) {
+        integerPart >= static_cast<double>(std::numeric_limits<long long>::max())) {
         return false;
     }
 
@@ -569,6 +569,29 @@ bool tryParseStringNumber(const JsonValue& value, long long& out) {
     return false;
 }
 
+bool tryParseWeeklyQuotaCount(const JsonValue& value, long long& out) {
+    long long number = 0;
+    if (value.isString()) {
+        const auto& text = value.getString();
+        std::size_t parsed = 0;
+        try {
+            number = std::stoll(text, &parsed);
+        } catch (...) {
+            return false;
+        }
+        if (parsed != text.size()) {
+            return false;
+        }
+    } else if (!tryGetIntegralValue(value, number)) {
+        return false;
+    }
+    if (number < 0) {
+        return false;
+    }
+    out = number;
+    return true;
+}
+
 QuotaResponse parseUsagesResponse(const std::string& jsonBody) {
     QuotaResponse response;
     response.providerSurface = "kimi_subscription_api";
@@ -593,13 +616,17 @@ QuotaResponse parseUsagesResponse(const std::string& jsonBody) {
     std::time_t weeklyResetTime = 0;
 
     if (const JsonValue* limit = usage->getMember("limit")) {
-        tryParseStringNumber(*limit, weeklyLimit);
+        tryParseWeeklyQuotaCount(*limit, weeklyLimit);
     }
-    if (const JsonValue* used = usage->getMember("used")) {
-        tryParseStringNumber(*used, weeklyUsed);
-    }
-    if (const JsonValue* remaining = usage->getMember("remaining")) {
-        tryParseStringNumber(*remaining, weeklyRemaining);
+    const JsonValue* used = usage->getMember("used");
+    const JsonValue* remaining = usage->getMember("remaining");
+    const bool hasWeeklyUsed = used && tryParseWeeklyQuotaCount(*used, weeklyUsed);
+    const bool hasWeeklyRemaining = remaining && tryParseWeeklyQuotaCount(*remaining, weeklyRemaining);
+    const bool hasWeeklyBalance = weeklyLimit > 0 && (hasWeeklyUsed || hasWeeklyRemaining);
+    if (hasWeeklyBalance) {
+        weeklyRemaining = hasWeeklyRemaining ? std::min(weeklyRemaining, weeklyLimit)
+                                             : weeklyLimit - std::min(weeklyUsed, weeklyLimit);
+        weeklyUsed = weeklyLimit - weeklyRemaining;
     }
     if (const JsonValue* resetTime = usage->getMember("resetTime")) {
         if (resetTime->isString()) {
@@ -661,14 +688,25 @@ QuotaResponse parseUsagesResponse(const std::string& jsonBody) {
     response.used = fiveHourUsed;
     response.limit = fiveHourLimit;
     response.remaining = fiveHourRemaining;
-    response.secondaryWindowType = "weekly";
-    response.secondaryWindowStart = weeklyResetTime > 0
-        ? std::max<std::time_t>(0, weeklyResetTime - (7 * 24 * 60 * 60))
-        : 0;
-    response.secondaryWindowEnd = weeklyResetTime;
-    response.secondaryUsed = weeklyUsed;
-    response.secondaryLimit = weeklyLimit;
-    response.secondaryRemaining = weeklyRemaining;
+    if (hasWeeklyBalance) {
+        const auto weeklyStart =
+            weeklyResetTime > 0 ? std::max<std::time_t>(0, weeklyResetTime - (7 * 24 * 60 * 60)) : 0;
+        if (fiveHourLimit <= 0) {
+            response.windowType = "weekly";
+            response.windowStart = weeklyStart;
+            response.windowEnd = weeklyResetTime;
+            response.used = weeklyUsed;
+            response.limit = weeklyLimit;
+            response.remaining = weeklyRemaining;
+        } else {
+            response.secondaryWindowType = "weekly";
+            response.secondaryWindowStart = weeklyStart;
+            response.secondaryWindowEnd = weeklyResetTime;
+            response.secondaryUsed = weeklyUsed;
+            response.secondaryLimit = weeklyLimit;
+            response.secondaryRemaining = weeklyRemaining;
+        }
+    }
     response.snapshotTime = std::time(nullptr);
     return response;
 }
