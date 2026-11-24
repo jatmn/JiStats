@@ -1134,7 +1134,6 @@ TEST_CASE("AppController does not count recovery twice after Exit during rollup 
         storage.execute("SELECT COUNT(*) FROM gap_markers WHERE source_kind = 'runtime_recovery';");
     REQUIRE(countBeforeRetry.success());
     CHECK(countBeforeRetry.getInt(0, 0) == 0);
-    storage.close();
 
     AppController restarted;
     restarted.setHeadlessForTesting(true);
@@ -1143,12 +1142,11 @@ TEST_CASE("AppController does not count recovery twice after Exit during rollup 
     restarted.setCurrentTimeForTesting(retryTime);
     REQUIRE(restarted.init());
     REQUIRE(waitForCondition([&]() {
-        const auto runtime = restarted.getPersistedRuntimeStateForTesting();
+        const auto runtime = storage.getRuntimeState();
         return runtime && runtime->recoveryMarker.empty();
     }));
     restarted.shutdown();
 
-    REQUIRE(storage.init(dbPath.path()));
     const auto completed = storage.execute(
         "SELECT period_start_utc, period_end_utc FROM gap_markers WHERE source_kind = 'runtime_recovery';");
     REQUIRE(completed.success());
