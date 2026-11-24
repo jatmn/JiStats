@@ -6,6 +6,8 @@ Both integrations are opt-in. Use [the local redaction contract](local-redaction
 
 [ClaudeCodeLocalParser](../../src/providers/claude/ClaudeCodeLocalParser.cpp) reads aggregate activity and token data from `~/.claude/stats-cache.json` and bounded metadata from `~/.claude/settings.json`. [ClaudeCodeAdapter](../../src/providers/claude/ClaudeCodeAdapter.cpp) uses these inputs for local activity and usage. Set `CLAUDE_CONFIG_DIR` before starting JiStats to use a different Claude configuration directory. Daily model totals use UTC reporting dates. Recovery uses dated daily totals only. Activity and usage references use an opaque identifier for the stats-cache path. The bundled version 13 upgrade replaces legacy Claude paths in place when JiStats opens the database, even when the cache has changed or is unavailable. The stats cache can support exact local counters. Provider quota, billing mode, and reset behavior remain unverified.
 
+Existing Claude backfill rows retain their original timestamps. Replaying a day previously saved at local midnight can add a UTC-dated row for the same totals. Reports that include both timestamps can count those tokens twice.
+
 Replay the [Claude fixtures](../fixtures/claude/) with [the Claude parser tests](../../tests/test_claude_local_parser.cpp). Keep transcripts, tool payloads, and credentials outside the parser and fixture scope.
 
 ## Kimi Code
