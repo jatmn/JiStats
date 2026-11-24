@@ -6,7 +6,7 @@ Open the dedicated Analysis workspace from the dashboard. The provider, account,
 - **Quota history** shows subscription quota samples for a selected provider and account. Select a quota window to inspect remaining percentages, recorded units, and resets. The chart spaces samples by capture time. The lowest recorded value can include a daily minimum retained by a rollup.
 - **Coverage** explains the records and gaps behind the selected range. When recent local Codex throughput is available, its fixed 5-minute and 30-minute rates are labeled separately from the selected historical dates.
 
-[AnalysisPresenter](../../src/gui/AnalysisPresenter.cpp) owns the display. [AnalysisQueryEngine](../../src/reporting/AnalysisQueryEngine.cpp) resolves the persisted scope used for Analysis and HTML reporting. Providers and accounts remain selectable while they have retained daily usage rollups.
+[AnalysisPresenter](../../src/gui/AnalysisPresenter.cpp) owns the display. [AnalysisQueryEngine](../../src/reporting/AnalysisQueryEngine.cpp) resolves the persisted scope used for Analysis and HTML reporting. Providers and accounts remain selectable while they have retained daily usage rollups. Activity shows the retained daily total and identifies records without hourly detail.
 
 ## Exports
 

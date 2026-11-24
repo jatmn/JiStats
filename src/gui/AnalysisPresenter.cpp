@@ -271,11 +271,26 @@ std::string activitySummary(const AnalysisViewModel& model) {
     for (const auto& point : model.trendPoints) {
         records += point.activityCount;
     }
+    long long missingHourlyDetail = 0;
+    if (model.trendBucketGranularity == AnalysisTrendBucketGranularity::Hourly) {
+        long long dailyTotal = 0;
+        for (const auto& day : model.dailySummaries) {
+            dailyTotal += day.activityCount;
+        }
+        missingHourlyDetail = std::max(0LL, dailyTotal - records);
+        records += missingHourlyDetail;
+    }
     if (records == 0) {
         return "No activity records in this range.";
     }
 
-    return formatNumber(records) + " " + pluralize(records, "record", "records") + " in the selected range";
+    std::string summary =
+        formatNumber(records) + " " + pluralize(records, "record", "records") + " in the selected range";
+    if (missingHourlyDetail > 0) {
+        summary += ". Hourly detail is unavailable for " + formatNumber(missingHourlyDetail) + " " +
+                   pluralize(missingHourlyDetail, "record", "records") + ".";
+    }
+    return summary;
 }
 
 std::string recentCodexUsage(const AnalysisCodexThroughput& usage) {
