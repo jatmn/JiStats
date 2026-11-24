@@ -36,6 +36,7 @@
 #include "providers/minimax/MiniMaxAdapter.hpp"
 #include "providers/openai/OpenAIAdapter.hpp"
 #include "providers/openai/OpenAIExportImport.hpp"
+#include "reporting/AnalysisQueryEngine.hpp"
 #include "taskbar/TaskbarPresenter.hpp"
 #include "app_controller_test_support.hpp"
 #include "runtime_test_support.hpp"
@@ -2573,6 +2574,7 @@ TEST_CASE("AppController leaves recovery coverage unknown for unsupported provid
 
     StorageService storage;
     REQUIRE(storage.init(dbPath.path()));
+    const std::time_t legacyEnd = recoveryStart - 86400;
     for (const std::string providerKey : {"openai", "minimax"}) {
         CAPTURE(providerKey);
         const int providerId = requireProviderId(storage, providerKey);
@@ -2588,17 +2590,67 @@ TEST_CASE("AppController leaves recovery coverage unknown for unsupported provid
         legacy.providerId = providerId;
         legacy.accountId = accountId;
         legacy.syncKind = "runtime_backfill";
-        legacy.recoveryStart = recoveryStart - 3600;
-        legacy.recoveryEnd = recoveryStart;
-        legacy.attemptAt = recoveryStart;
+        legacy.recoveryStart = legacyEnd - 1800;
+        legacy.recoveryEnd = legacyEnd;
+        legacy.attemptAt = legacyEnd;
         legacy.outcome = providerKey == "openai" ? "no_data" : "fetch_failed";
+        legacy.comparisonResult = providerKey == "openai" ? "mismatch" : "not_available";
         REQUIRE(storage.insertRecoveryCheckpoint(legacy));
+
+        PersistedGapMarker legacyGap = gaps.front();
+        legacyGap.periodStart = legacy.recoveryStart;
+        legacyGap.periodEnd = legacy.recoveryEnd;
+        legacyGap.basisSummary = providerKey == "openai"
+                                     ? "Provider backfill returned no history, but JiStats has local quantified "
+                                       "evidence for the same recovery window"
+                                     : "JiStats could not retrieve provider backfill during the recovery window";
+        REQUIRE(storage.upsertGapMarker(legacyGap));
     }
-    storage.close();
     app.refreshRuntimeForTesting();
     const auto dashboard = app.getDashboardViewModelForTesting();
     CHECK(dashboard.recoveryStatusSummary == "Unknown gaps in 2 providers");
     CHECK(dashboard.recoveryStatusDetail.find("Last recovery outcome:") == std::string::npos);
+
+    PersistedRecoveryCheckpoint supported;
+    supported.accountId = ensureRuntimeAccountId(storage, "claude_code", "Claude Code");
+    supported.providerId = requireProviderId(storage, "claude_code");
+    supported.syncKind = "runtime_backfill";
+    supported.recoveryStart = legacyEnd - 1800;
+    supported.recoveryEnd = legacyEnd;
+    supported.attemptAt = legacyEnd;
+    supported.outcome = "imported";
+    supported.fetchedEventCount = 1;
+    REQUIRE(storage.insertRecoveryCheckpoint(supported));
+
+    AnalysisQueryEngine engine(storage);
+    DashboardPreferences analysisScope = dashboard.preferences;
+    analysisScope.analysisSelectedProviderId.clear();
+    analysisScope.analysisSelectedAccountId.clear();
+    analysisScope.analysisDateRangePreset = AnalysisDateRangePreset::Last7Days;
+    const auto allProviders = engine.buildViewModel(dashboard, analysisScope, now);
+    CHECK(allProviders.dataQualityNote.find("Recovery checkpoints: 1 imported, 0 mismatch, 0 failed.") !=
+          std::string::npos);
+    for (const std::string providerKey : {"openai", "minimax"}) {
+        CAPTURE(providerKey);
+        analysisScope.analysisSelectedProviderId = providerKey;
+        const auto analysis = engine.buildViewModel(dashboard, analysisScope, now);
+        const auto legacyDay = findAnalysisDailySummary(analysis.dailySummaries, toUtcIso(legacyEnd).substr(0, 10));
+        REQUIRE(legacyDay.has_value());
+        CHECK(legacyDay->gapDetail.classification == AnalysisGapClassification::Unknown);
+        CHECK(legacyDay->gapDetail.basisSummary ==
+              "JiStats was not fully observing provider state during the recovery window");
+    }
+    storage.close();
+
+    TempTestDirectory exportDir("jistats_unsupported_history_report");
+    const auto outputPath = exportDir.path() / "coverage.html";
+    REQUIRE(app.exportHtmlReportForTesting(outputPath.string()).success);
+    std::ifstream report(outputPath);
+    REQUIRE(report.is_open());
+    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+    CHECK(html.find("unknown gap marker") != std::string::npos);
+    CHECK(html.find("imported-versus-local mismatches") == std::string::npos);
+    CHECK(html.find("recovery fetch failure") == std::string::npos);
     app.shutdown();
 }
 

@@ -8,7 +8,7 @@ Record completed work, the revision and evidence, and any remaining verification
 
 - The version 13 Claude upgrade now retries a busy WAL checkpoint when two instances open an older database together. A bundled-SQLite regression holds the checkpoint lock until the second opener reaches it. Both instances now open with persistence, and the upgrade still records version 13 only after a checkpoint succeeds. [PR #62 review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672761310)
 
-- OpenAI and MiniMax now declare that provider-side backfill is unsupported. Catch-up retains unknown gap markers, and the dashboard omits old backfill results from those adapters. The controller regression reproduced the empty and failed checkpoints on the baseline. Portable CTest, the MinGW app, CLI and tests, and focused recovery tests under Wine passed. [Issue #74](https://github.com/jatmn/JiStats/issues/74)
+- OpenAI and MiniMax now declare that provider-side backfill is unsupported. Catch-up retains unknown gap markers. The dashboard, Analysis, and HTML reports omit the unsupported outcomes, and Analysis shows a neutral explanation for the affected older gap markers. Portable CTest, the MinGW app, CLI and tests, and focused recovery and reporting tests under Wine passed. [Issue #74](https://github.com/jatmn/JiStats/issues/74)
 
 - The version 13 Claude upgrade now rebuilds the SQLite file after redacting the rows. Enabling SQLite secure deletion for the updates cleared the rewritten rows but left 44 copies of the path in unused space on two B-tree pages. The regression checks the closed database as well as the row values and exercises a retry after a failed rebuild. [PR #62 review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672618383)
 
