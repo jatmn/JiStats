@@ -1,6 +1,9 @@
 #include "core/HttpClient.hpp"
+#include <winsock2.h>
 #include <windows.h>
 #include <winhttp.h>
+#include <algorithm>
+#include <climits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -54,6 +57,9 @@ static std::wstring stringToWstring(const std::string& str) {
 
 static std::string getLastErrorMessage(const std::string& prefix) {
     DWORD error = GetLastError();
+    if (error == ERROR_WINHTTP_TIMEOUT || error == WSAETIMEDOUT) {
+        return prefix + ": request timed out";
+    }
     char errorMsg[256] = {};
     DWORD charsWritten = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
                                         nullptr, error, 0, errorMsg,
@@ -138,12 +144,20 @@ class HttpClient::Impl {
 public:
     std::string apiKey;
     std::string groupId;
-    unsigned int timeoutMs = 30000;
+    int timeoutMs = 30000;
     bool redirectsDisabled = false;
     std::string lastError;
     std::string userAgent = "JiStats/1.0";
     std::string contentType = "application/json";
     std::vector<std::pair<std::string, std::string>> extraHeaders;
+
+    bool configureTimeouts(HINTERNET request) const {
+        DWORD receiveTimeoutMs = static_cast<DWORD>(timeoutMs);
+        return WinHttpSetTimeouts(request, timeoutMs, timeoutMs, timeoutMs, timeoutMs) &&
+               WinHttpSetOption(request, WINHTTP_OPTION_RECEIVE_TIMEOUT, &receiveTimeoutMs, sizeof(receiveTimeoutMs)) &&
+               WinHttpSetOption(request, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, &receiveTimeoutMs,
+                                sizeof(receiveTimeoutMs));
+    }
 };
 
 HttpClient::HttpClient()
@@ -161,7 +175,7 @@ void HttpClient::setGroupId(const std::string& groupId) {
 }
 
 void HttpClient::setTimeout(unsigned int timeoutMs) {
-    pImpl->timeoutMs = timeoutMs;
+    pImpl->timeoutMs = static_cast<int>(std::min(timeoutMs, static_cast<unsigned int>(INT_MAX)));
 }
 
 void HttpClient::disableRedirects() {
@@ -235,6 +249,12 @@ HttpResponse HttpClient::get(const std::string& url) {
                                              WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
     if (!request.get()) {
         response.error = getLastErrorMessage("Failed to open request");
+        pImpl->lastError = response.error;
+        return response;
+    }
+
+    if (!pImpl->configureTimeouts(request.get())) {
+        response.error = getLastErrorMessage("Failed to configure WinHTTP timeouts");
         pImpl->lastError = response.error;
         return response;
     }
@@ -321,6 +341,12 @@ HttpResponse HttpClient::post(const std::string& url, const std::string& body) {
                                              WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
     if (!request.get()) {
         response.error = getLastErrorMessage("Failed to open request");
+        pImpl->lastError = response.error;
+        return response;
+    }
+
+    if (!pImpl->configureTimeouts(request.get())) {
+        response.error = getLastErrorMessage("Failed to configure WinHTTP timeouts");
         pImpl->lastError = response.error;
         return response;
     }

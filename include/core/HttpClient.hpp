@@ -41,7 +41,8 @@ public:
     void setGroupId(const std::string& groupId);
 
     /**
-     * Set request timeout in milliseconds (default: 30000).
+     * Set each WinHTTP request phase timeout in milliseconds (default: 30000).
+     * Zero waits indefinitely.
      */
     void setTimeout(unsigned int timeoutMs);
 

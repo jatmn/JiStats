@@ -3,10 +3,13 @@
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <ctime>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
@@ -18,6 +21,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include "core/HttpClient.hpp"
 #include "db/SchemaManager.hpp"
 #include "db/StorageService.hpp"
 #include "providers/kimi/KimiAdapter.hpp"
@@ -106,6 +110,7 @@ struct ExpectedHttpExchange {
     int statusCode = 200;
     std::string body;
     std::string contentType = "application/json";
+    std::chrono::milliseconds responseDelay{0};
 };
 
 class LocalHttpSequenceServer {
@@ -143,6 +148,11 @@ public:
     }
 
     ~LocalHttpSequenceServer() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        responseWait_.notify_all();
         if (listenSocket_ != INVALID_SOCKET) {
             closesocket(listenSocket_);
             listenSocket_ = INVALID_SOCKET;
@@ -164,6 +174,11 @@ public:
     std::string failure() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return failure_;
+    }
+
+    bool responseStarted() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return responseStarted_;
     }
 
 private:
@@ -238,11 +253,17 @@ private:
             const std::string requestLine = lineEnd == std::string::npos ? request : request.substr(0, lineEnd);
             const std::string expectedPrefix = exchanges_[index].method + " " + exchanges_[index].path + " ";
             {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::unique_lock<std::mutex> lock(mutex_);
                 ++handledRequestCount_;
                 if (failure_.empty() && requestLine.rfind(expectedPrefix, 0) != 0) {
                     failure_ = "unexpected request line: " + requestLine;
                 }
+                if (exchanges_[index].responseDelay.count() > 0 &&
+                    responseWait_.wait_for(lock, exchanges_[index].responseDelay, [this] { return stopping_; })) {
+                    closesocket(client);
+                    return;
+                }
+                responseStarted_ = true;
             }
 
             std::ostringstream response;
@@ -262,7 +283,10 @@ private:
     std::thread thread_;
     std::vector<ExpectedHttpExchange> exchanges_;
     mutable std::mutex mutex_;
+    std::condition_variable responseWait_;
     std::size_t handledRequestCount_ = 0;
+    bool responseStarted_ = false;
+    bool stopping_ = false;
     std::string failure_;
 };
 
@@ -289,6 +313,42 @@ std::string sampleKimiUsagesResponse() {
 }
 
 } // namespace
+
+TEST_CASE("WinHTTP requests report the configured receive timeout", "[http][timeout]") {
+    constexpr unsigned int timeoutMs = 5000;
+    constexpr auto withheldResponse = std::chrono::seconds(9);
+    ScopedWinsock winsock;
+    LocalHttpSequenceServer getServer({{"GET", "/slow", 200, "{}", "application/json", withheldResponse}});
+    LocalHttpSequenceServer postServer({{"POST", "/slow", 200, "{}", "application/json", withheldResponse}});
+    HttpClient getClient;
+    HttpClient postClient;
+    getClient.setTimeout(timeoutMs);
+    postClient.setTimeout(timeoutMs);
+
+    bool getResponseStarted = false;
+    auto get = std::async(std::launch::async, [&]() {
+        auto response = getClient.get(getServer.baseUrl() + "/slow");
+        getResponseStarted = getServer.responseStarted();
+        return response;
+    });
+    const auto postResponse = postClient.post(postServer.baseUrl() + "/slow", "{}");
+    const bool postResponseStarted = postServer.responseStarted();
+    const auto getResponse = get.get();
+
+    const auto checkTimeout = [](const char* method, const LocalHttpSequenceServer& server, const HttpClient& client,
+                                 const HttpResponse& response, bool responseStarted) {
+        CAPTURE(method);
+        CHECK(server.handledRequestCount() == 1);
+        CHECK(server.failure().empty());
+        CHECK_FALSE(responseStarted);
+        CHECK_FALSE(response.success);
+        CHECK(response.statusCode == 0);
+        CHECK(response.error == "Failed to receive response: request timed out");
+        CHECK(client.getLastError() == response.error);
+    };
+    checkTimeout("GET", getServer, getClient, getResponse, getResponseStarted);
+    checkTimeout("POST", postServer, postClient, postResponse, postResponseStarted);
+}
 
 TEST_CASE("Kimi parser reads bounded synthetic fixture snapshots", "[kimi][fixtures]") {
     const KimiLocalParseResult result = KimiAdapter::parseLocalState(kFixtureRoot);
