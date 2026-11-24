@@ -4534,8 +4534,10 @@ TEST_CASE("AppController imports Kimi local runtime snapshots into persisted run
 TEST_CASE("AppController shows an enabled Kimi account without OAuth quota credentials", "[app][runtime][kimi]") {
     requireSqlite();
 
+    const bool withLiveProvider = GENERATE(false, true);
+    CAPTURE(withLiveProvider);
     TempTestDatabase dbPath;
-    seedStartupPreferences(dbPath.path(), false, false, false, false, false, true);
+    seedStartupPreferences(dbPath.path(), false, false, withLiveProvider, false, false, true);
     TempTestDirectory homeRoot("jistats_kimi_idle_home");
     TempTestDirectory emptyUserRoot("jistats_kimi_idle_empty_user");
     writeInstalledButIdleKimiFixture(homeRoot.path());
@@ -4550,6 +4552,9 @@ TEST_CASE("AppController shows an enabled Kimi account without OAuth quota crede
     app.setTaskbarTestModeForTesting(true);
     auto providerManager = std::make_shared<ProviderManager>();
     providerManager->addProvider(std::make_shared<KimiAdapter>(homeRoot.path().string()));
+    if (withLiveProvider) {
+        providerManager->addProvider(makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, std::time(nullptr)));
+    }
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -4561,13 +4566,32 @@ TEST_CASE("AppController shows an enabled Kimi account without OAuth quota crede
     CHECK(kimi->isEnabled);
     CHECK(kimi->accountId == "kimi.runtime_status");
     CHECK(kimi->state == ProviderState::Sample);
+    CHECK_FALSE(kimi->contributesToRuntimeState);
     CHECK(kimi->quotas.empty());
     CHECK_FALSE(kimi->lastKnownQuota.has_value());
     CHECK(findTaskbarMetric(app.getTaskbarMetricsForTesting(), "kimi") == nullptr);
-    CHECK(viewModel.runtimeState != RuntimeState::Offline);
-    CHECK(viewModel.runtimeState == RuntimeState::Unknown);
-    CHECK_FALSE(viewModel.isOnline);
+    if (withLiveProvider) {
+        const auto* openai = findProviderStatus(viewModel, "openai");
+        REQUIRE(openai != nullptr);
+        CHECK(openai->state == ProviderState::Live);
+    }
+    CHECK(viewModel.runtimeState == (withLiveProvider ? RuntimeState::Current : RuntimeState::Unknown));
+    CHECK(viewModel.isOnline == withLiveProvider);
     CHECK_FALSE(viewModel.offlineNoticeVisible);
+
+    TempTestDirectory exportDir("jistats_kimi_idle_report");
+    const auto outputPath = exportDir.path() / "freshness.html";
+    REQUIRE(app.exportHtmlReportForTesting(outputPath.string()).success);
+    std::ifstream report(outputPath);
+    REQUIRE(report.is_open());
+    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+    const auto freshnessStart = html.find("Data Freshness</div>");
+    REQUIRE(freshnessStart != std::string::npos);
+    const auto freshnessEnd = html.find("</span>", freshnessStart);
+    REQUIRE(freshnessEnd != std::string::npos);
+    const auto badge = html.substr(freshnessStart, freshnessEnd - freshnessStart);
+    CAPTURE(badge);
+    CHECK(badge.find(withLiveProvider ? "badge-fresh\">Current" : "badge-unknown\">Unknown") != std::string::npos);
 
     app.shutdown();
 }
