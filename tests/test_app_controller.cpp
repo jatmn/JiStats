@@ -2435,6 +2435,67 @@ TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the
     app.shutdown();
 }
 
+TEST_CASE("AppController binds MiniMax validation to the submitted credential", "[app][minimax]") {
+    requireSqlite();
+    const bool replaceSamePlan = GENERATE(false, true);
+    const std::string replacementPlan = replaceSamePlan ? "coding_plan" : "token_plan";
+    TempTestDatabase dbPath;
+    auto backend = makeFakeCredentialBackend();
+    auto adapter = std::make_shared<MiniMaxAdapter>();
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(adapter);
+
+    AppController app;
+    std::promise<void> releaseValidation;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setMiniMaxCredentialStoreForTesting(std::make_shared<WindowsCredentialStore>(backend));
+    app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+    app.setMiniMaxValidationReleaseForTesting(releaseValidation.get_future().share());
+    REQUIRE(app.init());
+
+    DashboardMiniMaxCredentialRequest validate;
+    validate.action = DashboardMiniMaxCredentialAction::Validate;
+    validate.planKey = "coding_plan";
+    validate.accountDisplayName = "Original Coding Plan";
+    validate.secret = "synthetic-old";
+    REQUIRE(app.submitMiniMaxCredentialActionForTesting(validate));
+
+    DashboardMiniMaxCredentialRequest save;
+    save.action = DashboardMiniMaxCredentialAction::Save;
+    save.planKey = replacementPlan;
+    save.accountDisplayName = "New credential";
+    save.secret = "synthetic-new";
+    REQUIRE(app.submitMiniMaxCredentialActionForTesting(save));
+
+    releaseValidation.set_value();
+    app.waitForMiniMaxValidationForTesting();
+    const auto viewModel = app.getDashboardViewModelForTesting();
+    const auto original = findMiniMaxSummary(viewModel, "coding_plan");
+    const auto replacement = findMiniMaxSummary(viewModel, replacementPlan);
+    REQUIRE(original.has_value());
+    REQUIRE(replacement.has_value());
+    CHECK(original->validationState == (replaceSamePlan ? "pending" : "invalid"));
+    CHECK(replacement->validationState == "pending");
+    CHECK(replacement->lastValidationError.empty());
+    CHECK(replacement->lastValidatedAtLabel.empty());
+    CHECK(replacement->accountDisplayName == "New credential");
+    CHECK(adapter->getSubscriptionCredentialProfile().planKey == replacementPlan);
+    CHECK(backend->peek(replacement->secretRef) == std::optional<std::string>("synthetic-new"));
+    app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto profiles = storage.execute("SELECT a.display_name, c.last_validated_at_utc FROM credential_profiles c "
+                                          "JOIN accounts a ON a.id = c.account_id WHERE c.secret_ref = ?;",
+                                          {replacement->secretRef});
+    REQUIRE(profiles.success());
+    REQUIRE(profiles.rowCount() == 1);
+    CHECK(profiles.getString(0, 0) == "New credential");
+    CHECK(profiles.getString(0, 1).empty());
+}
+
 TEST_CASE("AppController reports missing MiniMax secrets from hydrated metadata in the settings shell", "[app][shell][minimax]") {
     requireSqlite();
 

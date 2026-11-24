@@ -4031,6 +4031,8 @@ public:
     std::shared_ptr<WindowsCredentialStore> miniMaxCredentialStore;
     std::map<std::string, MiniMaxSubscriptionCredentialProfile> miniMaxCredentialProfiles;
     mutable std::mutex miniMaxValidationMutex;
+    std::mutex miniMaxCredentialActionMutex;
+    std::map<std::string, std::uint64_t> miniMaxCredentialRevisions;
     std::mutex runtimeRefreshMutex;
     // Serializes connectivity writes and notice publication independently of provider I/O.
     std::mutex offlineNoticeMutex;
@@ -5842,47 +5844,41 @@ public:
         return shuttingDown;
     }
 
-    void queueMiniMaxCredentialValidation(
-        const std::string& planKey,
-        const MiniMaxSubscriptionCredentialProfile& profile) {
+    void queueMiniMaxCredentialValidation(const std::string& planKey, std::uint64_t revision,
+                                          std::function<MiniMaxSubscriptionCredentialProfile()> validate) {
         std::lock_guard<std::mutex> lock(miniMaxValidationMutex);
-        miniMaxValidationThreads.emplace_back([this, planKey, profile]() {
 #ifdef JISTATS_ENABLE_TEST_HOOKS
-            if (miniMaxValidationReleaseForTesting.valid()) {
-                miniMaxValidationReleaseForTesting.wait();
-            }
+        if (miniMaxValidationReleaseForTesting.valid()) {
+            validate = [release = miniMaxValidationReleaseForTesting, validate = std::move(validate)] {
+                release.wait();
+                return validate();
+            };
+        }
 #endif
 
+        miniMaxValidationThreads.emplace_back([this, planKey, revision, validate = std::move(validate)]() {
             if (shouldStopMiniMaxValidation()) {
                 return;
             }
 
-            ensureMiniMaxCredentialAdapter();
-            const auto adapter = resolveMiniMaxRuntimeAdapter();
-            if (!adapter) {
-                return;
-            }
-
-            if (miniMaxCredentialStore) {
-                adapter->setCredentialStore(miniMaxCredentialStore);
-            }
-
-            adapter->setSubscriptionCredentialProfile(profile);
-            adapter->validateCredentials();
-
-            MiniMaxSubscriptionCredentialProfile validatedProfile =
-                adapter->getSubscriptionCredentialProfile();
+            auto validatedProfile = validate();
             validatedProfile.lastValidationError =
                 normalizeMiniMaxValidationError(validatedProfile.lastValidationError);
 
-            std::string persistError;
-            if (!persistMiniMaxCredentialProfile(validatedProfile, persistError)) {
-                validatedProfile.validationState = "invalid";
-                validatedProfile.lastValidationError = persistError;
-            }
+            {
+                // Local writes and completions share this lock. Provider requests never hold it.
+                std::lock_guard<std::mutex> actionLock(miniMaxCredentialActionMutex);
+                if (shuttingDown || miniMaxCredentialRevisions.at(planKey) != revision) {
+                    return;
+                }
 
-            updateMiniMaxCredentialProfile(planKey, validatedProfile);
-            syncActiveMiniMaxRuntimeProfile(planKey);
+                std::string persistError;
+                if (!persistMiniMaxCredentialProfile(validatedProfile, persistError)) {
+                    validatedProfile.validationState = "invalid";
+                    validatedProfile.lastValidationError = persistError;
+                }
+                updateMiniMaxCredentialProfile(planKey, validatedProfile);
+            }
 
             if (!shouldStopMiniMaxValidation()) {
                 refreshProviderRuntimeState(std::time(nullptr), true, true);
@@ -6057,8 +6053,16 @@ public:
         return true;
     }
 
-    DashboardMiniMaxCredentialResult handleMiniMaxCredentialAction(
-        const DashboardMiniMaxCredentialRequest& request) {
+    DashboardMiniMaxCredentialResult handleMiniMaxCredentialAction(const DashboardMiniMaxCredentialRequest& request) {
+        const auto result = [&]() {
+            std::lock_guard<std::mutex> actionLock(miniMaxCredentialActionMutex);
+            return applyMiniMaxCredentialAction(request);
+        }();
+        refreshProviderRuntimeState(std::time(nullptr), true, true);
+        return result;
+    }
+
+    DashboardMiniMaxCredentialResult applyMiniMaxCredentialAction(const DashboardMiniMaxCredentialRequest& request) {
         DashboardMiniMaxCredentialResult result;
         result.planKey = request.planKey;
 
@@ -6074,6 +6078,7 @@ public:
         }
 
         const std::string planKey = request.planKey == "token_plan" ? "token_plan" : "coding_plan";
+        const auto revision = ++miniMaxCredentialRevisions[planKey];
         const auto storedProfile = getMiniMaxCredentialProfile(planKey);
         MiniMaxSubscriptionCredentialProfile profile = storedProfile.has_value()
             ? *storedProfile
@@ -6091,10 +6096,8 @@ public:
                 failed.lastValidationError = normalizeMiniMaxValidationError(failed.lastValidationError);
                 updateMiniMaxCredentialProfile(planKey, failed);
                 syncActiveMiniMaxRuntimeProfile(planKey);
-                result.message = failed.lastValidationError.empty()
-                    ? "MiniMax credential save failed."
-                    : failed.lastValidationError;
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
+                result.message =
+                    failed.lastValidationError.empty() ? "MiniMax credential save failed." : failed.lastValidationError;
                 return result;
             }
 
@@ -6106,7 +6109,6 @@ public:
                 updateMiniMaxCredentialProfile(planKey, profile);
                 syncActiveMiniMaxRuntimeProfile(planKey);
                 result.message = persistError;
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
                 return result;
             }
 
@@ -6115,7 +6117,6 @@ public:
             result.success = true;
             result.accountDisplayName = profile.accountDisplayName;
             result.message = "Stored " + minimaxPlanDisplayName(planKey) + " credential.";
-            refreshProviderRuntimeState(std::time(nullptr), true, true);
             return result;
         }
 
@@ -6125,10 +6126,8 @@ public:
                 failed.lastValidationError = normalizeMiniMaxValidationError(failed.lastValidationError);
                 updateMiniMaxCredentialProfile(planKey, failed);
                 syncActiveMiniMaxRuntimeProfile(planKey);
-                result.message = failed.lastValidationError.empty()
-                    ? "MiniMax credential save failed."
-                    : failed.lastValidationError;
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
+                result.message =
+                    failed.lastValidationError.empty() ? "MiniMax credential save failed." : failed.lastValidationError;
                 return result;
             }
 
@@ -6140,7 +6139,6 @@ public:
                 updateMiniMaxCredentialProfile(planKey, profile);
                 syncActiveMiniMaxRuntimeProfile(planKey);
                 result.message = persistError;
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
                 return result;
             }
         } else {
@@ -6152,7 +6150,6 @@ public:
                 missing.lastValidationError = "No MiniMax credential has been saved for this plan yet";
                 updateMiniMaxCredentialProfile(planKey, missing);
                 result.message = missing.lastValidationError;
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
                 return result;
             }
             adapter->setSubscriptionCredentialProfile(profile);
@@ -6162,11 +6159,10 @@ public:
         profile.lastValidationError.clear();
         updateMiniMaxCredentialProfile(planKey, profile);
         syncActiveMiniMaxRuntimeProfile(planKey);
-        queueMiniMaxCredentialValidation(planKey, profile);
+        queueMiniMaxCredentialValidation(planKey, revision, adapter->prepareSubscriptionCredentialValidation(profile));
         result.success = true;
         result.accountDisplayName = profile.accountDisplayName;
         result.message = "Validating " + minimaxPlanDisplayName(planKey) + " credential...";
-        refreshProviderRuntimeState(std::time(nullptr), true, true);
         return result;
     }
 
@@ -8245,7 +8241,12 @@ void AppController::setMiniMaxValidationResponseForTesting(
 }
 
 void AppController::setMiniMaxValidationReleaseForTesting(std::shared_future<void> release) {
+    std::lock_guard<std::mutex> lock(pImpl->miniMaxValidationMutex);
     pImpl->miniMaxValidationReleaseForTesting = std::move(release);
+}
+
+void AppController::waitForMiniMaxValidationForTesting() {
+    pImpl->joinMiniMaxValidationThreads();
 }
 
 void AppController::setOpenAICodexRefreshPollIntervalForTesting(int intervalMs) {

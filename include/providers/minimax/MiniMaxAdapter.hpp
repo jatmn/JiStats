@@ -2,6 +2,7 @@
 
 #include "providers/IProviderAdapter.hpp"
 #include "platform/WindowsCredentialStore.hpp"
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -62,6 +63,8 @@ public:
     bool storeSubscriptionCredential(
         const MiniMaxSubscriptionCredentialProfile& profile,
         const std::string& secret);
+    std::function<MiniMaxSubscriptionCredentialProfile()>
+    prepareSubscriptionCredentialValidation(const MiniMaxSubscriptionCredentialProfile& profile);
     std::optional<MiniMaxSubscriptionPollingConfig> resolveSubscriptionPollingConfig(
         std::string& error);
     void setCredentialStore(std::shared_ptr<WindowsCredentialStore> credentialStore);
