@@ -767,6 +767,49 @@ TEST_CASE("ReportingService generateReport metadata with backfilled data shows c
     CHECK(html.find("Contains unknown gaps: Yes") != std::string::npos);
 }
 
+TEST_CASE("ReportingService uses the selected offline account data timestamp", "[reporting]") {
+    const bool hasRecordedSync = GENERATE(false, true);
+    CAPTURE(hasRecordedSync);
+    ReportingService service;
+    TempTestDirectory tempDir("jistats_report");
+    const auto outputPath = tempDir.path() / "unknown-data-timestamp.html";
+
+    service.setDashboardDataProvider([hasRecordedSync](DashboardViewModel& viewModel) {
+        viewModel.providers = {makeProviderWithState("openai", "OpenAI", ProviderState::Offline, "", "acct-openai", {}),
+                               makeProviderWithState("openai", "OpenAI", ProviderState::Live, "2026-04-18 03:15:30 UTC",
+                                                     "acct-other", {})};
+        if (hasRecordedSync) {
+            viewModel.providers.front().lastKnownQuota =
+                LastKnownQuotaReading{"2026-04-17 02:30:00 UTC", {makeQuota("Retained only", 120, 1000, "high")}};
+        }
+        return true;
+    });
+
+    ReportRequest request;
+    request.outputPath = outputPath.string();
+    request.providerFilter = {"openai"};
+    request.accountFilter = {"acct-openai"};
+    const auto result = service.generateReport(request);
+    REQUIRE(result.success);
+    CHECK(result.metadata.isOffline);
+    CHECK(result.metadata.dataFreshnessTimestamp.has_value() == hasRecordedSync);
+
+    const std::string html = readFileContents(outputPath);
+    const auto generated = html.find("Report Generated</div>");
+    const auto data = html.find("Data Timestamp</div>");
+    REQUIRE(generated != std::string::npos);
+    REQUIRE(data != std::string::npos);
+    const auto generatedValue = html.find("<div class=\"value\">", generated);
+    const auto dataValue = html.find("<div class=\"value\">", data);
+    REQUIRE(generatedValue < data);
+    REQUIRE(dataValue != std::string::npos);
+    CHECK(html.substr(generatedValue, html.find("</div>", generatedValue) - generatedValue).find(" UTC") !=
+          std::string::npos);
+    const std::string expected = hasRecordedSync ? "2026-04-17 02:30:00 UTC" : "Unknown";
+    CHECK(html.find("<div class=\"value\">" + expected + "</div>", data) == dataValue);
+    CHECK(html.find("Retained only") == std::string::npos);
+}
+
 TEST_CASE("ReportingService generateReport parses runtime UTC timestamps for freshness", "[reporting]") {
     ReportingService service;
     TempTestDirectory tempDir("jistats_report");
@@ -786,8 +829,8 @@ TEST_CASE("ReportingService generateReport parses runtime UTC timestamps for fre
     ReportResult result = service.generateReport(request);
     REQUIRE(result.success);
 
-    const std::time_t freshnessTime =
-        std::chrono::system_clock::to_time_t(result.metadata.dataFreshnessTimestamp);
+    REQUIRE(result.metadata.dataFreshnessTimestamp.has_value());
+    const std::time_t freshnessTime = std::chrono::system_clock::to_time_t(*result.metadata.dataFreshnessTimestamp);
     std::tm tm{};
 #ifdef _WIN32
     gmtime_s(&tm, &freshnessTime);

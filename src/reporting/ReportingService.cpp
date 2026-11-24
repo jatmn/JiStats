@@ -136,25 +136,18 @@ ReportMetadata buildReportMetadata(const DashboardViewModel& viewModel, const Re
     metadata.isOffline = metadata.runtimeState == RuntimeState::Offline;
     metadata.isStale = metadata.runtimeState == RuntimeState::Stale;
 
-    // Derive data freshness timestamp from the most recent provider sync time
-    // Per review follow-up: derive from real source data, not report-generation time
-    auto latestSyncTime = std::chrono::system_clock::time_point{};
-    bool hasValidSyncTime = false;
-
     for (const auto& provider : viewModel.providers) {
-        const std::time_t parsed = parseRuntimeTimestamp(provider.lastSyncTime);
+        std::time_t parsed = parseRuntimeTimestamp(provider.lastSyncTime);
+        if (parsed <= 0 && provider.lastKnownQuota) {
+            parsed = parseRuntimeTimestamp(provider.lastKnownQuota->lastSyncTime);
+        }
         if (parsed > 0) {
             const auto syncTime = std::chrono::system_clock::from_time_t(parsed);
-            if (!hasValidSyncTime || syncTime > latestSyncTime) {
-                latestSyncTime = syncTime;
-                hasValidSyncTime = true;
+            if (!metadata.dataFreshnessTimestamp || syncTime > *metadata.dataFreshnessTimestamp) {
+                metadata.dataFreshnessTimestamp = syncTime;
             }
         }
     }
-
-    // Use derived sync time if available, otherwise fall back to now
-    metadata.dataFreshnessTimestamp = hasValidSyncTime ? latestSyncTime :
-        std::chrono::system_clock::now();
 
     // Check for backfilled or unknown data in quotas using real reconciliation state
     // Per review follow-up: use quota.isBackfilled/hasUnknownGaps, not confidenceTier proxy

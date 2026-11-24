@@ -436,7 +436,8 @@ std::string HtmlExporter::generateHtml(const DashboardViewModel& viewModel,
     // Data timestamp
     html << "                <div class=\"metadata-item\">\n";
     html << "                    <div class=\"label\">Data Timestamp</div>\n";
-    std::string dataTimestampStr = pImpl->formatTimestamp(metadata.dataFreshnessTimestamp);
+    const std::string dataTimestampStr =
+        metadata.dataFreshnessTimestamp ? pImpl->formatTimestamp(*metadata.dataFreshnessTimestamp) : "Unknown";
     html << "                    <div class=\"value\">" << dataTimestampStr << "</div>\n";
     html << "                </div>\n";
     
