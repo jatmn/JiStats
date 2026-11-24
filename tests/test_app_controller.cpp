@@ -702,16 +702,22 @@ std::vector<std::filesystem::path> listHtmlReports(const std::filesystem::path& 
 }
 
 class FakeWindowsCredentialBackend final : public IWindowsCredentialBackend {
-public:
-    bool writeGenericCredential(
-        const WindowsCredentialWriteRequest& request,
-        std::string& error) override {
+  public:
+    enum class WriteFailure { None, Reject, AfterWrite };
+
+    bool writeGenericCredential(const WindowsCredentialWriteRequest& request, std::string& error) override {
         if (request.targetName.empty() || request.secret.empty()) {
             error = "Credential target name and secret are required";
             return false;
         }
 
-        secrets_[request.targetName] = request.secret;
+        if (writeFailure != WriteFailure::Reject) {
+            secrets_[request.targetName] = request.secret;
+        }
+        if (writeFailure != WriteFailure::None) {
+            error = "Synthetic credential store write failure";
+            return false;
+        }
         error.clear();
         return true;
     }
@@ -768,7 +774,9 @@ public:
         return it->second;
     }
 
-private:
+    WriteFailure writeFailure = WriteFailure::None;
+
+  private:
     std::map<std::string, std::string> secrets_;
 };
 
@@ -1170,7 +1178,9 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     REQUIRE(storage
                 .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
                          "DELETE FROM schema_version WHERE version >= 13;"
-                         "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
+                         "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;"
+                         "ALTER TABLE credential_profiles DROP COLUMN last_validation_error;"
+                         "ALTER TABLE credential_profiles DROP COLUMN validation_state;")
                 .success());
     storage.close();
 
@@ -1201,7 +1211,7 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     CHECK(stage == std::future_status::timeout);
     CHECK_FALSE(app.getDashboardViewModelForTesting().startupPending);
     REQUIRE(storage.init(dbPath.path()));
-    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 18);
+    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 19);
 #else
     requireSqlite();
 #endif
@@ -2322,7 +2332,10 @@ TEST_CASE("AppController shows the accepted MiniMax account name after saving a 
     app.shutdown();
 }
 
-TEST_CASE("AppController surfaces MiniMax validation failures through the settings shell", "[app][shell][minimax]") {
+TEST_CASE("AppController restores the last completed MiniMax validation after restart", "[app][shell][minimax]") {
+    requireSqlite();
+    const std::string expectedState = GENERATE("invalid", "unreachable", "valid");
+    CAPTURE(expectedState);
     TempTestDatabase dbPath;
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
@@ -2339,7 +2352,16 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
-    app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+    std::string expectedStoredError;
+    if (expectedState == "invalid") {
+        app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+        expectedStoredError = "MiniMax subscription key rejected";
+    } else if (expectedState == "unreachable") {
+        app.setMiniMaxValidationResponseForTesting(false, 0, "", "Synthetic private transport detail");
+        expectedStoredError = "Could not reach MiniMax to validate this credential";
+    } else {
+        app.setMiniMaxValidationResponseForTesting(true, 200, R"({"base_resp":{"status_code":0}})", "");
+    }
     REQUIRE(app.init());
     REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
     REQUIRE(waitForCondition([&app]() {
@@ -2363,21 +2385,281 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
     validate.action = DashboardMiniMaxCredentialAction::Validate;
     validate.planKey = "token_plan";
     REQUIRE(app.submitMiniMaxCredentialActionForTesting(validate));
-    REQUIRE(waitForCondition([&app]() {
-        return app.getMiniMaxValidationStateForTesting("token_plan") ==
-            std::optional<std::string>("invalid");
-    }, std::chrono::milliseconds(4000)));
+    REQUIRE(waitForCondition(
+        [&app, &expectedState]() {
+            return app.getMiniMaxValidationStateForTesting("token_plan") == std::optional<std::string>(expectedState);
+        },
+        std::chrono::milliseconds(4000)));
 
     app.refreshRuntimeForTesting();
 
     const DashboardViewModel viewModel = app.getDashboardViewModelForTesting();
     const auto summary = findMiniMaxSummary(viewModel, "token_plan");
     REQUIRE(summary.has_value());
-    CHECK(summary->validationState == "invalid");
-    CHECK(summary->lastValidationError == "MiniMax subscription key rejected");
+    CHECK(summary->validationState == expectedState);
+    if (expectedState == "invalid") {
+        CHECK(summary->lastValidationError == "MiniMax subscription key rejected");
+    }
     CHECK(summary->lastValidatedAtLabel.find("UTC") != std::string::npos);
-
     app.shutdown();
+
+    AppController restarted;
+    restarted.setDisableTaskbarForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    restarted.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(restarted.init());
+    const auto restored = findMiniMaxSummary(restarted.getDashboardViewModelForTesting(), "token_plan");
+    REQUIRE(restored.has_value());
+    CHECK(restored->hasPersistedProfile);
+    CHECK(restored->validationState == expectedState);
+    CHECK(restored->lastValidationError == expectedStoredError);
+    CHECK(restored->lastValidatedAtLabel == summary->lastValidatedAtLabel);
+
+    if (expectedState == "invalid") {
+        REQUIRE(restarted.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+        REQUIRE(waitForCondition([&restarted]() {
+            return restarted.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences);
+        }));
+        save.secret = "sk-tp-replacement";
+        REQUIRE(restarted.submitMiniMaxCredentialActionForTesting(save));
+        REQUIRE(waitForCondition([&restarted]() {
+            return restarted.getDashboardStatusTextForTesting() == "Stored MiniMax Token Plan credential.";
+        }));
+    }
+    restarted.shutdown();
+
+    if (expectedState == "invalid") {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        const auto record = storage.execute("SELECT validation_state, last_validation_error, "
+                                            "last_validated_at_utc IS NULL FROM credential_profiles;");
+        REQUIRE(record.success());
+        REQUIRE(record.rowCount() == 1);
+        CHECK(record.getString(0, 0) == "unknown");
+        CHECK(record.getString(0, 1).empty());
+        CHECK(record.getBool(0, 2));
+    }
+}
+
+TEST_CASE("AppController restores validation only for the MiniMax key that was checked", "[app][shell][minimax]") {
+    requireSqlite();
+    const auto action = GENERATE(DashboardMiniMaxCredentialAction::Save, DashboardMiniMaxCredentialAction::Validate);
+    const std::string failure = GENERATE("clear", "metadata", "shared rollback", "reject key", "key changed");
+    CAPTURE(static_cast<int>(action), failure);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false);
+    seedMiniMaxCredentialMetadata(dbPath.path(), "token_plan", "Original Token Plan");
+    StorageService seed;
+    REQUIRE(seed.init(dbPath.path()));
+    REQUIRE(seed.execute("UPDATE credential_profiles SET validation_state = 'invalid', "
+                         "last_validation_error = 'MiniMax subscription key rejected';")
+                .success());
+    // The rename trigger affects only the final save. Clearing validation leaves the account name alone.
+    REQUIRE(seed.execute(failure == "clear" ? R"sql(
+        CREATE TRIGGER reject_profile_invalidation BEFORE UPDATE ON credential_profiles
+        BEGIN SELECT RAISE(ABORT, 'Fixture rejects credential invalidation'); END;
+    )sql"
+                                            : R"sql(
+        CREATE TRIGGER reject_profile_rename BEFORE UPDATE OF display_name ON accounts
+        WHEN NEW.display_name = 'Renamed Token Plan'
+        BEGIN SELECT RAISE(ABORT, 'Fixture rejects credential metadata update'); END;
+    )sql")
+                .success());
+    seed.close();
+
+    const std::string target = "JiStats/minimax/subscription/token_plan/token_plan.default";
+    auto backend = makeFakeCredentialBackend();
+    auto store = std::make_shared<WindowsCredentialStore>(backend);
+    REQUIRE(store->writeGenericCredential({target, "sk-tp-original", "MiniMax Token Plan", ""}));
+    if (failure == "reject key") {
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::Reject;
+    } else if (failure == "key changed") {
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::AfterWrite;
+    }
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setRuntimeWorkersEnabledForTesting(failure != "shared rollback");
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    app.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(app.init());
+    const auto original = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "token_plan");
+    REQUIRE(original.has_value());
+    REQUIRE(original->validationState == "invalid");
+    REQUIRE_FALSE(original->lastValidatedAtLabel.empty());
+
+    DashboardMiniMaxCredentialRequest request;
+    request.action = action;
+    request.planKey = "token_plan";
+    request.accountDisplayName = "Renamed Token Plan";
+    request.secret = "sk-tp-new-unchecked";
+    if (failure == "shared rollback") {
+        bool cleared = false;
+        app.setAfterMiniMaxValidationClearForTesting([&cleared]() { cleared = true; });
+        CHECK(app.submitMiniMaxCredentialActionWithStorageRollbackForTesting(request) == std::optional<bool>(false));
+        CHECK(cleared);
+        app.setAfterMiniMaxValidationClearForTesting({});
+    } else {
+        CHECK_FALSE(app.submitMiniMaxCredentialActionForTesting(request));
+    }
+    const bool originalKeyRemains = failure == "clear" || failure == "reject key";
+    CHECK(backend->peek(target) ==
+          std::optional<std::string>(originalKeyRemains ? "sk-tp-original" : "sk-tp-new-unchecked"));
+    app.shutdown();
+
+    AppController restarted;
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    restarted.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(restarted.init());
+    const auto restored = findMiniMaxSummary(restarted.getDashboardViewModelForTesting(), "token_plan");
+    REQUIRE(restored.has_value());
+    CHECK(restored->hasPersistedProfile);
+    CHECK(restored->accountDisplayName == "Original Token Plan");
+    CHECK(restored->validationState == (originalKeyRemains ? "invalid" : "unknown"));
+    CHECK(restored->lastValidatedAtLabel == (originalKeyRemains ? original->lastValidatedAtLabel : ""));
+    CHECK(restored->lastValidationError == (originalKeyRemains ? original->lastValidationError : ""));
+    restarted.shutdown();
+}
+
+TEST_CASE("AppController coordinates MiniMax credential changes across instances", "[app][minimax]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false);
+    const auto now = std::time(nullptr);
+    seedRuntimeState(dbPath.path(), now, now);
+    seedMiniMaxCredentialMetadata(dbPath.path(), "token_plan", "Original Token Plan");
+
+    StorageService check;
+    REQUIRE(check.init(dbPath.path()));
+    REQUIRE(SettingsService(check).setString("retention.last_run_utc", toUtcIso(now)));
+    REQUIRE(check.execute("UPDATE credential_profiles SET validation_state = 'valid';").success());
+    check.close();
+
+    const std::string target = "JiStats/minimax/subscription/token_plan/token_plan.default";
+    auto backend = makeFakeCredentialBackend();
+    auto store = std::make_shared<WindowsCredentialStore>(backend);
+    REQUIRE(store->writeGenericCredential({target, "sk-tp-original", "MiniMax Token Plan", ""}));
+
+    AppController first;
+    AppController peer;
+    for (auto* controller : {&first, &peer}) {
+        controller->setHeadlessForTesting(true);
+        controller->setDatabasePathForTesting(dbPath.path());
+        controller->setProviderManagerForTesting(std::make_shared<ProviderManager>());
+        controller->setMiniMaxCredentialStoreForTesting(store);
+        REQUIRE(controller->init());
+    }
+
+    DashboardMiniMaxCredentialRequest replacement;
+    replacement.action = DashboardMiniMaxCredentialAction::Save;
+    replacement.planKey = "token_plan";
+    replacement.secret = "sk-tp-peer";
+
+    SECTION("A peer cannot replace the key after the clear and before a rejected write") {
+        auto rejected = replacement;
+        rejected.secret = "sk-tp-rejected";
+        std::promise<void> cleared;
+        std::promise<void> release;
+        auto clearedResult = cleared.get_future();
+        auto released = release.get_future();
+        first.setAfterMiniMaxValidationClearForTesting([&]() {
+            cleared.set_value();
+            released.wait();
+        });
+        auto firstResult =
+            std::async(std::launch::async, [&]() { return first.submitMiniMaxCredentialActionForTesting(rejected); });
+
+        const bool firstCleared = clearedResult.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        const bool peerSavedWhileCleared = firstCleared && peer.submitMiniMaxCredentialActionForTesting(replacement);
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::Reject;
+        release.set_value();
+        CHECK_FALSE(firstResult.get());
+        REQUIRE(firstCleared);
+        CHECK_FALSE(peerSavedWhileCleared);
+        CHECK(backend->peek(target) == std::optional<std::string>("sk-tp-original"));
+        REQUIRE(check.init(dbPath.path()));
+        const auto restored = check.execute("SELECT validation_state FROM credential_profiles;");
+        REQUIRE(restored.success());
+        CHECK(restored.getString(0, 0) == "valid");
+        check.close();
+
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::None;
+        REQUIRE(peer.submitMiniMaxCredentialActionForTesting(replacement));
+    }
+
+    SECTION("A late validation cannot publish after a peer replaces the key") {
+        std::promise<void> release;
+        first.setMiniMaxValidationReleaseForTesting(release.get_future().share());
+        first.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+
+        DashboardMiniMaxCredentialRequest validate;
+        validate.action = DashboardMiniMaxCredentialAction::Validate;
+        validate.planKey = "token_plan";
+        REQUIRE(first.submitMiniMaxCredentialActionForTesting(validate));
+        const bool peerSaved = peer.submitMiniMaxCredentialActionForTesting(replacement);
+        release.set_value();
+        first.waitForMiniMaxValidationForTesting();
+        REQUIRE(peerSaved);
+    }
+
+    SECTION("A busy profile shows why the validation needs to be retried") {
+        std::promise<void> releaseValidation;
+        first.setMiniMaxValidationReleaseForTesting(releaseValidation.get_future().share());
+        first.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+        DashboardMiniMaxCredentialRequest validate;
+        validate.action = DashboardMiniMaxCredentialAction::Validate;
+        validate.planKey = "token_plan";
+        REQUIRE(first.submitMiniMaxCredentialActionForTesting(validate));
+
+        std::promise<void> peerCleared;
+        std::promise<void> releasePeer;
+        auto cleared = peerCleared.get_future();
+        auto released = releasePeer.get_future();
+        peer.setAfterMiniMaxValidationClearForTesting([&]() {
+            peerCleared.set_value();
+            released.wait();
+        });
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::Reject;
+        auto peerResult =
+            std::async(std::launch::async, [&]() { return peer.submitMiniMaxCredentialActionForTesting(replacement); });
+
+        const bool peerHeldLock = cleared.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        releaseValidation.set_value();
+        first.waitForMiniMaxValidationForTesting();
+        const auto retry = findMiniMaxSummary(first.getDashboardViewModelForTesting(), "token_plan");
+        releasePeer.set_value();
+        CHECK_FALSE(peerResult.get());
+        REQUIRE(peerHeldLock);
+        REQUIRE(retry.has_value());
+        CHECK(retry->validationState == "unreachable");
+        CHECK(retry->lastValidatedAtLabel.empty());
+        CHECK(retry->lastValidationError == "Profile busy. Retry validation.");
+
+        REQUIRE(check.init(dbPath.path()));
+        const auto stored = check.execute("SELECT validation_state FROM credential_profiles;");
+        REQUIRE(stored.success());
+        CHECK(stored.getString(0, 0) == "valid");
+        check.close();
+        peer.setAfterMiniMaxValidationClearForTesting({});
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::None;
+        REQUIRE(peer.submitMiniMaxCredentialActionForTesting(replacement));
+    }
+
+    first.shutdown();
+    peer.shutdown();
+    CHECK(backend->peek(target) == std::optional<std::string>("sk-tp-peer"));
+    REQUIRE(check.init(dbPath.path()));
+    const auto stored = check.execute(
+        "SELECT validation_state, last_validated_at_utc IS NULL, last_validation_error FROM credential_profiles;");
+    REQUIRE(stored.success());
+    REQUIRE(stored.rowCount() == 1);
+    CHECK(stored.getString(0, 0) == "unknown");
+    CHECK(stored.getBool(0, 1));
+    CHECK(stored.getString(0, 2).empty());
 }
 
 TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the masked secret field", "[app][shell][minimax]") {
@@ -2503,6 +2785,64 @@ TEST_CASE("AppController binds MiniMax validation to the submitted credential", 
     REQUIRE(profiles.rowCount() == 1);
     CHECK(profiles.getString(0, 0) == "New credential");
     CHECK(profiles.getString(0, 1).empty());
+}
+
+TEST_CASE("AppController restores separate MiniMax results after reverse completion", "[app][minimax]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    auto store = std::make_shared<WindowsCredentialStore>(makeFakeCredentialBackend());
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(std::make_shared<MiniMaxAdapter>());
+
+    AppController app;
+    std::promise<void> releaseCodingPlan;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setMiniMaxCredentialStoreForTesting(store);
+    app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+    app.setMiniMaxValidationReleaseForTesting(releaseCodingPlan.get_future().share());
+    REQUIRE(app.init());
+
+    DashboardMiniMaxCredentialRequest coding;
+    coding.action = DashboardMiniMaxCredentialAction::Validate;
+    coding.planKey = "coding_plan";
+    coding.secret = "synthetic-coding";
+    REQUIRE(app.submitMiniMaxCredentialActionForTesting(coding));
+
+    app.setMiniMaxValidationResponseForTesting(true, 200, R"({"base_resp":{"status_code":0}})", "");
+    app.setMiniMaxValidationReleaseForTesting({});
+    auto token = coding;
+    token.planKey = "token_plan";
+    token.secret = "synthetic-token";
+    REQUIRE(app.submitMiniMaxCredentialActionForTesting(token));
+    REQUIRE(waitForCondition([&app]() {
+        return app.getMiniMaxValidationStateForTesting("token_plan") == std::optional<std::string>("valid");
+    }));
+    CHECK(app.getMiniMaxValidationStateForTesting("coding_plan") == std::optional<std::string>("pending"));
+    releaseCodingPlan.set_value();
+    app.waitForMiniMaxValidationForTesting();
+    CHECK(app.getMiniMaxValidationStateForTesting("coding_plan") == std::optional<std::string>("invalid"));
+    app.shutdown();
+
+    AppController restarted;
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    restarted.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(restarted.init());
+    const auto dashboard = restarted.getDashboardViewModelForTesting();
+    const auto restoredCoding = findMiniMaxSummary(dashboard, "coding_plan");
+    const auto restoredToken = findMiniMaxSummary(dashboard, "token_plan");
+    REQUIRE(restoredCoding.has_value());
+    REQUIRE(restoredToken.has_value());
+    CHECK(restoredCoding->validationState == "invalid");
+    CHECK(restoredCoding->lastValidationError == "MiniMax subscription key rejected");
+    CHECK(restoredToken->validationState == "valid");
+    CHECK(restoredToken->lastValidationError.empty());
+    CHECK_FALSE(restoredCoding->lastValidatedAtLabel.empty());
+    CHECK_FALSE(restoredToken->lastValidatedAtLabel.empty());
+    restarted.shutdown();
 }
 
 TEST_CASE("AppController reports missing MiniMax secrets from hydrated metadata in the settings shell", "[app][shell][minimax]") {

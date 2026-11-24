@@ -1971,15 +1971,17 @@ bool StorageService::upsertCredentialProfile(
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     sqlite3_stmt* stmt = nullptr;
-    const char* sql =
-        "INSERT INTO credential_profiles ("
-        "provider_id, account_id, profile_name, secret_ref, credential_type, last_validated_at_utc"
-        ") VALUES (?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(account_id, profile_name) DO UPDATE SET "
-        "secret_ref = excluded.secret_ref, "
-        "credential_type = excluded.credential_type, "
-        "last_validated_at_utc = excluded.last_validated_at_utc, "
-        "updated_at_utc = (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));";
+    const char* sql = "INSERT INTO credential_profiles ("
+                      "provider_id, account_id, profile_name, secret_ref, credential_type, last_validated_at_utc, "
+                      "validation_state, last_validation_error"
+                      ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                      "ON CONFLICT(account_id, profile_name) DO UPDATE SET "
+                      "secret_ref = excluded.secret_ref, "
+                      "credential_type = excluded.credential_type, "
+                      "last_validated_at_utc = excluded.last_validated_at_utc, "
+                      "validation_state = excluded.validation_state, "
+                      "last_validation_error = excluded.last_validation_error, "
+                      "updated_at_utc = (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));";
 
     if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         pImpl->lastError = "Failed to prepare credential profile upsert";
@@ -1997,6 +1999,8 @@ bool StorageService::upsertCredentialProfile(
     } else {
         sqlite3_bind_null(stmt, 6);
     }
+    sqlite3_bind_text(stmt, 7, profile.validationState.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, profile.lastValidationError.c_str(), -1, SQLITE_TRANSIENT);
 
     const int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -2026,10 +2030,9 @@ std::optional<PersistedCredentialProfile> StorageService::getCredentialProfile(
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     sqlite3_stmt* stmt = nullptr;
-    const char* sql =
-        "SELECT id, provider_id, account_id, profile_name, secret_ref, credential_type, "
-        "created_at_utc, updated_at_utc, last_validated_at_utc "
-        "FROM credential_profiles WHERE account_id = ? AND profile_name = ? LIMIT 1;";
+    const char* sql = "SELECT id, provider_id, account_id, profile_name, secret_ref, credential_type, "
+                      "created_at_utc, updated_at_utc, last_validated_at_utc, validation_state, last_validation_error "
+                      "FROM credential_profiles WHERE account_id = ? AND profile_name = ? LIMIT 1;";
 
     if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         pImpl->lastError = "Failed to prepare credential profile query";
@@ -2066,6 +2069,10 @@ std::optional<PersistedCredentialProfile> StorageService::getCredentialProfile(
     profile.createdAtUtc = createdAtUtc ? createdAtUtc : "";
     profile.updatedAtUtc = updatedAtUtc ? updatedAtUtc : "";
     profile.lastValidatedAt = parseUtcOrZero(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8)));
+    const auto validationState = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+    const auto lastValidationError = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+    profile.validationState = validationState ? validationState : "unknown";
+    profile.lastValidationError = lastValidationError ? lastValidationError : "";
 
     sqlite3_finalize(stmt);
     pImpl->lastError.clear();
@@ -2084,10 +2091,9 @@ std::vector<PersistedCredentialProfile> StorageService::getCredentialProfiles(in
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     sqlite3_stmt* stmt = nullptr;
-    const char* sql =
-        "SELECT id, provider_id, account_id, profile_name, secret_ref, credential_type, "
-        "created_at_utc, updated_at_utc, last_validated_at_utc "
-        "FROM credential_profiles WHERE account_id = ? ORDER BY profile_name ASC;";
+    const char* sql = "SELECT id, provider_id, account_id, profile_name, secret_ref, credential_type, "
+                      "created_at_utc, updated_at_utc, last_validated_at_utc, validation_state, last_validation_error "
+                      "FROM credential_profiles WHERE account_id = ? ORDER BY profile_name ASC;";
 
     if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         pImpl->lastError = "Failed to prepare credential profile list query";
@@ -2114,6 +2120,10 @@ std::vector<PersistedCredentialProfile> StorageService::getCredentialProfiles(in
         profile.createdAtUtc = createdAtUtc ? createdAtUtc : "";
         profile.updatedAtUtc = updatedAtUtc ? updatedAtUtc : "";
         profile.lastValidatedAt = parseUtcOrZero(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8)));
+        const auto validationState = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        const auto lastValidationError = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        profile.validationState = validationState ? validationState : "unknown";
+        profile.lastValidationError = lastValidationError ? lastValidationError : "";
         profiles.push_back(std::move(profile));
     }
 

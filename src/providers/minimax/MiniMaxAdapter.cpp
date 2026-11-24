@@ -630,12 +630,21 @@ bool MiniMaxAdapter::validateCredentials() {
     return valid;
 }
 
-std::function<MiniMaxSubscriptionCredentialProfile()>
+PreparedMiniMaxSubscriptionValidation
 MiniMaxAdapter::prepareSubscriptionCredentialValidation(const MiniMaxSubscriptionCredentialProfile& profile) {
     std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
-    return [request = pImpl->prepareValidation(Impl::normalizeProfile(profile))]() mutable {
-        Impl::validate(request);
-        return std::move(request.profile);
+    auto request = pImpl->prepareValidation(Impl::normalizeProfile(profile));
+    auto matchesCredential = [submitted = request.profile, bearer = request.bearerToken](MiniMaxAdapter& adapter) {
+        std::lock_guard<std::mutex> credentialLock(adapter.pImpl->credentialMutex);
+        std::string error;
+        return adapter.pImpl->resolveBearerToken(submitted, error) == bearer;
+    };
+    return {
+        [request = std::move(request)]() mutable {
+            Impl::validate(request);
+            return std::move(request.profile);
+        },
+        std::move(matchesCredential),
     };
 }
 
@@ -729,11 +738,13 @@ MiniMaxSubscriptionCredentialProfile MiniMaxAdapter::getSubscriptionCredentialPr
     return pImpl->subscriptionProfile;
 }
 
-bool MiniMaxAdapter::storeSubscriptionCredential(
-    const MiniMaxSubscriptionCredentialProfile& profile,
-    const std::string& secret) {
+bool MiniMaxAdapter::storeSubscriptionCredential(const MiniMaxSubscriptionCredentialProfile& profile,
+                                                 const std::string& secret, bool* previousSecretPreserved) {
     std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
     ++pImpl->validationRevision;
+    if (previousSecretPreserved) {
+        *previousSecretPreserved = false;
+    }
     std::string error;
     if (!validateSubscriptionCredentialProfile(profile, error)) {
         pImpl->subscriptionProfile = MiniMaxSubscriptionCredentialProfile{};
@@ -764,14 +775,21 @@ bool MiniMaxAdapter::storeSubscriptionCredential(
     request.userName = normalized.profileName;
     request.comment = "JiStats MiniMax subscription credential";
 
+    const auto previousSecret =
+        previousSecretPreserved ? pImpl->credentialStore->readGenericCredential(request.targetName) : std::nullopt;
     if (!pImpl->credentialStore->writeGenericCredential(request)) {
         normalized.validationState = "invalid";
         normalized.lastValidationError = pImpl->credentialStore->getLastError();
+        if (previousSecret.has_value()) {
+            *previousSecretPreserved =
+                pImpl->credentialStore->readGenericCredential(request.targetName) == previousSecret;
+        }
         pImpl->subscriptionProfile = normalized;
         return false;
     }
 
     normalized.validationState = "pending";
+    normalized.lastValidatedAt = 0;
     normalized.lastValidationError.clear();
     pImpl->subscriptionProfile = normalized;
     pImpl->apiKey.clear();

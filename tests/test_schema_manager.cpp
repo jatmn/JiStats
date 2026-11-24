@@ -96,6 +96,13 @@ bool indexExists(StorageService& storage, const std::string& indexName) {
     return result.success() && result.rowCount() == 1;
 }
 
+void removeCredentialValidationColumns(StorageService& storage) {
+    REQUIRE(storage
+                .execute("ALTER TABLE credential_profiles DROP COLUMN last_validation_error;"
+                         "ALTER TABLE credential_profiles DROP COLUMN validation_state;")
+                .success());
+}
+
 void removeHistoricalAnalysisSchema(StorageService& storage) {
     REQUIRE(storage.execute("DROP TABLE recovery_checkpoints; DROP TABLE export_runs;").success());
     for (const std::string table : {"usage_rollups_hourly", "usage_rollups_daily"}) {
@@ -242,12 +249,12 @@ int installCompactionFailure(sqlite3* db, char**, const sqlite3_api_routines*) {
 
 } // namespace
 
-TEST_CASE("SchemaManager::getLatestVersion includes the bundled quota window observations migration", "[schema]") {
+TEST_CASE("SchemaManager::getLatestVersion includes the bundled credential validation migration", "[schema]") {
     StorageService storage;
     SchemaManager manager(storage);
 
     int latest = manager.getLatestVersion();
-    REQUIRE(latest == 18);
+    REQUIRE(latest == 19);
 }
 
 TEST_CASE("SchemaManager::getStatus reports version info", "[schema]") {
@@ -257,6 +264,36 @@ TEST_CASE("SchemaManager::getStatus reports version info", "[schema]") {
     std::string status = manager.getStatus();
     // Should contain version numbers
     REQUIRE(status.find("Schema version") != std::string::npos);
+}
+
+TEST_CASE("StorageService preserves MiniMax credential metadata from schema 18", "[schema][migration][minimax]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
+    REQUIRE(storage
+                .execute(R"sql(
+        DELETE FROM schema_version WHERE version = 19;
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
+        SELECT 88, id, 'coding_plan.default', 'Fixture', 'subscription', 'coding_plan.default'
+        FROM providers WHERE provider_key = 'minimax';
+        INSERT INTO credential_profiles (provider_id, account_id, profile_name, secret_ref, credential_type,
+                                         last_validated_at_utc)
+        SELECT id, 88, 'MiniMax Coding Plan', 'fixture-reference', 'subscription_key', '2024-04-23T22:00:00Z'
+        FROM providers WHERE provider_key = 'minimax';
+    )sql")
+                .success());
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    const auto profile = storage.getCredentialProfile(88, "MiniMax Coding Plan");
+    REQUIRE(profile.has_value());
+    CHECK(profile->credentialType == "subscription_key");
+    CHECK(profile->secretRef == "fixture-reference");
+    CHECK(profile->lastValidatedAt == 1713909600);
+    CHECK(profile->validationState == "unknown");
+    CHECK(profile->lastValidationError.empty());
 }
 
 TEST_CASE("SchemaManager::needsMigration without DB", "[schema]") {
@@ -277,7 +314,7 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(storage.init(tempDb.path()));
 
     SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 18);
+    REQUIRE(manager.getCurrentVersion() == 19);
     REQUIRE_FALSE(manager.needsMigration());
 
     REQUIRE(tableExists(storage, "activity_events"));
@@ -328,7 +365,7 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
 
     auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 7);
+    REQUIRE(versions.rowCount() == 8);
     CHECK(versions.getInt(0, 0) == 12);
     CHECK(versions.getInt(1, 0) == 13);
     CHECK(versions.getInt(2, 0) == 14);
@@ -336,6 +373,7 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     CHECK(versions.getInt(4, 0) == 16);
     CHECK(versions.getInt(5, 0) == 17);
     CHECK(versions.getInt(6, 0) == 18);
+    CHECK(versions.getInt(7, 0) == 19);
 
     auto providers = storage.execute("SELECT provider_key FROM providers ORDER BY id;");
     REQUIRE(providers.success());
@@ -374,11 +412,11 @@ TEST_CASE("StorageService preserves database settings on reopen without rewritin
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    CHECK(manager.getCurrentVersion() == 18);
+    CHECK(manager.getCurrentVersion() == 19);
     CHECK_FALSE(manager.needsMigration());
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 7);
+    REQUIRE(versions.rowCount() == 8);
     CHECK(versions.getInt(0, 0) == 12);
     CHECK(versions.getInt(1, 0) == 13);
     CHECK(versions.getInt(2, 0) == 14);
@@ -386,6 +424,7 @@ TEST_CASE("StorageService preserves database settings on reopen without rewritin
     CHECK(versions.getInt(4, 0) == 16);
     CHECK(versions.getInt(5, 0) == 17);
     CHECK(versions.getInt(6, 0) == 18);
+    CHECK(versions.getInt(7, 0) == 19);
     CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
     CHECK(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     storage.close();
@@ -399,6 +438,7 @@ TEST_CASE(
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
                          "DELETE FROM schema_version WHERE version >= 13;"
@@ -428,6 +468,7 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
                          "DELETE FROM schema_version WHERE version >= 13;"
@@ -463,7 +504,7 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     REQUIRE(storage.init(tempDb.path()));
     REQUIRE(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
-    REQUIRE(versions.rowCount() == 8);
+    REQUIRE(versions.rowCount() == 9);
     CHECK(versions.getInt(0, 0) == 10);
     CHECK(versions.getInt(1, 0) == 12);
     CHECK(versions.getInt(2, 0) == 13);
@@ -472,6 +513,7 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     CHECK(versions.getInt(5, 0) == 16);
     CHECK(versions.getInt(6, 0) == 17);
     CHECK(versions.getInt(7, 0) == 18);
+    CHECK(versions.getInt(8, 0) == 19);
     const auto kimi = storage.execute("SELECT enabled FROM providers WHERE provider_key = 'kimi';");
     REQUIRE(kimi.rowCount() == 1);
     CHECK(kimi.getBool(0, 0) == hadAnalysisMigration);
@@ -521,6 +563,7 @@ TEST_CASE("StorageService upgrades legacy Claude references without reading the 
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute(R"sql(
         ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;
@@ -600,7 +643,7 @@ TEST_CASE("StorageService upgrades legacy Claude references without reading the 
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    CHECK(manager.getCurrentVersion() == 18);
+    CHECK(manager.getCurrentVersion() == 19);
     constexpr auto hashedPath = "scope:fnv1a64:1370ad0dcd1472bd";
     const auto activity =
         storage.execute("SELECT id, raw_reference, duration_seconds FROM activity_events ORDER BY id;");
@@ -639,6 +682,7 @@ TEST_CASE("StorageService supports overlapping opens during historical baseline 
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
                          "DELETE FROM schema_version WHERE version >= 13;"
@@ -692,6 +736,7 @@ TEST_CASE("StorageService supports overlapping WAL opens during the Claude upgra
     const auto journalMode = storage.execute("PRAGMA main.journal_mode = WAL;");
     REQUIRE(journalMode.success());
     REQUIRE(journalMode.getString(0, 0) == "wal");
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
                          "DELETE FROM schema_version WHERE version >= 13;"
@@ -713,7 +758,7 @@ TEST_CASE("StorageService supports overlapping WAL opens during the Claude upgra
         if (!timeout.success() || timeout.rowCount() != 1 || timeout.getInt(0, 0) != 5000) {
             return std::string("The upgrade did not restore the connection busy timeout");
         }
-        return SchemaManager(connection).getCurrentVersion() == 18 ? std::string{}
+        return SchemaManager(connection).getCurrentVersion() == 19 ? std::string{}
                                                                    : "The schema upgrade did not finish";
     };
 
@@ -825,6 +870,7 @@ TEST_CASE("StorageService repairs duplicate ChatGPT messages when opening a vers
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute(R"sql(
         ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;
@@ -875,7 +921,7 @@ TEST_CASE("StorageService repairs duplicate ChatGPT messages when opening a vers
     CHECK(stored.getString(0, 1) == "first-export");
     CHECK(stored.getString(1, 1) == "renamed-copy");
     CHECK(stored.getString(4, 1) == "separate-export");
-    CHECK(SchemaManager(storage).getCurrentVersion() == 18);
+    CHECK(SchemaManager(storage).getCurrentVersion() == 19);
 }
 
 TEST_CASE("StorageService preserves legacy quota rows during the version 15 precision upgrade",
@@ -884,6 +930,7 @@ TEST_CASE("StorageService preserves legacy quota rows during the version 15 prec
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute(R"sql(
         ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;
@@ -901,7 +948,7 @@ TEST_CASE("StorageService preserves legacy quota rows during the version 15 prec
     storage.close();
 
     REQUIRE(storage.init(tempDb.path()));
-    CHECK(SchemaManager(storage).getCurrentVersion() == 18);
+    CHECK(SchemaManager(storage).getCurrentVersion() == 19);
     const auto rows = storage.execute(
         "SELECT id, snapshot_time_utc, remaining_value, snapshot_subsecond_ns IS NULL FROM quota_snapshots;");
     REQUIRE(rows.success());
@@ -918,6 +965,7 @@ TEST_CASE("StorageService repairs duplicate Claude daily activity from a version
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute(R"sql(
         DROP INDEX idx_activity_events_claude_cache_day;
@@ -976,6 +1024,7 @@ TEST_CASE("Opening a version 15 database keeps the final activity of each saved 
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute(R"sql(
         DROP INDEX IF EXISTS idx_kimi_task_activity_identity;
@@ -1018,7 +1067,7 @@ TEST_CASE("Opening a version 15 database keeps the final activity of each saved 
     CHECK(rows.getInt(2, 0) == 14);
     CHECK(rows.getInt(3, 0) == 17);
     CHECK(rows.getString(3, 1) == "running");
-    CHECK(SchemaManager(storage).getCurrentVersion() == 18);
+    CHECK(SchemaManager(storage).getCurrentVersion() == 19);
 }
 
 TEST_CASE("Opening a version 17 database preserves legacy quota rollup counts",
@@ -1027,6 +1076,7 @@ TEST_CASE("Opening a version 17 database preserves legacy quota rollup counts",
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute(R"sql(
         ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;
@@ -1045,7 +1095,7 @@ TEST_CASE("Opening a version 17 database preserves legacy quota rollup counts",
     storage.close();
 
     REQUIRE(storage.init(tempDb.path()));
-    CHECK(SchemaManager(storage).getCurrentVersion() == 18);
+    CHECK(SchemaManager(storage).getCurrentVersion() == 19);
     const auto rows = storage.execute("SELECT sample_count, reset_count, observed_billing_windows "
                                       "FROM quota_snapshot_rollups_daily WHERE account_id = 89;");
     REQUIRE(rows.success());

@@ -55,6 +55,7 @@ public:
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
     void setHeadlessForTesting(bool value);
+    void setRuntimeWorkersEnabledForTesting(bool value);
     void setDisableTaskbarForTesting(bool value);
     void setTaskbarTestModeForTesting(bool value);
     void setForceDashboardInitFailureForTesting(bool value);
@@ -88,6 +89,8 @@ public:
     bool isDashboardShellDialogOpenForTesting(DashboardShellDialog dialog) const;
     std::string getDashboardShellDialogBodyTextForTesting(DashboardShellDialog dialog) const;
     bool submitMiniMaxCredentialActionForTesting(const DashboardMiniMaxCredentialRequest& request);
+    std::optional<bool>
+    submitMiniMaxCredentialActionWithStorageRollbackForTesting(const DashboardMiniMaxCredentialRequest& request);
     std::string getMiniMaxSecretFieldTextForTesting() const;
     std::optional<std::string> getMiniMaxValidationStateForTesting(const std::string& planKey) const;
     std::vector<DashboardSummaryItem> getDashboardUsageProgressSummariesForTesting() const;
@@ -110,6 +113,7 @@ public:
         const std::string& body = "",
         const std::string& error = "");
     void setMiniMaxValidationReleaseForTesting(std::shared_future<void> release);
+    void setAfterMiniMaxValidationClearForTesting(std::function<void()> callback);
     void waitForMiniMaxValidationForTesting();
     void setOpenAICodexRefreshPollIntervalForTesting(int intervalMs);
     void setLocalProviderRefreshPollIntervalForTesting(int intervalMs);

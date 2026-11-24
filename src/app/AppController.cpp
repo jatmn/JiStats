@@ -149,10 +149,15 @@ bool isProviderTrackingEnabled(
     return true;
 }
 
-// Consent writes and source scans share the same lock across JiStats processes.
-class CodexProfileLock {
+constexpr wchar_t kCodexProfileLockName[] = L"Global\\JiStats.CodexAttribution.";
+constexpr wchar_t kMiniMaxProfileLockName[] = L"Global\\JiStats.MiniMaxCredentials.";
+
+class ProfileDatabaseLock {
   public:
-    CodexProfileLock(const std::string& databasePath, DWORD waitMs) {
+    ProfileDatabaseLock(const std::string& databasePath, const wchar_t* prefix, DWORD waitMs) {
+        if (databasePath.empty()) {
+            return;
+        }
         const auto path = std::filesystem::path(databasePath).wstring();
         const HANDLE database =
             CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -168,9 +173,9 @@ class CodexProfileLock {
         }
 
         // The file identity also matches when a peer opened the database through a path alias.
-        const std::wstring name =
-            L"Global\\JiStats.CodexAttribution." + std::to_wstring(identity.dwVolumeSerialNumber) + L"." +
-            std::to_wstring(identity.nFileIndexHigh) + L"." + std::to_wstring(identity.nFileIndexLow);
+        const std::wstring name = prefix + std::to_wstring(identity.dwVolumeSerialNumber) + L"." +
+                                  std::to_wstring(identity.nFileIndexHigh) + L"." +
+                                  std::to_wstring(identity.nFileIndexLow);
         // An existing mutex may allow synchronization without granting security-control rights.
         const HANDLE mutex = CreateMutexExW(nullptr, name.c_str(), 0, SYNCHRONIZE | MUTEX_MODIFY_STATE);
         if (mutex != nullptr) {
@@ -183,15 +188,15 @@ class CodexProfileLock {
         }
     }
 
-    ~CodexProfileLock() {
+    ~ProfileDatabaseLock() {
         if (mutex_ != nullptr) {
             ReleaseMutex(mutex_);
             CloseHandle(mutex_);
         }
     }
 
-    CodexProfileLock(const CodexProfileLock&) = delete;
-    CodexProfileLock& operator=(const CodexProfileLock&) = delete;
+    ProfileDatabaseLock(const ProfileDatabaseLock&) = delete;
+    ProfileDatabaseLock& operator=(const ProfileDatabaseLock&) = delete;
 
     bool ownsLock() const {
         return mutex_ != nullptr;
@@ -3573,6 +3578,29 @@ std::string normalizeMiniMaxValidationError(const std::string& error) {
     return error;
 }
 
+std::string miniMaxValidationErrorForStorage(const MiniMaxSubscriptionCredentialProfile& profile) {
+    if (profile.validationState == "valid") {
+        return {};
+    }
+
+    // Persist only known UI diagnoses. Platform or transport error details can contain private data.
+    constexpr const char* safeErrors[] = {
+        "Stored MiniMax credential is missing from Windows Credential Manager",
+        "This credential does not match the selected MiniMax subscription surface",
+        "MiniMax subscription key rejected",
+        "MiniMax subscription validation failed with a provider error",
+        "MiniMax subscription validation response has no numeric status code",
+        "MiniMax validation endpoint is temporarily unavailable",
+    };
+    for (const auto* safeError : safeErrors) {
+        if (profile.lastValidationError == safeError) {
+            return safeError;
+        }
+    }
+    return profile.validationState == "unreachable" ? "Could not reach MiniMax to validate this credential"
+                                                    : "MiniMax credential validation failed";
+}
+
 std::string lastValidatedLabel(std::time_t timestamp) {
     return timestamp > 0 ? formatTimeUtc(timestamp) : "";
 }
@@ -4014,6 +4042,7 @@ public:
     std::mutex codexModelAttributionMutex;
     // Keep ordinary preferences and attribution off the connection shared by runtime and retention work.
     StorageService preferencesStorage;
+    StorageService miniMaxCredentialStorage;
     SettingsService preferenceWriter{preferencesStorage};
     StorageService codexAttributionStorage;
     SettingsService codexAttributionSettings{codexAttributionStorage};
@@ -4104,10 +4133,12 @@ public:
     bool forceDashboardInitFailureForTesting = false;
     std::shared_ptr<ProviderManager> testProviderManager;
     bool headlessForTesting = false;
+    bool runtimeWorkersEnabledForTesting = true;
     bool disableTaskbarForTesting = false;
     bool taskbarTestModeForTesting = false;
     bool disableCodexTokenImportForTesting = false;
     std::shared_future<void> miniMaxValidationReleaseForTesting;
+    std::function<void()> afterMiniMaxValidationClearForTesting;
     std::function<void()> afterSettingsDequeueForTesting;
     std::function<void()> beforeRuntimePublicationForTesting;
     std::function<void()> beforeCodexSourceReadForTesting;
@@ -5860,23 +5891,26 @@ public:
     }
 
     void queueMiniMaxCredentialValidation(const std::string& planKey, std::uint64_t revision,
-                                          std::function<MiniMaxSubscriptionCredentialProfile()> validate) {
+                                          std::shared_ptr<MiniMaxAdapter> adapter,
+                                          PreparedMiniMaxSubscriptionValidation validation) {
         std::lock_guard<std::mutex> lock(miniMaxValidationMutex);
 #ifdef JISTATS_ENABLE_TEST_HOOKS
         if (miniMaxValidationReleaseForTesting.valid()) {
-            validate = [release = miniMaxValidationReleaseForTesting, validate = std::move(validate)] {
+            validation.validate = [release = miniMaxValidationReleaseForTesting,
+                                   validate = std::move(validation.validate)] {
                 release.wait();
                 return validate();
             };
         }
 #endif
 
-        miniMaxValidationThreads.emplace_back([this, planKey, revision, validate = std::move(validate)]() {
+        miniMaxValidationThreads.emplace_back([this, planKey, revision, adapter = std::move(adapter),
+                                               validation = std::move(validation)]() {
             if (shouldStopMiniMaxValidation()) {
                 return;
             }
 
-            auto validatedProfile = validate();
+            auto validatedProfile = validation.validate();
             validatedProfile.lastValidationError =
                 normalizeMiniMaxValidationError(validatedProfile.lastValidationError);
 
@@ -5887,10 +5921,22 @@ public:
                     return;
                 }
 
-                std::string persistError;
-                if (!persistMiniMaxCredentialProfile(validatedProfile, persistError)) {
-                    validatedProfile.validationState = "invalid";
-                    validatedProfile.lastValidationError = persistError;
+                const ProfileDatabaseLock profileLock(storageAvailable ? storageService.getDbPath() : "",
+                                                      kMiniMaxProfileLockName, 5000);
+                if (storageAvailable && !profileLock.ownsLock()) {
+                    validatedProfile.validationState = "unreachable";
+                    validatedProfile.lastValidatedAt = 0;
+                    validatedProfile.lastValidationError = "Profile busy. Retry validation.";
+                } else if (!validation.matchesCredential(*adapter)) {
+                    validatedProfile.validationState = "unknown";
+                    validatedProfile.lastValidatedAt = 0;
+                    validatedProfile.lastValidationError.clear();
+                } else {
+                    std::string persistError;
+                    if (!persistMiniMaxCredentialProfile(validatedProfile, persistError)) {
+                        validatedProfile.validationState = "invalid";
+                        validatedProfile.lastValidationError = persistError;
+                    }
                 }
                 updateMiniMaxCredentialProfile(planKey, validatedProfile);
             }
@@ -5949,9 +5995,9 @@ public:
                 account.accountDisplayName);
             profile.profileName = persisted->profileName;
             profile.secretRef = persisted->secretRef;
-            profile.validationState = "unknown";
+            profile.validationState = persisted->validationState;
             profile.lastValidatedAt = persisted->lastValidatedAt;
-            profile.lastValidationError.clear();
+            profile.lastValidationError = persisted->lastValidationError;
             updateMiniMaxCredentialProfile(planKey, profile);
         }
 
@@ -6002,47 +6048,50 @@ public:
         viewModel.minimaxCredentialProfiles = buildMiniMaxCredentialSummaries();
     }
 
+    bool openMiniMaxCredentialStorage() {
+        return miniMaxCredentialStorage.isOpen() || miniMaxCredentialStorage.init(storageService.getDbPath());
+    }
+
     bool persistMiniMaxCredentialProfile(const MiniMaxSubscriptionCredentialProfile& profile, std::string& error) {
         if (!storageAvailable) {
             error.clear();
             return true;
         }
+        if (!openMiniMaxCredentialStorage()) {
+            error = miniMaxCredentialStorage.getLastError();
+            return false;
+        }
 
-        const auto providerId = findProviderIdByKey(storageService, "minimax");
+        const auto providerId = findProviderIdByKey(miniMaxCredentialStorage, "minimax");
         if (!providerId.has_value()) {
             error = "MiniMax provider row is missing from storage";
             return false;
         }
 
         MiniMaxStoredAccountRecord account =
-            loadMiniMaxStoredAccount(storageService, *providerId, profile.planKey);
+            loadMiniMaxStoredAccount(miniMaxCredentialStorage, *providerId, profile.planKey);
         const std::string desiredDisplayName = profile.accountDisplayName.empty()
             ? minimaxDefaultAccountDisplayName(profile.planKey)
             : profile.accountDisplayName;
 
         if (!account.exists) {
-            QueryResult insert = storageService.execute(
+            QueryResult insert = miniMaxCredentialStorage.execute(
                 "INSERT INTO accounts (provider_id, account_key, display_name, scope_type, scope_identifier) "
                 "VALUES (?, ?, ?, ?, ?);",
-                {
-                    std::to_string(*providerId),
-                    minimaxAccountKey(profile.planKey),
-                    desiredDisplayName,
-                    "subscription",
-                    minimaxAccountKey(profile.planKey)
-                });
+                {std::to_string(*providerId), minimaxAccountKey(profile.planKey), desiredDisplayName, "subscription",
+                 minimaxAccountKey(profile.planKey)});
             if (!insert.success()) {
-                error = storageService.getLastError();
+                error = miniMaxCredentialStorage.getLastError();
                 return false;
             }
             account.accountId = static_cast<int>(insert.lastInsertRowId());
         } else if (account.accountDisplayName != desiredDisplayName) {
-            QueryResult update = storageService.execute(
+            QueryResult update = miniMaxCredentialStorage.execute(
                 "UPDATE accounts SET display_name = ?, updated_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
                 "WHERE id = ?;",
                 {desiredDisplayName, std::to_string(account.accountId)});
             if (!update.success()) {
-                error = storageService.getLastError();
+                error = miniMaxCredentialStorage.getLastError();
                 return false;
             }
         }
@@ -6057,15 +6106,65 @@ public:
         persisted.credentialType = profile.credentialType.empty()
             ? "subscription_key"
             : profile.credentialType;
-        persisted.lastValidatedAt = profile.lastValidatedAt;
+        if (profile.lastValidatedAt > 0 &&
+            (profile.validationState == "valid" || profile.validationState == "invalid" ||
+             profile.validationState == "unreachable")) {
+            persisted.lastValidatedAt = profile.lastValidatedAt;
+            persisted.validationState = profile.validationState;
+            persisted.lastValidationError = miniMaxValidationErrorForStorage(profile);
+        }
 
-        if (!storageService.upsertCredentialProfile(persisted)) {
-            error = storageService.getLastError();
+        if (!miniMaxCredentialStorage.upsertCredentialProfile(persisted)) {
+            error = miniMaxCredentialStorage.getLastError();
             return false;
         }
 
         error.clear();
         return true;
+    }
+
+    bool clearMiniMaxValidation(const std::string& target, QueryResult& previous) {
+        auto& storage = miniMaxCredentialStorage;
+        // Own and commit this transaction before writing the secret to Credential Manager.
+        if (!openMiniMaxCredentialStorage() || !storage.beginTransaction(StorageService::TransactionMode::Immediate)) {
+            return false;
+        }
+
+        previous = storage.execute(
+            "SELECT id, validation_state, last_validation_error, last_validated_at_utc "
+            "FROM credential_profiles WHERE secret_ref = ? AND "
+            "(validation_state <> 'unknown' OR last_validation_error <> '' OR last_validated_at_utc IS NOT NULL);",
+            {target});
+        if (previous.success() &&
+            storage
+                .execute("UPDATE credential_profiles SET validation_state = 'unknown', last_validation_error = '', "
+                         "last_validated_at_utc = NULL WHERE secret_ref = ? AND "
+                         "(validation_state <> 'unknown' OR last_validation_error <> '' OR last_validated_at_utc IS "
+                         "NOT NULL);",
+                         {target})
+                .success() &&
+            storage.commitTransaction()) {
+            return true;
+        }
+
+        if (!storage.rollbackTransaction()) {
+            storage.close();
+        }
+        return false;
+    }
+
+    bool restoreMiniMaxValidation(const std::string& target, const QueryResult& previous) {
+        bool restored = true;
+        for (std::size_t row = 0; row < previous.rowCount(); ++row) {
+            const auto result = miniMaxCredentialStorage.execute(
+                "UPDATE credential_profiles SET validation_state = ?, last_validation_error = ?, "
+                "last_validated_at_utc = NULLIF(?, '') WHERE id = ? AND secret_ref = ? AND "
+                "validation_state = 'unknown' AND last_validation_error = '' AND last_validated_at_utc IS NULL;",
+                {previous.getString(row, 1), previous.getString(row, 2), previous.getString(row, 3),
+                 previous.getString(row, 0), target});
+            restored = result.success() && restored;
+        }
+        return restored;
     }
 
     DashboardMiniMaxCredentialResult handleMiniMaxCredentialAction(const DashboardMiniMaxCredentialRequest& request) {
@@ -6092,8 +6191,16 @@ public:
             adapter->setCredentialStore(miniMaxCredentialStore);
         }
 
+        // Share the complete clear, credential write, and recovery sequence with peer instances.
+        const ProfileDatabaseLock profileLock(storageAvailable ? storageService.getDbPath() : "",
+                                              kMiniMaxProfileLockName, 0);
+        if (storageAvailable && !profileLock.ownsLock()) {
+            result.message = "Could not lock the MiniMax credential profile. Try again.";
+            return result;
+        }
+
         const std::string planKey = request.planKey == "token_plan" ? "token_plan" : "coding_plan";
-        const auto revision = ++miniMaxCredentialRevisions[planKey];
+        auto& revision = miniMaxCredentialRevisions[planKey];
         const auto storedProfile = getMiniMaxCredentialProfile(planKey);
         MiniMaxSubscriptionCredentialProfile profile = storedProfile.has_value()
             ? *storedProfile
@@ -6105,17 +6212,47 @@ public:
             profile.accountDisplayName = minimaxDefaultAccountDisplayName(planKey);
         }
 
-        if (request.action == DashboardMiniMaxCredentialAction::Save) {
-            if (!adapter->storeSubscriptionCredential(profile, request.secret)) {
+        const bool save = request.action == DashboardMiniMaxCredentialAction::Save;
+        if (save || !request.secret.empty()) {
+            QueryResult previousValidation;
+            std::string target;
+            if (!request.secret.empty()) {
+                if (!storageAvailable) {
+                    result.message = "MiniMax credential changes require access to saved validation results.";
+                    return result;
+                }
+
+                target = profile.secretRef.empty() ? MiniMaxAdapter::buildSecretRef(profile) : profile.secretRef;
+                if (!clearMiniMaxValidation(target, previousValidation)) {
+                    result.message = "Could not clear the previous MiniMax validation result.";
+                    return result;
+                }
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+                if (afterMiniMaxValidationClearForTesting) {
+                    afterMiniMaxValidationClearForTesting();
+                }
+#endif
+                profile.lastValidatedAt = 0;
+            }
+
+            bool previousSecretPreserved = false;
+            if (!adapter->storeSubscriptionCredential(profile, request.secret, &previousSecretPreserved)) {
                 MiniMaxSubscriptionCredentialProfile failed = adapter->getSubscriptionCredentialProfile();
                 failed.lastValidationError = normalizeMiniMaxValidationError(failed.lastValidationError);
-                updateMiniMaxCredentialProfile(planKey, failed);
-                syncActiveMiniMaxRuntimeProfile(planKey);
                 result.message =
                     failed.lastValidationError.empty() ? "MiniMax credential save failed." : failed.lastValidationError;
+                if (previousSecretPreserved && restoreMiniMaxValidation(target, previousValidation)) {
+                    syncActiveMiniMaxRuntimeProfile(planKey);
+                    return result;
+                }
+
+                ++revision;
+                updateMiniMaxCredentialProfile(planKey, failed);
+                syncActiveMiniMaxRuntimeProfile(planKey);
                 return result;
             }
 
+            ++revision;
             profile = adapter->getSubscriptionCredentialProfile();
             std::string persistError;
             if (!persistMiniMaxCredentialProfile(profile, persistError)) {
@@ -6127,33 +6264,12 @@ public:
                 return result;
             }
 
-            updateMiniMaxCredentialProfile(planKey, profile);
-            syncActiveMiniMaxRuntimeProfile(planKey);
-            result.success = true;
-            result.accountDisplayName = profile.accountDisplayName;
-            result.message = "Stored " + minimaxPlanDisplayName(planKey) + " credential.";
-            return result;
-        }
-
-        if (!request.secret.empty()) {
-            if (!adapter->storeSubscriptionCredential(profile, request.secret)) {
-                MiniMaxSubscriptionCredentialProfile failed = adapter->getSubscriptionCredentialProfile();
-                failed.lastValidationError = normalizeMiniMaxValidationError(failed.lastValidationError);
-                updateMiniMaxCredentialProfile(planKey, failed);
-                syncActiveMiniMaxRuntimeProfile(planKey);
-                result.message =
-                    failed.lastValidationError.empty() ? "MiniMax credential save failed." : failed.lastValidationError;
-                return result;
-            }
-
-            profile = adapter->getSubscriptionCredentialProfile();
-            std::string persistError;
-            if (!persistMiniMaxCredentialProfile(profile, persistError)) {
-                profile.validationState = "invalid";
-                profile.lastValidationError = persistError;
+            if (save) {
                 updateMiniMaxCredentialProfile(planKey, profile);
                 syncActiveMiniMaxRuntimeProfile(planKey);
-                result.message = persistError;
+                result.success = true;
+                result.accountDisplayName = profile.accountDisplayName;
+                result.message = "Stored " + minimaxPlanDisplayName(planKey) + " credential.";
                 return result;
             }
         } else {
@@ -6168,13 +6284,15 @@ public:
                 return result;
             }
             adapter->setSubscriptionCredentialProfile(profile);
+            ++revision;
         }
 
         profile.validationState = "pending";
         profile.lastValidationError.clear();
         updateMiniMaxCredentialProfile(planKey, profile);
         syncActiveMiniMaxRuntimeProfile(planKey);
-        queueMiniMaxCredentialValidation(planKey, revision, adapter->prepareSubscriptionCredentialValidation(profile));
+        queueMiniMaxCredentialValidation(planKey, revision, adapter,
+                                         adapter->prepareSubscriptionCredentialValidation(profile));
         result.success = true;
         result.accountDisplayName = profile.accountDisplayName;
         result.message = "Validating " + minimaxPlanDisplayName(planKey) + " credential...";
@@ -6973,7 +7091,7 @@ public:
         if (!openCodexAttributionStorage()) {
             return false;
         }
-        const CodexProfileLock profileLock(codexAttributionStorage.getDbPath(), 5000);
+        const ProfileDatabaseLock profileLock(codexAttributionStorage.getDbPath(), kCodexProfileLockName, 5000);
         if (!profileLock.ownsLock()) {
             return false;
         }
@@ -7036,7 +7154,7 @@ public:
             return;
         }
 
-        const CodexProfileLock profileLock(codexAttributionStorage.getDbPath(), 0);
+        const ProfileDatabaseLock profileLock(codexAttributionStorage.getDbPath(), kCodexProfileLockName, 0);
         if (!profileLock.ownsLock() || readCodexAttributionGeneration() != generation || hasPendingCodexRevocation()) {
             return;
         }
@@ -7268,6 +7386,7 @@ public:
         }
         codexAttributionStorage.close();
         preferencesStorage.close();
+        miniMaxCredentialStorage.close();
         if (storageService.isOpen()) {
             storageService.close();
         }
@@ -7945,21 +8064,23 @@ bool AppController::init(bool launchInBackground) {
         pImpl->applyTaskbarPreference(viewModel.preferences);
 #endif
 
-        pImpl->startInteractionWorkThread();
-        if (pImpl->shouldQueueDeferredStartupRefresh(
-                loadedPreferences,
-                usedPersistedStartupHydration,
-                executedStartupCatchUp)) {
-            pImpl->queueDeferredStartupRefresh(
-                false,
-                pImpl->shouldImportLocalActivityDuringStartupRefresh(loadedPreferences));
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (pImpl->runtimeWorkersEnabledForTesting)
+#endif
+        {
+            pImpl->startInteractionWorkThread();
+            if (pImpl->shouldQueueDeferredStartupRefresh(loadedPreferences, usedPersistedStartupHydration,
+                                                         executedStartupCatchUp)) {
+                pImpl->queueDeferredStartupRefresh(
+                    false, pImpl->shouldImportLocalActivityDuringStartupRefresh(loadedPreferences));
+            }
+            pImpl->startTaskbarRefreshWatcher();
+            pImpl->startOpenAICodexRefreshWatcher();
+            pImpl->startLocalProviderRefreshWatcher();
+            pImpl->startMiniMaxRefreshWatcher();
+            pImpl->startScheduledExportWatcher();
+            pImpl->startRetentionWatcher();
         }
-        pImpl->startTaskbarRefreshWatcher();
-        pImpl->startOpenAICodexRefreshWatcher();
-        pImpl->startLocalProviderRefreshWatcher();
-        pImpl->startMiniMaxRefreshWatcher();
-        pImpl->startScheduledExportWatcher();
-        pImpl->startRetentionWatcher();
 
         pImpl->state = "running";
         JISTATS_LOG_INFO(LogCategory::Startup, "JiStats initialized");
@@ -8004,6 +8125,10 @@ std::string AppController::getState() const {
 #ifdef JISTATS_ENABLE_TEST_HOOKS
 void AppController::setHeadlessForTesting(bool value) {
     pImpl->headlessForTesting = value;
+}
+
+void AppController::setRuntimeWorkersEnabledForTesting(bool value) {
+    pImpl->runtimeWorkersEnabledForTesting = value;
 }
 
 void AppController::setDisableTaskbarForTesting(bool value) {
@@ -8142,6 +8267,20 @@ bool AppController::submitMiniMaxCredentialActionForTesting(
     return pImpl->handleMiniMaxCredentialAction(request).success;
 }
 
+std::optional<bool> AppController::submitMiniMaxCredentialActionWithStorageRollbackForTesting(
+    const DashboardMiniMaxCredentialRequest& request) {
+    auto& storage = pImpl->storageService;
+    if (!storage.execute("BEGIN TRANSACTION;").success()) {
+        return std::nullopt;
+    }
+    std::lock_guard<std::mutex> actionLock(pImpl->miniMaxCredentialActionMutex);
+    const auto result = pImpl->applyMiniMaxCredentialAction(request);
+    if (!storage.execute("ROLLBACK;").success()) {
+        return std::nullopt;
+    }
+    return result.success;
+}
+
 std::string AppController::getMiniMaxSecretFieldTextForTesting() const {
     return pImpl->dashboardPresenter.getMiniMaxSecretFieldTextForTesting();
 }
@@ -8258,6 +8397,10 @@ void AppController::setMiniMaxValidationResponseForTesting(
 void AppController::setMiniMaxValidationReleaseForTesting(std::shared_future<void> release) {
     std::lock_guard<std::mutex> lock(pImpl->miniMaxValidationMutex);
     pImpl->miniMaxValidationReleaseForTesting = std::move(release);
+}
+
+void AppController::setAfterMiniMaxValidationClearForTesting(std::function<void()> callback) {
+    pImpl->afterMiniMaxValidationClearForTesting = std::move(callback);
 }
 
 void AppController::waitForMiniMaxValidationForTesting() {
