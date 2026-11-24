@@ -3355,6 +3355,10 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     storage.close();
 
     AppController restarted;
+    // Declare the promise after the controller so a failed assertion releases the worker before shutdown joins it.
+    std::promise<void> releasePublication;
+    const auto publicationReleased = releasePublication.get_future().share();
+    restarted.setBeforeRuntimePublicationForTesting([publicationReleased]() { publicationReleased.wait(); });
     restarted.setHeadlessForTesting(true);
     restarted.setDatabasePathForTesting(dbPath.path());
     restarted.setProviderManagerForTesting(providers);
@@ -3366,6 +3370,7 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     const auto startupBars = restarted.getDashboardUsageProgressSummariesForTesting();
     CHECK(std::count_if(startupBars.begin(), startupBars.end(),
                         [](const DashboardSummaryItem& item) { return item.badge == "7-day: 94% remaining"; }) == 1);
+    releasePublication.set_value();
     restarted.shutdown();
 }
 
