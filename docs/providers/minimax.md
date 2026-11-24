@@ -7,7 +7,7 @@ MiniMax is opt-in and mirrors two subscription surfaces. In **File → Settings 
 | Coding Plan | `GET /v1/api/openplatform/coding_plan/remains` |
 | Token Plan | `GET /v1/token_plan/remains` |
 
-[MiniMaxAdapter](../../src/providers/minimax/MiniMaxAdapter.cpp) uses the returned subscription fields and window boundaries for quota. Use observed reset evidence when interpreting windows. The [reset-window record](../fixtures/minimax/reset-window-evidence-log.md) distinguishes a full Coding Plan rollover capture from the accepted Token Plan comparison. Keep a profile bound to its selected surface.
+[MiniMaxAdapter](../../src/providers/minimax/MiniMaxAdapter.cpp) uses the returned subscription fields and window boundaries for quota. Use observed reset evidence when interpreting windows. The [reset-window record](../fixtures/minimax/reset-window-evidence-log.md) distinguishes a full Coding Plan rollover capture from the accepted Token Plan comparison. Keep a profile bound to its selected surface. The displayed count uses the shared `MiniMax-M*` five-hour interval. Mixed payloads can also contain daily or weekly counters and quotas for individual tools. The count and reset date come from the selected row regardless of its position.
 
 ## Credential behavior to preserve
 

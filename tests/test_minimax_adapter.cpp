@@ -4,9 +4,13 @@
 #define JISTATS_ENABLE_TEST_HOOKS 1
 
 #include <catch_amalgamated.hpp>
+#include <algorithm>
+#include <array>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <ctime>
 
@@ -410,6 +414,101 @@ TEST_CASE("MiniMax adapter fetchQuota with mock response", "[minimax]") {
     REQUIRE(quota.windowType == "interval");
     REQUIRE(quota.windowStart == 1735689600);
     REQUIRE(quota.windowEnd == 1735707600);
+}
+
+TEST_CASE("MiniMax quota selects the shared five-hour allowance independent of row order", "[minimax][quota_order]") {
+    MiniMaxAdapter adapter;
+    adapter.setCredentialStore(makeFakeCredentialStore());
+    const auto plan = GENERATE("coding_plan", "token_plan");
+    REQUIRE(adapter.storeSubscriptionCredential(makeSubscriptionProfile(plan), "test-key"));
+
+    std::array<std::string_view, 4> rows{{
+        R"({"model_name":"speech-hd","start_time":1735689600000,"end_time":1735776000000,
+            "current_interval_total_count":0,"current_interval_usage_count":0})",
+        R"({"model_name":"MiniMax-M*","start_time":1735689600000,"end_time":1735707600000,
+            "current_interval_total_count":100,"current_interval_usage_count":97})",
+        R"({"model_name":"MiniMax-M*","start_time":1735689600000,"end_time":1735776000000,
+            "current_interval_total_count":500,"current_interval_usage_count":400})",
+        R"({"model_name":"coding-plan-vlm","start_time":1735689600000,"end_time":1735707600000,
+            "current_interval_total_count":190,"current_interval_usage_count":178})",
+    }};
+    std::sort(rows.begin(), rows.end());
+    do {
+        std::string payload = "{\"model_remains\":[";
+        payload += rows.front();
+        for (auto row = std::next(rows.begin()); row != rows.end(); ++row) {
+            payload += ',';
+            payload += *row;
+        }
+        payload += "]}";
+        adapter.setMockQuotaResponse(payload);
+
+        const auto quota = adapter.fetchQuota();
+        REQUIRE(quota.success);
+        CHECK(quota.providerSurface == std::string("minimax_subscription_") + plan);
+        CHECK(quota.limit == 100);
+        CHECK(quota.remaining == 97);
+        CHECK(quota.used == 3);
+        CHECK(quota.windowType == "interval");
+        CHECK(quota.windowStart == 1735689600);
+        CHECK(quota.windowEnd == 1735707600);
+    } while (std::next_permutation(rows.begin(), rows.end()));
+}
+
+TEST_CASE("MiniMax quota distinguishes an exhausted five-hour allowance from unsupported rows",
+          "[minimax][quota_order]") {
+    MiniMaxAdapter adapter("test-key");
+    SECTION("A positive allowance with zero remaining stays valid") {
+        adapter.setMockQuotaResponse(R"({
+            "model_remains":[
+                {"model_name":"MiniMax-M*","start_time":1735689600000,"end_time":1735707599000,
+                 "current_interval_total_count":100,"current_interval_usage_count":0}
+            ]
+        })");
+        const auto quota = adapter.fetchQuota();
+        REQUIRE(quota.success);
+        CHECK(quota.limit == 100);
+        CHECK(quota.remaining == 0);
+        CHECK(quota.used == 100);
+        CHECK(quota.windowEnd == 1735707599);
+    }
+    SECTION("An unrelated named model does not establish subscription text quota") {
+        adapter.setMockQuotaResponse(R"({
+            "model_remains":[
+                {"model_name":"speech-hd","start_time":1735689600000,"end_time":1735776000000,
+                 "current_interval_total_count":0,"current_interval_usage_count":0}
+            ]
+        })");
+        CHECK_FALSE(adapter.fetchQuota().success);
+    }
+}
+
+TEST_CASE("MiniMax quota disambiguates shared model windows by their bounds", "[minimax][quota_order]") {
+    MiniMaxAdapter adapter("test-key");
+    const std::string first = R"({"model_name":"MiniMax-M*","start_time":1735689600000,"end_time":1735707600000,
+                                 "current_interval_total_count":100,"current_interval_usage_count":32})";
+    std::string second;
+    bool expectQuota = false;
+    SECTION("The same model's newer window supplies the balance") {
+        expectQuota = true;
+        second = R"({"model_name":"MiniMax-M*","start_time":1735707600000,"end_time":1735725600000,
+                     "current_interval_total_count":100,"current_interval_usage_count":99})";
+    }
+    SECTION("Conflicting balances for one window leave it unavailable") {
+        second = R"({"model_name":"MiniMax-M*","start_time":1735689600000,"end_time":1735707600000,
+                     "current_interval_total_count":100,"current_interval_usage_count":99})";
+    }
+    for (const auto& rows : {first + ',' + second, second + ',' + first}) {
+        adapter.setMockQuotaResponse("{\"model_remains\":[" + rows + "]}");
+        const auto quota = adapter.fetchQuota();
+        if (expectQuota) {
+            REQUIRE(quota.success);
+            CHECK(quota.remaining == 99);
+            CHECK(quota.windowEnd == 1735725600);
+        } else {
+            CHECK_FALSE(quota.success);
+        }
+    }
 }
 
 TEST_CASE("MiniMax adapter fetchQuota rejects mock payload without model_remains", "[minimax]") {
