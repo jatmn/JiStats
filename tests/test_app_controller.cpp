@@ -2397,7 +2397,7 @@ TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
-    app.setMiniMaxValidationResponseForTesting(true, 200, "{}", "");
+    app.setMiniMaxValidationResponseForTesting(true, 200, R"({"base_resp":{"status_code":0},"model_remains":[]})", "");
     app.setMiniMaxValidationReleaseForTesting(releaseValidation.get_future().share());
     REQUIRE(app.init());
     REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));

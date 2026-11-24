@@ -521,6 +521,22 @@ bool MiniMaxAdapter::validateCredentials() {
     }
 #endif
 
+    if (resp.success && endpoint != MiniMaxAdapter::Impl::MODELS_ENDPOINT) {
+        JsonValue payload;
+        const auto* baseResponse = JsonParser::parse(resp.body, payload) ? payload.getMember("base_resp") : nullptr;
+        const auto* statusCode = baseResponse ? baseResponse->getMember("status_code") : nullptr;
+        if (!statusCode || !statusCode->isNumber()) {
+            pImpl->recordValidationResult(false, "unreachable",
+                                          "MiniMax subscription validation response has no numeric status code");
+            return false;
+        }
+        if (statusCode->getNumber() != 0) {
+            pImpl->recordValidationResult(false, "invalid",
+                                          "MiniMax subscription validation failed with a provider error");
+            return false;
+        }
+    }
+
     if (resp.success) {
         pImpl->recordValidationResult(true, "valid", "");
         return true;
