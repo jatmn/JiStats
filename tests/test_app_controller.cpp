@@ -27,6 +27,7 @@
 
 #include "app/AppController.hpp"
 #include "app/TrayController.hpp"
+#include "core/HttpClient.hpp"
 #include "core/Logger.hpp"
 #include "db/SettingsService.hpp"
 #include "db/StorageService.hpp"
@@ -2445,13 +2446,19 @@ TEST_CASE("AppController binds MiniMax validation to the submitted credential", 
     auto providerManager = std::make_shared<ProviderManager>();
     providerManager->addProvider(adapter);
 
+    std::string submittedUrl;
+    std::string submittedToken;
+    adapter->setMockValidationTransport([&](const std::string& url, const std::string& token) {
+        submittedUrl = url;
+        submittedToken = token;
+        return HttpResponse{false, 403, "", "forbidden"};
+    });
     AppController app;
     std::promise<void> releaseValidation;
     app.setHeadlessForTesting(true);
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(std::make_shared<WindowsCredentialStore>(backend));
-    app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
     app.setMiniMaxValidationReleaseForTesting(releaseValidation.get_future().share());
     REQUIRE(app.init());
 
@@ -2471,6 +2478,8 @@ TEST_CASE("AppController binds MiniMax validation to the submitted credential", 
 
     releaseValidation.set_value();
     app.waitForMiniMaxValidationForTesting();
+    CHECK(submittedUrl == "https://api.minimax.io/v1/api/openplatform/coding_plan/remains");
+    CHECK(submittedToken == "synthetic-old");
     const auto viewModel = app.getDashboardViewModelForTesting();
     const auto original = findMiniMaxSummary(viewModel, "coding_plan");
     const auto replacement = findMiniMaxSummary(viewModel, replacementPlan);

@@ -32,7 +32,7 @@ public:
     std::string mockUsageResponse;
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
-    std::optional<HttpResponse> mockValidationResponse;
+    ValidationTransport mockValidationTransport;
 #endif
     
     // MiniMax API base URL
@@ -380,7 +380,7 @@ public:
         std::string endpoint;
         std::string groupId;
 #ifdef JISTATS_ENABLE_TEST_HOOKS
-        std::optional<HttpResponse> mockResponse;
+        ValidationTransport mockTransport;
 #endif
     };
 
@@ -394,7 +394,7 @@ public:
         }
         request.groupId = groupId;
 #ifdef JISTATS_ENABLE_TEST_HOOKS
-        request.mockResponse = mockValidationResponse;
+        request.mockTransport = mockValidationTransport;
 #endif
         return request;
     }
@@ -501,10 +501,11 @@ public:
             return false;
         }
 
+        const std::string url = std::string(MINIMAX_API_BASE) + request.endpoint;
         HttpResponse response;
 #ifdef JISTATS_ENABLE_TEST_HOOKS
-        if (request.mockResponse.has_value()) {
-            response = std::move(*request.mockResponse);
+        if (request.mockTransport) {
+            response = request.mockTransport(url, *request.bearerToken);
         } else {
 #endif
             HttpClient client;
@@ -512,7 +513,7 @@ public:
             if (!request.groupId.empty()) {
                 client.setGroupId(request.groupId);
             }
-            response = client.get(std::string(MINIMAX_API_BASE) + request.endpoint);
+            response = client.get(url);
 #ifdef JISTATS_ENABLE_TEST_HOOKS
         }
 #endif
@@ -826,10 +827,15 @@ void MiniMaxAdapter::setMockUsageResponse(const std::string& jsonResponse) {
 }
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
+void MiniMaxAdapter::setMockValidationTransport(ValidationTransport transport) {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
+    pImpl->mockValidationTransport = std::move(transport);
+}
+
 void MiniMaxAdapter::setMockValidationResponse(bool success, int statusCode,
     const std::string& body, const std::string& error) {
-    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
-    pImpl->mockValidationResponse = HttpResponse{success, statusCode, body, error};
+    setMockValidationTransport([response = HttpResponse{success, statusCode, body, error}](
+                                   const std::string&, const std::string&) { return response; });
 }
 
 std::string MiniMaxAdapter::getLastResolvedEndpointForTesting() const {

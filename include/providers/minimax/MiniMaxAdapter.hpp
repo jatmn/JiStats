@@ -9,6 +9,10 @@
 
 namespace JiStats {
 
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+class HttpResponse;
+#endif
+
 struct MiniMaxSubscriptionCredentialProfile {
     std::string providerKey = "minimax";
     std::string accountKey;
@@ -79,6 +83,8 @@ public:
     void setMockUsageResponse(const std::string& jsonResponse);
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
+    using ValidationTransport = std::function<HttpResponse(const std::string&, const std::string&)>;
+    void setMockValidationTransport(ValidationTransport transport);
     void setMockValidationResponse(bool success, int statusCode,
         const std::string& body = "", const std::string& error = "");
     std::string getLastResolvedEndpointForTesting() const;
