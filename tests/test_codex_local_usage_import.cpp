@@ -4,6 +4,7 @@
 #include <string>
 
 #include "db/StorageService.hpp"
+#include "providers/openai/CodexLocalSqliteReader.hpp"
 #include "providers/openai/CodexLocalUsageImporter.hpp"
 #include "temp_test_directory.hpp"
 
@@ -15,6 +16,7 @@
 
 using namespace JiStats;
 using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::TempTestDirectory;
 
 namespace {
 
@@ -76,6 +78,34 @@ long long totalUsageTokens(StorageService& storage) {
 #endif
 
 } // namespace
+
+TEST_CASE("CodexLocalSqliteReader opens the literal state database path", "[codex][storage][reader]") {
+#if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
+    SKIP("SQLite unavailable");
+#else
+    const std::string folder = GENERATE("plain", "folder#1", "folder%20name");
+    CAPTURE(folder);
+    const TempTestDirectory directory("codex_state_path");
+    const auto source = directory.path() / folder / "state_5.sqlite";
+    std::filesystem::create_directory(source.parent_path());
+    writeCodexStateDb(source.string(), 1250);
+
+    if (folder == "folder%20name") {
+        const auto decoded = directory.path() / "folder name" / "state_5.sqlite";
+        std::filesystem::create_directory(decoded.parent_path());
+        writeCodexStateDb(decoded.string(), 42);
+    }
+
+    const auto result = CodexLocalSqliteReader().readThreads(source.string());
+    INFO(result.error);
+    REQUIRE(result.success);
+    CHECK(result.sourcePath == source.string());
+    CHECK(result.sourceIdentity == source.string());
+    REQUIRE(result.threads.size() == 1);
+    CHECK(result.threads.front().threadId == "thread-1");
+    CHECK(result.threads.front().tokensUsed == 1250);
+#endif
+}
 
 TEST_CASE("CodexLocalUsageImporter baselines first scan then imports token deltas", "[codex][storage][import]") {
 #if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
