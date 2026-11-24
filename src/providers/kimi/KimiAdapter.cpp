@@ -6,8 +6,10 @@
 #include "observation/ObservationPersistenceBridge.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +18,12 @@
 #include <optional>
 #include <sstream>
 #include <utility>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace JiStats {
 
@@ -439,20 +447,81 @@ bool hasQuotaApiCredentials(const KimiOAuthCredentials& credentials) {
     return hasUsableAccessToken(credentials) || !credentials.refreshToken.empty();
 }
 
+bool replaceCredentialFile(const std::filesystem::path& path, const std::string& contents) {
+#ifdef _WIN32
+    if (contents.size() > MAXDWORD) {
+        return false;
+    }
+
+    // Use the original file's DACL when creating the staged credentials.
+    DWORD descriptorSize = 0;
+    GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, nullptr, 0, &descriptorSize);
+    if (descriptorSize == 0) {
+        return false;
+    }
+    std::vector<unsigned char> descriptor(descriptorSize);
+    if (!GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, descriptor.data(), descriptorSize,
+                          &descriptorSize)) {
+        return false;
+    }
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), descriptor.data(), FALSE};
+
+    static std::atomic<unsigned long> sequence{0};
+    std::filesystem::path staged;
+    HANDLE file;
+    do {
+        staged = path;
+        staged += L".tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(++sequence);
+        file = CreateFileW(staged.c_str(), GENERIC_WRITE, 0, &attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) {
+            return false;
+        }
+    } while (file == INVALID_HANDLE_VALUE);
+
+    DWORD written = 0;
+    const DWORD size = static_cast<DWORD>(contents.size());
+    const bool flushed =
+        WriteFile(file, contents.data(), size, &written, nullptr) && written == size && FlushFileBuffers(file);
+    const bool closed = CloseHandle(file) != FALSE;
+    if (flushed && closed && MoveFileExW(staged.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        return true;
+    }
+    DeleteFileW(staged.c_str());
+#else
+    std::string staged = path.string() + ".tmp-XXXXXX";
+    const int descriptor = mkstemp(staged.data());
+    if (descriptor == -1) {
+        return false;
+    }
+
+    std::FILE* file = fdopen(descriptor, "wb");
+    if (file) {
+        const bool flushed = std::fwrite(contents.data(), 1, contents.size(), file) == contents.size() &&
+                             std::fflush(file) == 0 && fsync(descriptor) == 0;
+        const bool closed = std::fclose(file) == 0;
+        if (flushed && closed && std::rename(staged.c_str(), path.c_str()) == 0) {
+            return true;
+        }
+    } else {
+        close(descriptor);
+    }
+    unlink(staged.c_str());
+#endif
+    return false;
+}
+
 bool saveOAuthCredentials(const std::filesystem::path& rootPath, const KimiOAuthCredentials& credentials) {
     if (credentials.accessToken.empty() || credentials.tokenType.empty()) {
         return false;
     }
 
-    const std::filesystem::path credPath = rootPath / "credentials" / "kimi-code.json";
     std::error_code ec;
-    std::filesystem::create_directories(credPath.parent_path(), ec);
-
-    std::ofstream output(credPath, std::ios::binary | std::ios::trunc);
-    if (!output.is_open()) {
+    const auto credPath = std::filesystem::canonical(rootPath / "credentials" / "kimi-code.json", ec);
+    if (ec) {
         return false;
     }
 
+    std::ostringstream output;
     output << "{\n";
     output << "  \"access_token\": \"" << jsonEscape(credentials.accessToken) << "\",\n";
     output << "  \"refresh_token\": \"" << jsonEscape(credentials.refreshToken) << "\",\n";
@@ -461,7 +530,7 @@ bool saveOAuthCredentials(const std::filesystem::path& rootPath, const KimiOAuth
     output << "  \"expires_in\": " << std::fixed << std::setprecision(0) << credentials.expiresIn << ",\n";
     output << "  \"expires_at\": " << std::fixed << std::setprecision(6) << credentials.expiresAt << "\n";
     output << "}\n";
-    return output.good();
+    return output.good() && replaceCredentialFile(credPath, output.str());
 }
 
 std::string urlEncode(const std::string& value) {

@@ -11,6 +11,7 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <sstream>
@@ -19,6 +20,7 @@
 #include <vector>
 
 #include <winsock2.h>
+#include <windows.h>
 #include <ws2tcpip.h>
 
 #include "core/HttpClient.hpp"
@@ -882,6 +884,8 @@ default_model = "kimi-code/kimi-for-coding"
 }
 
 TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting quota", "[kimi]") {
+    const bool blockReplacement = GENERATE(false, true);
+    CAPTURE(blockReplacement);
     ScopedWinsock winsock;
     LocalHttpSequenceServer server({
         {"POST", "/api/oauth/token", 200, R"json({
@@ -902,35 +906,48 @@ TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting qu
 
     TempFixtureDirectory fixture;
     fixture.makeFile("config.toml", "default_model = \"kimi-code/kimi-for-coding\"\n");
-    fixture.makeFile("credentials/kimi-code.json", R"json({
+    const std::string originalCredentials = R"json({
   "access_token": "expired-access-token",
   "refresh_token": "refresh-token",
   "scope": "openid profile",
   "token_type": "Bearer",
   "expires_in": 900,
   "expires_at": 1.0
-})json");
+})json";
+    const auto credentialsPath = fixture.makeFile("credentials/kimi-code.json", originalCredentials);
+    std::unique_ptr<void, decltype(&CloseHandle)> lockedFile(nullptr, CloseHandle);
+    if (blockReplacement) {
+        const HANDLE file = CreateFileW(credentialsPath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        REQUIRE(file != INVALID_HANDLE_VALUE);
+        lockedFile.reset(file);
+    }
 
     KimiAdapter adapter(fixture.path().string());
     const QuotaResponse quota = adapter.fetchQuota();
 
     REQUIRE(server.failure().empty());
+    const auto directory = credentialsPath.parent_path();
+    CHECK(std::distance(std::filesystem::directory_iterator(directory), std::filesystem::directory_iterator()) == 1);
+    std::ifstream input(credentialsPath, std::ios::binary);
+    REQUIRE(input.is_open());
+    const std::string savedCredentials(std::istreambuf_iterator<char>(input), {});
+    if (blockReplacement) {
+        CHECK(server.handledRequestCount() == 1);
+        CHECK_FALSE(quota.success);
+        CHECK(quota.error == "Failed to persist refreshed Kimi OAuth credentials");
+        CHECK(savedCredentials == originalCredentials);
+        return;
+    }
+
     REQUIRE(server.handledRequestCount() == 2);
     REQUIRE(quota.success);
     CHECK(quota.used == 40);
     CHECK(quota.limit == 100);
     CHECK(quota.secondaryUsed == 23);
 
-    std::string refreshedCredentials;
-    REQUIRE(std::ifstream(fixture.path() / "credentials" / "kimi-code.json").good());
-    {
-        std::ifstream input(fixture.path() / "credentials" / "kimi-code.json", std::ios::binary);
-        std::ostringstream buffer;
-        buffer << input.rdbuf();
-        refreshedCredentials = buffer.str();
-    }
-    CHECK(refreshedCredentials.find("fresh-access-token") != std::string::npos);
-    CHECK(refreshedCredentials.find("fresh-refresh-token") != std::string::npos);
+    CHECK(savedCredentials.find("fresh-access-token") != std::string::npos);
+    CHECK(savedCredentials.find("fresh-refresh-token") != std::string::npos);
 }
 
 TEST_CASE("Kimi adapter refreshes OAuth credentials after a 401 usages response and retries quota", "[kimi]") {
