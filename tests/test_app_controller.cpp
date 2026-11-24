@@ -3090,26 +3090,23 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
     requireSqlite();
 
     TempTestDatabase dbPath;
-    seedAllProviderTrackingEnabled(dbPath.path());
     TempTestDirectory userProfileRoot("jistats_codex_refresh");
     const auto rolloutPath =
         userProfileRoot.path() / ".codex" / "sessions" / "2026" / "04" / "19" / "rollout-live.jsonl";
     const std::time_t now = std::time(nullptr);
 
-    writeCodexRolloutFile(rolloutPath, 25.0, now, now + (5 * 3600));
+    if (GENERATE(true, false)) {
+        writeCodexRolloutFile(rolloutPath, 25.0, now, now + (5 * 3600));
+    }
     ScopedEnvironmentVariable codexHome(
         "CODEX_HOME",
         (userProfileRoot.path() / ".codex").string());
 
-    auto openaiProvider = makeCurrentQuotaProvider(
-        "openai",
-        "OpenAI",
-        25,
-        100,
-        now,
-        "interval",
-        "openai_subscription_codex_local");
-    auto providerManager = makeProviderManager({openaiProvider});
+    auto openaiProvider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 25, 100, "interval", "openai_subscription_codex_local"));
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(openaiProvider);
+    std::atomic<int> rolloutSamples{0};
 
     AppController app;
     app.setHeadlessForTesting(true);
@@ -3117,27 +3114,37 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setOpenAICodexRefreshPollIntervalForTesting(25);
+    app.setBeforeCodexRolloutSampleForTesting([&]() { ++rolloutSamples; });
 
     REQUIRE(app.init());
-    const int initialQuotaFetchCount = openaiProvider->getQuotaFetchCount();
+    REQUIRE_FALSE(app.getDashboardViewModelForTesting().preferences.openaiSubscriptionTrackingEnabled);
+    CHECK(openaiProvider->getQuotaFetchCount() == 0);
+    CHECK(rolloutSamples.load() == 0);
 
-    const ProviderStatus* initialOpenAI =
-        findProviderStatus(app.getDashboardViewModelForTesting(), "openai");
-    REQUIRE(initialOpenAI != nullptr);
+    auto preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.openaiSubscriptionTrackingEnabled = true;
+    app.applyDashboardPreferencesForTesting(preferences);
 
-    writeCodexRolloutFile(rolloutPath, 40.0, now + 60, now + (5 * 3600));
-    std::error_code updateTimestampError;
-    std::filesystem::last_write_time(
-        rolloutPath,
-        std::filesystem::file_time_type::clock::now() + std::chrono::seconds(2),
-        updateTimestampError);
-    REQUIRE_FALSE(updateTimestampError);
-    openaiProvider->setQuotaResponse(
-        makeQuotaResponse(now + 60, 40, 100, "interval", "openai_subscription_codex_local"));
-
-    REQUIRE(waitForCondition([&openaiProvider, initialQuotaFetchCount]() {
-        return openaiProvider->getQuotaFetchCount() > initialQuotaFetchCount;
-    }, std::chrono::milliseconds(1500)));
+    auto hasQuota = [&app](long long used) {
+        const auto model = app.getDashboardViewModelForTesting();
+        const auto* provider = findProviderStatus(model, "openai");
+        return provider && !provider->quotas.empty() && provider->quotas.front().used == used;
+    };
+    REQUIRE(hasQuota(25));
+    REQUIRE(waitForCondition([&]() { return rolloutSamples.load() >= 3; }));
+    CHECK(openaiProvider->getQuotaFetchCount() == 1);
+    const auto refreshQuota = [&](const std::filesystem::path& changedPath, long long used, int offsetSeconds) {
+        openaiProvider->setQuotaResponse(
+            makeQuotaResponse(now + offsetSeconds, used, 100, "interval", "openai_subscription_codex_local"));
+        writeCodexRolloutFile(changedPath, static_cast<double>(used), now + offsetSeconds, now + (5 * 3600));
+        std::error_code error;
+        std::filesystem::last_write_time(
+            changedPath, std::filesystem::file_time_type::clock::now() + std::chrono::seconds(offsetSeconds), error);
+        REQUIRE_FALSE(error);
+        REQUIRE(waitForCondition([&]() { return hasQuota(used); }, std::chrono::milliseconds(1500)));
+    };
+    refreshQuota(rolloutPath, 40, 60);
+    refreshQuota(rolloutPath.parent_path().parent_path() / "20" / "rollout-new.jsonl", 65, 120);
 
     app.shutdown();
 }
@@ -3982,6 +3989,9 @@ TEST_CASE("AppController startup hydration shows persisted quota state while liv
         100,
         40);
 
+    std::atomic<bool> sampling{false};
+    std::promise<void> releaseSample;
+    auto released = releaseSample.get_future().share();
     AppController app;
     std::promise<void> releaseQuota;
     auto provider = std::make_shared<ControlledQuotaProviderAdapter>(
@@ -3996,7 +4006,27 @@ TEST_CASE("AppController startup hydration shows persisted quota state while liv
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
 
-    REQUIRE(app.init());
+    app.setBeforeCodexRolloutSampleForTesting([&]() {
+        if (!sampling.exchange(true)) {
+            released.wait_for(std::chrono::seconds(5));
+        }
+    });
+
+    auto startup = std::async(std::launch::async, [&]() { return app.init(); });
+    const bool sampleHeld = waitForCondition([&]() { return sampling.load(); }, std::chrono::seconds(2));
+    const bool initFinished = startup.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    const auto beforeSampling = app.getDashboardViewModelForTesting();
+    const int fetchesBeforeSample = provider->getQuotaFetchCount();
+    releaseSample.set_value();
+
+    REQUIRE(startup.get());
+    CHECK(sampleHeld);
+    CHECK(initFinished);
+    CHECK(fetchesBeforeSample == 0);
+    const auto* cached = findProviderStatus(beforeSampling, "openai");
+    REQUIRE(cached != nullptr);
+    REQUIRE_FALSE(cached->quotas.empty());
+    CHECK(cached->quotas.front().used == 60);
     REQUIRE(waitForCondition([&provider]() {
         return provider->getQuotaFetchCount() > 0;
     }, std::chrono::seconds(5)));
