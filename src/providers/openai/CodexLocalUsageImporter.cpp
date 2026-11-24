@@ -5,6 +5,7 @@
 #include "providers/openai/ImportTransaction.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <ctime>
 #include <optional>
 #include <sstream>
@@ -70,6 +71,19 @@ std::string buildRunId(long long sourceId, const std::string& threadId, long lon
     return out.str();
 }
 
+bool legacyUriCouldChangePath(const std::string& path) {
+    if (path.compare(0, 12, "//localhost/") == 0 || path.find_first_of("#?") != std::string::npos) {
+        return true;
+    }
+    for (auto offset = path.find('%'); offset != std::string::npos; offset = path.find('%', offset + 1)) {
+        if (path.size() - offset >= 3 && std::isxdigit(static_cast<unsigned char>(path[offset + 1])) &&
+            std::isxdigit(static_cast<unsigned char>(path[offset + 2]))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool isThreadObservedAfterSourceBaseline(const CodexLocalThreadRow& row, std::time_t sourceBaselineAt) {
     const long long baselineMs = static_cast<long long>(sourceBaselineAt) * 1000;
     if (row.createdAtMs > 0 && row.createdAtMs >= baselineMs) return true;
@@ -102,10 +116,15 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
 
     result.rowsRead = static_cast<int>(readResult.threads.size());
 
+    std::string sourceIdentity = readResult.sourceIdentity;
+    // A legacy URI could have opened a different file under this path's checkpoint key.
+    if (legacyUriCouldChangePath(readResult.sourcePath)) {
+        sourceIdentity += "#literal-path";
+    }
     // Each consent period starts with independent checkpoints.
-    const std::string sourceIdentity =
-        attributionGeneration > 0 ? readResult.sourceIdentity + "#attribution-" + std::to_string(attributionGeneration)
-                                  : readResult.sourceIdentity;
+    if (attributionGeneration > 0) {
+        sourceIdentity += "#attribution-" + std::to_string(attributionGeneration);
+    }
     const auto existingSource = storage_.getCodexLocalSource(readResult.sourcePath, sourceIdentity);
     const bool sourceBaselineEstablished = existingSource.has_value();
     OpenAIImportDetail::ImportTransaction transaction(storage_);

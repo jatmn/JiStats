@@ -4,6 +4,7 @@
 #include <string>
 
 #include "db/StorageService.hpp"
+#include "providers/openai/CodexLocalSqliteReader.hpp"
 #include "providers/openai/CodexLocalUsageImporter.hpp"
 #include "temp_test_directory.hpp"
 
@@ -15,6 +16,7 @@
 
 using namespace JiStats;
 using JiStats::TestSupport::TempTestDatabase;
+using JiStats::TestSupport::TempTestDirectory;
 
 namespace {
 
@@ -77,6 +79,44 @@ long long totalUsageTokens(StorageService& storage) {
 
 } // namespace
 
+TEST_CASE("CodexLocalSqliteReader opens the literal state database path", "[codex][storage][reader]") {
+#if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
+    SKIP("SQLite unavailable");
+#else
+    const std::string folder = GENERATE("plain", "folder#1", "folder%20name");
+    CAPTURE(folder);
+    const TempTestDirectory directory("codex_state_path");
+    const auto source = directory.path() / folder / "state_5.sqlite";
+    std::filesystem::create_directory(source.parent_path());
+    writeCodexStateDb(source.string(), 1250);
+
+    if (folder == "folder%20name") {
+        const auto decoded = directory.path() / "folder name" / "state_5.sqlite";
+        std::filesystem::create_directory(decoded.parent_path());
+        writeCodexStateDb(decoded.string(), 42);
+    }
+
+    const auto result = CodexLocalSqliteReader().readThreads(source.string());
+    INFO(result.error);
+    REQUIRE(result.success);
+    CHECK(result.sourcePath == source.string());
+    CHECK(result.sourceIdentity == source.string());
+    REQUIRE(result.threads.size() == 1);
+    CHECK(result.threads.front().threadId == "thread-1");
+    CHECK(result.threads.front().tokensUsed == 1250);
+#ifdef _WIN32
+    if (source.is_absolute() && source.root_name().native().size() == 2) {
+        const std::string deviceSource = "//?/" + source.generic_string();
+        const auto deviceResult = CodexLocalSqliteReader().readThreads(deviceSource);
+        INFO(deviceResult.error);
+        REQUIRE(deviceResult.success);
+        REQUIRE(deviceResult.threads.size() == 1);
+        CHECK(deviceResult.threads.front().tokensUsed == 1250);
+    }
+#endif
+#endif
+}
+
 TEST_CASE("CodexLocalUsageImporter baselines first scan then imports token deltas", "[codex][storage][import]") {
 #if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
     SKIP("SQLite unavailable");
@@ -110,6 +150,50 @@ TEST_CASE("CodexLocalUsageImporter baselines first scan then imports token delta
     REQUIRE(repeated.success);
     CHECK(repeated.deltaEventsInserted == 0);
     CHECK(countUsageEvents(storage) == 2);
+#endif
+}
+
+TEST_CASE("CodexLocalUsageImporter starts a literal path baseline after a legacy URI checkpoint",
+          "[codex][storage][import]") {
+#if !defined(JISTATS_USE_SYSTEM_SQLITE) && !defined(JISTATS_HAS_SQLITE)
+    SKIP("SQLite unavailable");
+#else
+    TempTestDatabase appDb;
+    const TempTestDirectory directory("codex_literal_baseline");
+    const auto decoded = directory.path() / "folder name" / "state_5.sqlite";
+    const auto literal = directory.path() / "folder%20name" / "state_5.sqlite";
+    std::filesystem::create_directory(decoded.parent_path());
+    std::filesystem::create_directory(literal.parent_path());
+    writeCodexStateDb(decoded.string(), 42);
+    writeCodexStateDb(literal.string(), 1250);
+
+    StorageService storage;
+    REQUIRE(storage.init(appDb.path()));
+    CodexLocalUsageImporter importer(storage);
+    constexpr int generation = 2;
+    REQUIRE(importer.importFromSource(decoded.string(), 1700007200, generation).success);
+    REQUIRE(std::filesystem::remove(decoded));
+    writeCodexStateDb(decoded.string(), 50);
+    REQUIRE(importer.importFromSource(decoded.string(), 1700010800, generation).success);
+    REQUIRE(totalUsageTokens(storage) == 8);
+
+    // Earlier releases opened the decoded file but keyed its checkpoint by the requested path.
+    REQUIRE(storage
+                .execute("UPDATE codex_local_sources SET source_path = ?, source_identity = ? WHERE source_path = ?;",
+                         {literal.string(), literal.string() + "#attribution-2", decoded.string()})
+                .success());
+    const auto first = importer.importFromSource(literal.string(), 1700014400, generation);
+    REQUIRE(first.success);
+    CHECK(first.baselinedThreads == 1);
+    CHECK(first.deltaEventsInserted == 0);
+    CHECK(totalUsageTokens(storage) == 8);
+
+    REQUIRE(std::filesystem::remove(literal));
+    writeCodexStateDb(literal.string(), 1325);
+    const auto next = importer.importFromSource(literal.string(), 1700018000, generation);
+    REQUIRE(next.success);
+    CHECK(next.deltaEventsInserted == 1);
+    CHECK(totalUsageTokens(storage) == 83);
 #endif
 }
 
