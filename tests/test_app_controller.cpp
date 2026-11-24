@@ -3341,17 +3341,11 @@ TEST_CASE("AppController surfaces Kimi provider-exact quota windows as remaining
     seedAllProviderTrackingEnabled(dbPath.path());
     const std::time_t now = std::time(nullptr);
 
-    QuotaResponse kimiQuota = makeQuotaResponse(
-        now,
-        64,
-        100,
-        "interval",
-        "kimi_subscription_api");
-    kimiQuota.secondaryWindowType = "weekly";
-    kimiQuota.secondaryWindowEnd = now;
-    kimiQuota.secondaryUsed = 28;
-    kimiQuota.secondaryLimit = 100;
-    kimiQuota.secondaryRemaining = 72;
+    const QuotaResponse kimiQuota = KimiAdapter::parseUsagesResponseForTesting(R"({
+        "usage":{"limit":"100","used":"28","remaining":"72"},
+        "limits":[{"window":{"duration":300},"detail":{"limit":"100","remaining":"36%"}}]
+    })");
+    REQUIRE(kimiQuota.success);
     auto kimiProvider = makeQuotaProvider("kimi", "Kimi Code", kimiQuota, now);
     auto providerManager = makeProviderManager({kimiProvider});
 
@@ -3391,6 +3385,17 @@ TEST_CASE("AppController surfaces Kimi provider-exact quota windows as remaining
     CHECK(kimiMetric->secondaryMetric == "36 left");
 
     app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto interval = storage.execute("SELECT q.used_value, q.remaining_value "
+                                          "FROM quota_snapshots q JOIN plans p ON q.plan_id = p.id "
+                                          "WHERE q.provider_id = ? AND p.quota_window = 'interval';",
+                                          {std::to_string(requireProviderId(storage, "kimi"))});
+    REQUIRE(interval.success());
+    REQUIRE(interval.rowCount() == 1);
+    CHECK(interval.getInt64(0, 0) == 64);
+    CHECK(interval.getInt64(0, 1) == 36);
 }
 
 TEST_CASE("AppController throttles direct quota APIs per API surface with adaptive polling windows", "[app][runtime][polling]") {

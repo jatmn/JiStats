@@ -554,6 +554,22 @@ std::optional<KimiOAuthCredentials> refreshOAuthCredentials(
 }
 
 bool tryParseStringNumber(const JsonValue& value, long long& out) {
+    if (value.isString()) {
+        try {
+            out = std::stoll(value.getString());
+            return out >= 0;
+        } catch (...) {
+            return false;
+        }
+    }
+    if (value.isNumber()) {
+        out = static_cast<long long>(value.getNumber());
+        return out >= 0;
+    }
+    return false;
+}
+
+bool tryParseWeeklyQuotaCount(const JsonValue& value, long long& out) {
     long long number = 0;
     if (value.isString()) {
         const auto& text = value.getString();
@@ -600,12 +616,12 @@ QuotaResponse parseUsagesResponse(const std::string& jsonBody) {
     std::time_t weeklyResetTime = 0;
 
     if (const JsonValue* limit = usage->getMember("limit")) {
-        tryParseStringNumber(*limit, weeklyLimit);
+        tryParseWeeklyQuotaCount(*limit, weeklyLimit);
     }
     const JsonValue* used = usage->getMember("used");
     const JsonValue* remaining = usage->getMember("remaining");
-    const bool hasWeeklyUsed = used && tryParseStringNumber(*used, weeklyUsed);
-    const bool hasWeeklyRemaining = remaining && tryParseStringNumber(*remaining, weeklyRemaining);
+    const bool hasWeeklyUsed = used && tryParseWeeklyQuotaCount(*used, weeklyUsed);
+    const bool hasWeeklyRemaining = remaining && tryParseWeeklyQuotaCount(*remaining, weeklyRemaining);
     const bool hasWeeklyBalance = weeklyLimit > 0 && (hasWeeklyUsed || hasWeeklyRemaining);
     if (hasWeeklyBalance) {
         weeklyRemaining = hasWeeklyRemaining ? std::min(weeklyRemaining, weeklyLimit)
