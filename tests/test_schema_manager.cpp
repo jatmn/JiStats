@@ -242,12 +242,12 @@ int installCompactionFailure(sqlite3* db, char**, const sqlite3_api_routines*) {
 
 } // namespace
 
-TEST_CASE("SchemaManager::getLatestVersion includes the bundled Claude daily activity migration", "[schema]") {
+TEST_CASE("SchemaManager::getLatestVersion includes the bundled Kimi task activity migration", "[schema]") {
     StorageService storage;
     SchemaManager manager(storage);
 
     int latest = manager.getLatestVersion();
-    REQUIRE(latest == 16);
+    REQUIRE(latest == 17);
 }
 
 TEST_CASE("SchemaManager::getStatus reports version info", "[schema]") {
@@ -277,7 +277,7 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(storage.init(tempDb.path()));
 
     SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 16);
+    REQUIRE(manager.getCurrentVersion() == 17);
     REQUIRE_FALSE(manager.needsMigration());
 
     REQUIRE(tableExists(storage, "activity_events"));
@@ -327,12 +327,13 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
 
     auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 5);
+    REQUIRE(versions.rowCount() == 6);
     CHECK(versions.getInt(0, 0) == 12);
     CHECK(versions.getInt(1, 0) == 13);
     CHECK(versions.getInt(2, 0) == 14);
     CHECK(versions.getInt(3, 0) == 15);
     CHECK(versions.getInt(4, 0) == 16);
+    CHECK(versions.getInt(5, 0) == 17);
 
     auto providers = storage.execute("SELECT provider_key FROM providers ORDER BY id;");
     REQUIRE(providers.success());
@@ -371,16 +372,17 @@ TEST_CASE("StorageService preserves database settings on reopen without rewritin
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    CHECK(manager.getCurrentVersion() == 16);
+    CHECK(manager.getCurrentVersion() == 17);
     CHECK_FALSE(manager.needsMigration());
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 5);
+    REQUIRE(versions.rowCount() == 6);
     CHECK(versions.getInt(0, 0) == 12);
     CHECK(versions.getInt(1, 0) == 13);
     CHECK(versions.getInt(2, 0) == 14);
     CHECK(versions.getInt(3, 0) == 15);
     CHECK(versions.getInt(4, 0) == 16);
+    CHECK(versions.getInt(5, 0) == 17);
     CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
     CHECK(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     storage.close();
@@ -456,13 +458,14 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     REQUIRE(storage.init(tempDb.path()));
     REQUIRE(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
-    REQUIRE(versions.rowCount() == 6);
+    REQUIRE(versions.rowCount() == 7);
     CHECK(versions.getInt(0, 0) == 10);
     CHECK(versions.getInt(1, 0) == 12);
     CHECK(versions.getInt(2, 0) == 13);
     CHECK(versions.getInt(3, 0) == 14);
     CHECK(versions.getInt(4, 0) == 15);
     CHECK(versions.getInt(5, 0) == 16);
+    CHECK(versions.getInt(6, 0) == 17);
     const auto kimi = storage.execute("SELECT enabled FROM providers WHERE provider_key = 'kimi';");
     REQUIRE(kimi.rowCount() == 1);
     CHECK(kimi.getBool(0, 0) == hadAnalysisMigration);
@@ -590,7 +593,7 @@ TEST_CASE("StorageService upgrades legacy Claude references without reading the 
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    CHECK(manager.getCurrentVersion() == 16);
+    CHECK(manager.getCurrentVersion() == 17);
     constexpr auto hashedPath = "scope:fnv1a64:1370ad0dcd1472bd";
     const auto activity =
         storage.execute("SELECT id, raw_reference, duration_seconds FROM activity_events ORDER BY id;");
@@ -701,7 +704,7 @@ TEST_CASE("StorageService supports overlapping WAL opens during the Claude upgra
         if (!timeout.success() || timeout.rowCount() != 1 || timeout.getInt(0, 0) != 5000) {
             return std::string("The upgrade did not restore the connection busy timeout");
         }
-        return SchemaManager(connection).getCurrentVersion() == 16 ? std::string{}
+        return SchemaManager(connection).getCurrentVersion() == 17 ? std::string{}
                                                                    : "The schema upgrade did not finish";
     };
 
@@ -862,7 +865,7 @@ TEST_CASE("StorageService repairs duplicate ChatGPT messages when opening a vers
     CHECK(stored.getString(0, 1) == "first-export");
     CHECK(stored.getString(1, 1) == "renamed-copy");
     CHECK(stored.getString(4, 1) == "separate-export");
-    CHECK(SchemaManager(storage).getCurrentVersion() == 16);
+    CHECK(SchemaManager(storage).getCurrentVersion() == 17);
 }
 
 TEST_CASE("StorageService preserves legacy quota rows during the version 15 precision upgrade",
@@ -887,7 +890,7 @@ TEST_CASE("StorageService preserves legacy quota rows during the version 15 prec
     storage.close();
 
     REQUIRE(storage.init(tempDb.path()));
-    CHECK(SchemaManager(storage).getCurrentVersion() == 16);
+    CHECK(SchemaManager(storage).getCurrentVersion() == 17);
     const auto rows = storage.execute(
         "SELECT id, snapshot_time_utc, remaining_value, snapshot_subsecond_ns IS NULL FROM quota_snapshots;");
     REQUIRE(rows.success());
@@ -953,4 +956,54 @@ TEST_CASE("StorageService repairs duplicate Claude daily activity from a version
     REQUIRE(storage.insertActivityEvent(replay, &insertedId));
     CHECK(insertedId == 0);
     CHECK(storage.getActivityEvents(replay.providerId, 81, firstDay, firstDay).size() == events.size());
+}
+
+TEST_CASE("Opening a version 15 database keeps the final activity of each saved Kimi task",
+          "[schema][migration][kimi]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage
+                .execute(R"sql(
+        DROP INDEX IF EXISTS idx_kimi_task_activity_identity;
+        DROP INDEX IF EXISTS idx_activity_events_claude_cache_day;
+        DELETE FROM schema_version WHERE version > 15;
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
+        SELECT 86, id, 'local-observation:kimi_local_runtime', 'Kimi local runtime', 'local_observation',
+               'kimi_local_runtime'
+        FROM providers WHERE provider_key = 'kimi';
+
+        WITH task_snapshots (id, surface, status, end_time, duration, reference) AS (
+            VALUES (10, 'kimi_local_runtime', 'running',   '2026-04-20T10:01:10Z', 10, 'kimi_local_runtime:one/task'),
+                   (11, 'kimi_local_runtime', 'completed', '2026-04-20T10:02:30Z', 90, 'kimi_local_runtime:one/task'),
+                   (12, 'kimi_local_runtime', 'running',   '2026-04-20T10:03:00Z', 120, 'kimi_local_runtime:one/task'),
+                   (13, 'kimi_local_runtime', 'completed', '2026-04-20T10:02:00Z', 60, 'kimi_local_runtime:two/task'),
+                   (14, 'different_surface',  'running',   '2026-04-20T10:01:10Z', 10, 'kimi_local_runtime:one/task'),
+                   (15, 'kimi_local_runtime', 'awaiting_approval', '2026-04-20T10:04:00Z', 180, 'kimi_local_runtime:one/task'),
+                   (16, 'kimi_local_runtime', 'starting', '2026-04-20T10:01:00Z', 0, 'kimi_local_runtime:three/task'),
+                   (17, 'kimi_local_runtime', 'running',  '2026-04-20T10:01:20Z', 20, 'kimi_local_runtime:three/task')
+        )
+        INSERT INTO activity_events
+            (id, provider_id, account_id, provider_surface, activity_kind, surface_key, started_at_utc,
+             ended_at_utc, duration_seconds, raw_reference)
+        SELECT snapshots.id, accounts.provider_id, accounts.id, snapshots.surface, 'session_active', snapshots.status,
+               '2026-04-20T10:01:00Z', snapshots.end_time, snapshots.duration, snapshots.reference
+        FROM task_snapshots snapshots CROSS JOIN accounts WHERE accounts.id = 86;
+    )sql")
+                .success());
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    const auto rows = storage.execute("SELECT id, surface_key, duration_seconds FROM activity_events ORDER BY id;");
+    REQUIRE(rows.success());
+    REQUIRE(rows.rowCount() == 4);
+    CHECK(rows.getInt(0, 0) == 11);
+    CHECK(rows.getString(0, 1) == "completed");
+    CHECK(rows.getInt(0, 2) == 90);
+    CHECK(rows.getInt(1, 0) == 13);
+    CHECK(rows.getInt(2, 0) == 14);
+    CHECK(rows.getInt(3, 0) == 17);
+    CHECK(rows.getString(3, 1) == "running");
+    CHECK(SchemaManager(storage).getCurrentVersion() == 17);
 }

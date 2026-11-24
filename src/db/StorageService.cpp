@@ -862,15 +862,36 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
         return true;
     }
 
-    sqlite3_stmt* stmt = nullptr;
-    static const std::string sql =
-        std::string("INSERT INTO activity_events ("
-                    "provider_id, account_id, plan_id, provider_surface, activity_kind, started_at_utc, ended_at_utc, "
-                    "duration_seconds, source_type, source_run_id, surface_key, window_title_hint, confidence_tier, "
-                    "raw_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(provider_id, account_id, started_at_utc, raw_reference) WHERE ") +
+    constexpr const char* insertSql =
+        "INSERT INTO activity_events ("
+        "provider_id, account_id, plan_id, provider_surface, activity_kind, started_at_utc, ended_at_utc, "
+        "duration_seconds, source_type, source_run_id, surface_key, window_title_hint, confidence_tier, raw_reference"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    static const std::string insertWithClaudeConflictSql =
+        std::string(insertSql) + " ON CONFLICT(provider_id, account_id, started_at_utc, raw_reference) WHERE " +
         claudeDailyActivityPredicate + " DO NOTHING;";
 
+    // A task's runtime status and duration change during its lifetime, but its reference does not.
+    // Preserve terminal states even when a refresh replays an earlier, unfinished snapshot.
+    static const std::string upsertKimiTaskSql = std::string(insertSql) + R"sql(
+            ON CONFLICT(provider_id, account_id, raw_reference)
+            WHERE provider_surface = 'kimi_local_runtime' AND source_type = 'local'
+              AND activity_kind = 'session_active' AND raw_reference IS NOT NULL
+            DO UPDATE SET plan_id = excluded.plan_id, started_at_utc = excluded.started_at_utc,
+                          ended_at_utc = excluded.ended_at_utc, duration_seconds = excluded.duration_seconds,
+                          surface_key = excluded.surface_key, window_title_hint = excluded.window_title_hint
+            WHERE (COALESCE(lower(excluded.surface_key) IN ('completed', 'failed', 'killed', 'lost', 'succeeded', 'success'), 0),
+                   COALESCE(excluded.ended_at_utc, '')) >=
+                  (COALESCE(lower(activity_events.surface_key) IN ('completed', 'failed', 'killed', 'lost', 'succeeded', 'success'), 0),
+                   COALESCE(activity_events.ended_at_utc, ''))
+        )sql";
+
+    const std::string sourceType = event.activity.sourceType.empty() ? "local" : event.activity.sourceType;
+    const bool isKimiTask = event.activity.providerSurface == "kimi_local_runtime" && sourceType == "local" &&
+                            event.activity.activityKind == ActivityKind::SessionActive &&
+                            !event.activity.rawReference.empty();
+    const auto& sql = isKimiTask ? upsertKimiTaskSql : insertWithClaudeConflictSql;
+    sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(pImpl->db, sql.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         pImpl->lastError = "Failed to prepare activity event insert";
@@ -887,7 +908,6 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
 
     const std::string startedAtUtc = toUtcIsoString(event.activity.startedAt);
     const std::string endedAtUtc = toUtcIsoString(event.activity.endedAt);
-    const std::string sourceType = event.activity.sourceType.empty() ? "local" : event.activity.sourceType;
 
     sqlite3_bind_text(stmt, 4, event.activity.providerSurface.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, toString(event.activity.activityKind).c_str(), -1, SQLITE_TRANSIENT);
@@ -925,7 +945,8 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
     sqlite3_mutex* const dbMutex = sqlite3_db_mutex(pImpl->db);
     sqlite3_mutex_enter(dbMutex);
     rc = sqlite3_step(stmt);
-    if (rc == SQLITE_DONE && insertedId && sqlite3_changes(pImpl->db) != 0) {
+    const bool readWrittenId = rc == SQLITE_DONE && insertedId && sqlite3_changes(pImpl->db) != 0;
+    if (readWrittenId && !isKimiTask) {
         *insertedId = sqlite3_last_insert_rowid(pImpl->db);
     }
     sqlite3_mutex_leave(dbMutex);
@@ -936,6 +957,19 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
         return false;
     }
 
+    if (readWrittenId && isKimiTask) {
+        // Read the keyed ID after the upsert so system SQLite builds before 3.35 can save tasks.
+        const auto task =
+            execute("SELECT id FROM activity_events WHERE provider_id = ? AND account_id = ? AND raw_reference = ? "
+                    "AND provider_surface = 'kimi_local_runtime' AND source_type = 'local' AND activity_kind = "
+                    "'session_active';",
+                    {std::to_string(event.providerId), std::to_string(event.accountId), event.activity.rawReference});
+        if (!task.success() || task.rowCount() != 1) {
+            pImpl->lastError = "Failed to read activity event ID";
+            return false;
+        }
+        *insertedId = task.getInt64(0, 0);
+    }
     pImpl->lastError.clear();
     return true;
 #else
