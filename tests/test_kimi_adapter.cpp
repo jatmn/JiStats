@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <ctime>
 #include <cstdlib>
 #include <filesystem>
@@ -146,6 +147,11 @@ public:
     }
 
     ~LocalHttpSequenceServer() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        responseWait_.notify_all();
         if (listenSocket_ != INVALID_SOCKET) {
             closesocket(listenSocket_);
             listenSocket_ = INVALID_SOCKET;
@@ -167,6 +173,11 @@ public:
     std::string failure() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return failure_;
+    }
+
+    bool responseStarted() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return responseStarted_;
     }
 
 private:
@@ -241,16 +252,19 @@ private:
             const std::string requestLine = lineEnd == std::string::npos ? request : request.substr(0, lineEnd);
             const std::string expectedPrefix = exchanges_[index].method + " " + exchanges_[index].path + " ";
             {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::unique_lock<std::mutex> lock(mutex_);
                 ++handledRequestCount_;
                 if (failure_.empty() && requestLine.rfind(expectedPrefix, 0) != 0) {
                     failure_ = "unexpected request line: " + requestLine;
                 }
+                if (exchanges_[index].responseDelay.count() > 0 &&
+                    responseWait_.wait_for(lock, exchanges_[index].responseDelay, [this] { return stopping_; })) {
+                    closesocket(client);
+                    return;
+                }
+                responseStarted_ = true;
             }
 
-            if (exchanges_[index].responseDelay.count() > 0) {
-                std::this_thread::sleep_for(exchanges_[index].responseDelay);
-            }
             std::ostringstream response;
             response << "HTTP/1.1 " << exchanges_[index].statusCode << " "
                      << statusText(exchanges_[index].statusCode) << "\r\n";
@@ -268,7 +282,10 @@ private:
     std::thread thread_;
     std::vector<ExpectedHttpExchange> exchanges_;
     mutable std::mutex mutex_;
+    std::condition_variable responseWait_;
     std::size_t handledRequestCount_ = 0;
+    bool responseStarted_ = false;
+    bool stopping_ = false;
     std::string failure_;
 };
 
@@ -308,6 +325,7 @@ TEST_CASE("WinHTTP requests report the configured receive timeout", "[http][time
 
     CHECK(server.handledRequestCount() == 1);
     CHECK(server.failure().empty());
+    CHECK_FALSE(server.responseStarted());
     CHECK_FALSE(response.success);
     CHECK(response.statusCode == 0);
     CHECK(response.error == "Failed to receive response: request timed out");

@@ -4,7 +4,7 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
-- WinHTTP now applies the configured timeout to name resolution, connection, sending, and receiving for GET and POST. The delayed loopback regression returned HTTP 200 on the old code and now reports a timeout for both methods. Portable CTest and all MinGW targets passed locally. Hosted Windows CI verifies native WinHTTP behavior. [Issue #75](https://github.com/jatmn/JiStats/issues/75)
+- WinHTTP now applies the configured timeout to name resolution, connection, sending, and receiving for GET and POST on the request handle. The delayed loopback regression checks that both methods report a timeout before the server starts its response. Portable CTest and all MinGW targets passed locally. Hosted Windows CI verifies native WinHTTP behavior. [Issue #75](https://github.com/jatmn/JiStats/issues/75)
 
 - The Claude upgrade now shares a single five-second lock-wait budget across SQLite and the outer checkpoint retry loop. The normal connection timeout is restored when the checkpoint finishes. A bundled-SQLite probe held a WAL reader open while two instances attempted the upgrade and reproduced the previous 9.2-second wait. [PR #62 review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672838396)
 
@@ -76,6 +76,7 @@ The observation window runs from 2026-11-23 00:00 UTC through 2026-12-06 23:59 U
 
 | Failing run and test | File | Disposition and evidence |
 |---|---|---|
+| [WinHTTP requests report the configured receive timeout](https://github.com/jatmn/JiStats/actions/runs/45301271477/job/138134701073) | `tests/test_kimi_adapter.cpp` | Caught a native-only regression. GET and POST accepted the delayed response with session-level configuration. The follow-up sets the timeout on each request and checks that the client returns before response headers are sent. Hosted verification pending. |
 | [Dashboard fallback expected a request count](https://github.com/jatmn/JiStats/actions/runs/45086369768/job/137406613438) | `tests/test_app_controller.cpp` | Fixture clock defect. The six-hour rollup could cross midnight. The [clock fix](https://github.com/jatmn/JiStats/commit/e5a15b0) provides a deterministic reporting day and retains the assertion. |
 | [Queued Codex revocation lost its expected baseline](https://github.com/jatmn/JiStats/actions/runs/45107540627/job/137472872375) | `tests/test_app_controller.cpp` | Caught a privacy and concurrency regression on the [consent PR](https://github.com/jatmn/JiStats/pull/31). The [fix](https://github.com/jatmn/JiStats/commit/de18b373) preserves the pending checkbox choice during redraw until its matching save completes. |
 | [Native close did not dismiss all shell windows](https://github.com/jatmn/JiStats/actions/runs/45105323859/job/137466018472) | `tests/test_dashboard_presenter.cpp` | The observed failure is user-visible window behavior. Root cause remains unconfirmed. |

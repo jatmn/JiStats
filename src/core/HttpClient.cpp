@@ -151,11 +151,12 @@ public:
     std::string contentType = "application/json";
     std::vector<std::pair<std::string, std::string>> extraHeaders;
 
-    bool configureTimeouts(HINTERNET session) const {
-        DWORD responseTimeoutMs = static_cast<DWORD>(timeoutMs);
-        return WinHttpSetTimeouts(session, timeoutMs, timeoutMs, timeoutMs, timeoutMs) &&
-               WinHttpSetOption(session, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, &responseTimeoutMs,
-                                sizeof(responseTimeoutMs));
+    bool configureTimeouts(HINTERNET request) const {
+        DWORD receiveTimeoutMs = static_cast<DWORD>(timeoutMs);
+        return WinHttpSetTimeouts(request, timeoutMs, timeoutMs, timeoutMs, timeoutMs) &&
+               WinHttpSetOption(request, WINHTTP_OPTION_RECEIVE_TIMEOUT, &receiveTimeoutMs, sizeof(receiveTimeoutMs)) &&
+               WinHttpSetOption(request, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, &receiveTimeoutMs,
+                                sizeof(receiveTimeoutMs));
     }
 };
 
@@ -233,12 +234,6 @@ HttpResponse HttpClient::get(const std::string& url) {
         return response;
     }
 
-    if (!pImpl->configureTimeouts(session.get())) {
-        response.error = getLastErrorMessage("Failed to configure WinHTTP timeouts");
-        pImpl->lastError = response.error;
-        return response;
-    }
-
     std::wstring hostName(urlComp.lpszHostName, urlComp.dwHostNameLength);
     WinHttpHandle connect(WinHttpConnect(session.get(), hostName.c_str(), urlComp.nPort, 0));
     if (!connect.get()) {
@@ -254,6 +249,12 @@ HttpResponse HttpClient::get(const std::string& url) {
                                              WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
     if (!request.get()) {
         response.error = getLastErrorMessage("Failed to open request");
+        pImpl->lastError = response.error;
+        return response;
+    }
+
+    if (!pImpl->configureTimeouts(request.get())) {
+        response.error = getLastErrorMessage("Failed to configure WinHTTP timeouts");
         pImpl->lastError = response.error;
         return response;
     }
@@ -325,12 +326,6 @@ HttpResponse HttpClient::post(const std::string& url, const std::string& body) {
         return response;
     }
 
-    if (!pImpl->configureTimeouts(session.get())) {
-        response.error = getLastErrorMessage("Failed to configure WinHTTP timeouts");
-        pImpl->lastError = response.error;
-        return response;
-    }
-
     std::wstring hostName(urlComp.lpszHostName, urlComp.dwHostNameLength);
     WinHttpHandle connect(WinHttpConnect(session.get(), hostName.c_str(), urlComp.nPort, 0));
     if (!connect.get()) {
@@ -346,6 +341,12 @@ HttpResponse HttpClient::post(const std::string& url, const std::string& body) {
                                              WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
     if (!request.get()) {
         response.error = getLastErrorMessage("Failed to open request");
+        pImpl->lastError = response.error;
+        return response;
+    }
+
+    if (!pImpl->configureTimeouts(request.get())) {
+        response.error = getLastErrorMessage("Failed to configure WinHTTP timeouts");
         pImpl->lastError = response.error;
         return response;
     }
