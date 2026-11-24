@@ -436,6 +436,7 @@ bool MiniMaxLiveCapture::writeCaptureJson(
     output << "  \"raw_response\": \"" << jsonEscape(result.quota.rawResponse) << "\"\n";
     output << "}\n";
 
+    output.close();
     if (!output.good()) {
         error = "Failed while writing output path: " + outputPath;
         return false;
@@ -515,6 +516,7 @@ bool MiniMaxLiveCapture::writeDiagnosticJson(
     output << "  ]\n";
     output << "}\n";
 
+    output.close();
     if (!output.good()) {
         error = "Failed while writing output path: " + outputPath;
         return false;
