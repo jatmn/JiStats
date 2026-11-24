@@ -2114,7 +2114,9 @@ TEST_CASE("Analysis uses retained raw reset evidence for legacy and unrolled quo
     const auto reopenWithLegacyRollups = [&]() {
         REQUIRE(storage
                     .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
-                             "DELETE FROM schema_version WHERE version = 18;")
+                             "ALTER TABLE credential_profiles DROP COLUMN last_validation_error;"
+                             "ALTER TABLE credential_profiles DROP COLUMN validation_state;"
+                             "DELETE FROM schema_version WHERE version > 17;")
                     .success());
         storage.close();
         REQUIRE(storage.init(tempDb.path()));
