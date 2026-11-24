@@ -48,7 +48,7 @@ Record completed work, the revision and evidence, and any remaining verification
 
 - MiniMax quota selects the shared five-hour language-model row by model and reported window in both subscription profiles. The local Wine regression covers reordered rows, wrong-window rows, and supported exhaustion. Replaying both full synthetic fixtures before and after the change verified the reported 97 of 100 balance and reset window. [Issue #101](https://github.com/jatmn/JiStats/issues/101)
 
-- The Token Plan quota parser also keeps the reset bounds for percentage-only general allowances. A synthetic general/video fixture verifies both orders without turning the percentage into a request count. [PR #148 review](https://github.com/jatmn/JiStats/pull/148#discussion_r4676336775)
+- The Token Plan quota parser also keeps the reset bounds for percentage-only general allowances. A synthetic general/video fixture verifies both orders without turning the percentage into a request count. [PR #148 review](https://github.com/jatmn/JiStats/pull/148#discussion_r4676336775) A second regression covers the count-bearing Token Plan Plus form. It preserves the same reset without interpreting those counts as requests. [PR #148 follow-up](https://github.com/jatmn/JiStats/pull/148#discussion_r4676414492)
 
 - MiniMax subscription credentials validate when the remains response reports status zero. A provider error fails validation even over HTTP 200. The adapter regression exercises a normal success, provider rejection, and missing or malformed status under Wine. Existing tests cover HTTP and network failures. Hosted Windows CI verifies native execution. [Issue #102](https://github.com/jatmn/JiStats/issues/102)
 

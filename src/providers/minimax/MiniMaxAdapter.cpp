@@ -92,14 +92,16 @@ public:
             long long limit = 0;
         };
 
-        const auto readInterval = [this](const JsonValue& row, Interval& interval, std::string& error) {
+        const auto readWindow = [this](const JsonValue& row, Interval& interval, std::string& error) {
             if (!row.isObject()) {
                 error = "Invalid model_remains entry";
                 return false;
             }
             return tryGetRequiredNumber(row, "start_time", interval.startMs, error) &&
-                   tryGetRequiredNumber(row, "end_time", interval.endMs, error) &&
-                   tryGetRequiredNumber(row, "current_interval_usage_count", interval.remaining, error) &&
+                   tryGetRequiredNumber(row, "end_time", interval.endMs, error);
+        };
+        const auto readCounts = [this](const JsonValue& row, Interval& interval, std::string& error) {
+            return tryGetRequiredNumber(row, "current_interval_usage_count", interval.remaining, error) &&
                    tryGetRequiredNumber(row, "current_interval_total_count", interval.limit, error);
         };
 
@@ -107,7 +109,8 @@ public:
         Interval selected;
         if (rows.size() == 1 && !rows.front().getMember("model_name")) {
             // Legacy single-row responses omit the model identity.
-            if (!readInterval(rows.front(), selected, response.error)) {
+            if (!readWindow(rows.front(), selected, response.error) ||
+                !readCounts(rows.front(), selected, response.error)) {
                 return false;
             }
         } else {
@@ -127,23 +130,19 @@ public:
                 }
 
                 Interval interval;
-                if (!readInterval(row, interval, invalidInterval) || interval.startMs <= 0 ||
+                if (!readWindow(row, interval, invalidInterval) || interval.startMs <= 0 ||
                     interval.endMs <= interval.startMs) {
                     continue;
                 }
-                if (countQuota) {
-                    // Match the five-hour label derived from the reported bounds in Analysis.
-                    const auto span = parseTimestamp(interval.endMs) - parseTimestamp(interval.startMs);
-                    if (interval.limit <= 0 || span <= 4 * hourSeconds || span > 5 * hourSeconds) {
-                        continue;
-                    }
-                } else {
-                    // Time-based Token Plans report a percentage and reset without request counts.
-                    const auto* percent = row.getMember("current_interval_remaining_percent");
-                    if (interval.limit != 0 || interval.remaining != 0 || !percent || !percent->isNumber() ||
-                        !(percent->getNumber() >= 0 && percent->getNumber() <= 100)) {
-                        continue;
-                    }
+                const auto span = parseTimestamp(interval.endMs) - parseTimestamp(interval.startMs);
+                if (span <= 0) {
+                    continue;
+                }
+                // Only the shared five-hour row establishes a request balance. Token Plan general
+                // rows establish a reset window even when the meaning of their counts is unknown.
+                if (countQuota && (span <= 4 * hourSeconds || span > 5 * hourSeconds ||
+                                   !readCounts(row, interval, invalidInterval) || interval.limit <= 0)) {
+                    continue;
                 }
 
                 const auto window = std::tie(countQuota, interval.endMs, interval.startMs);

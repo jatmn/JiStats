@@ -461,8 +461,13 @@ TEST_CASE("MiniMax Token Plan retains the general reset window in either row ord
     const auto plan = GENERATE("token_plan", "coding_plan");
     REQUIRE(adapter.storeSubscriptionCredential(makeSubscriptionProfile(plan), "test-key"));
 
-    const std::string general = R"({"model_name":"general","start_time":1735689600000,"end_time":1735696800000,
-        "current_interval_total_count":0,"current_interval_usage_count":0,"current_interval_remaining_percent":94})";
+    const std::string measurement = GENERATE(
+        R"(,"current_interval_total_count":0,"current_interval_usage_count":0,"current_interval_remaining_percent":94)",
+        R"(,"current_interval_total_count":100,"current_interval_usage_count":37,"current_interval_remaining_percent":63)",
+        R"(,"current_interval_total_count":100,"current_interval_usage_count":37)");
+    CAPTURE(measurement);
+    const std::string general =
+        R"({"model_name":"general","start_time":1735689600000,"end_time":1735696800000)" + measurement + "}";
     const std::string video = R"({"model_name":"video","start_time":1735689600000,"end_time":1735776000000,
         "current_interval_total_count":3,"current_interval_usage_count":3,"current_interval_remaining_percent":100})";
     for (const auto& rows : {general + ',' + video, video + ',' + general}) {
@@ -475,6 +480,8 @@ TEST_CASE("MiniMax Token Plan retains the general reset window in either row ord
             CHECK(quota.windowEnd == 1735696800);
             CHECK(quota.windowType == "interval");
             CHECK(quota.limit == 0);
+            CHECK(quota.remaining == 0);
+            CHECK(quota.used == 0);
         } else {
             CHECK_FALSE(quota.success);
         }
