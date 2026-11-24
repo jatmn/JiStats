@@ -60,7 +60,7 @@ struct ReportMetadata {
     bool accountScopeComplete = false;
 
     // Data freshness
-    std::chrono::system_clock::time_point dataFreshnessTimestamp;
+    std::optional<std::chrono::system_clock::time_point> dataFreshnessTimestamp;
     RuntimeState runtimeState = RuntimeState::Unknown;
     bool isStale = false;
     bool isOffline = false;
