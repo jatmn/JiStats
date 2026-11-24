@@ -69,7 +69,7 @@ public:
         return true;
     }
 
-    bool parseQuotaPayload(const std::string& body, QuotaResponse& response) const {
+    bool parseQuotaPayload(const std::string& body, bool tokenPlan, QuotaResponse& response) const {
         response.rawResponse = body;
         response.success = false;
 
@@ -112,31 +112,46 @@ public:
             }
         } else {
             std::optional<Interval> latest;
+            bool selectedCountQuota = false;
             bool conflictingBalance = false;
             std::string invalidInterval;
             constexpr auto hourSeconds = 60 * 60;
             for (const auto& row : rows) {
                 const auto* modelName = row.getMember("model_name");
-                if (!modelName || !modelName->isString() || modelName->getString() != "MiniMax-M*") {
+                if (!modelName || !modelName->isString()) {
+                    continue;
+                }
+                const bool countQuota = modelName->getString() == "MiniMax-M*";
+                if (!countQuota && !(tokenPlan && modelName->getString() == "general")) {
                     continue;
                 }
 
                 Interval interval;
-                if (!readInterval(row, interval, invalidInterval) || interval.limit <= 0 || interval.startMs <= 0 ||
+                if (!readInterval(row, interval, invalidInterval) || interval.startMs <= 0 ||
                     interval.endMs <= interval.startMs) {
                     continue;
                 }
-                // Match the five-hour label derived from the reported bounds in Analysis.
-                const auto span = parseTimestamp(interval.endMs) - parseTimestamp(interval.startMs);
-                if (span <= 4 * hourSeconds || span > 5 * hourSeconds) {
-                    continue;
+                if (countQuota) {
+                    // Match the five-hour label derived from the reported bounds in Analysis.
+                    const auto span = parseTimestamp(interval.endMs) - parseTimestamp(interval.startMs);
+                    if (interval.limit <= 0 || span <= 4 * hourSeconds || span > 5 * hourSeconds) {
+                        continue;
+                    }
+                } else {
+                    // Time-based Token Plans report a percentage and reset without request counts.
+                    const auto* percent = row.getMember("current_interval_remaining_percent");
+                    if (interval.limit != 0 || interval.remaining != 0 || !percent || !percent->isNumber() ||
+                        !(percent->getNumber() >= 0 && percent->getNumber() <= 100)) {
+                        continue;
+                    }
                 }
 
-                const auto window = std::tie(interval.endMs, interval.startMs);
-                if (!latest || window > std::tie(latest->endMs, latest->startMs)) {
+                const auto window = std::tie(countQuota, interval.endMs, interval.startMs);
+                if (!latest || window > std::tie(selectedCountQuota, latest->endMs, latest->startMs)) {
                     latest = interval;
+                    selectedCountQuota = countQuota;
                     conflictingBalance = false;
-                } else if (window == std::tie(latest->endMs, latest->startMs) &&
+                } else if (window == std::tie(selectedCountQuota, latest->endMs, latest->startMs) &&
                            (interval.limit != latest->limit || interval.remaining != latest->remaining)) {
                     conflictingBalance = true;
                 }
@@ -144,11 +159,11 @@ public:
             if (!latest) {
                 response.error = rows.size() == 1 && !invalidInterval.empty()
                                      ? invalidInterval
-                                     : "No supported MiniMax five-hour quota in response";
+                                     : "No supported MiniMax coding quota in response";
                 return false;
             }
             if (conflictingBalance) {
-                response.error = "Conflicting MiniMax five-hour quota balances";
+                response.error = "Conflicting MiniMax coding quota balances";
                 return false;
             }
             selected = *latest;
@@ -461,9 +476,11 @@ public:
             return response;
         }
 
-        parseQuotaPayload(httpResp.body, response);
+        const bool tokenPlan = endpoint == TOKEN_PLAN_ENDPOINT;
+        parseQuotaPayload(httpResp.body, tokenPlan, response);
         const std::string endpointFamily =
-            canonicalEndpointFamily(subscriptionProfile.endpointFamily, subscriptionProfile.planKey);
+            tokenPlan ? "token_plan_remains"
+                      : canonicalEndpointFamily(subscriptionProfile.endpointFamily, subscriptionProfile.planKey);
         if (response.success) {
             response.providerSurface = providerSurfaceForFamily(endpointFamily);
         }
@@ -510,7 +527,8 @@ QuotaResponse MiniMaxAdapter::fetchQuota() {
             return response;
         }
         pImpl->lastResolvedEndpoint = pImpl->resolveQuotaEndpoint();
-        pImpl->parseQuotaPayload(pImpl->mockQuotaResponse, response);
+        pImpl->parseQuotaPayload(pImpl->mockQuotaResponse,
+                                 pImpl->lastResolvedEndpoint == MiniMaxAdapter::Impl::TOKEN_PLAN_ENDPOINT, response);
         if (response.success) {
             response.providerSurface = configuredSurface;
         }

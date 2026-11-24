@@ -455,6 +455,32 @@ TEST_CASE("MiniMax quota selects the shared five-hour allowance independent of r
     } while (std::next_permutation(rows.begin(), rows.end()));
 }
 
+TEST_CASE("MiniMax Token Plan retains the general reset window in either row order", "[minimax][quota_order]") {
+    MiniMaxAdapter adapter;
+    adapter.setCredentialStore(makeFakeCredentialStore());
+    const auto plan = GENERATE("token_plan", "coding_plan");
+    REQUIRE(adapter.storeSubscriptionCredential(makeSubscriptionProfile(plan), "test-key"));
+
+    const std::string general = R"({"model_name":"general","start_time":1735689600000,"end_time":1735696800000,
+        "current_interval_total_count":0,"current_interval_usage_count":0,"current_interval_remaining_percent":94})";
+    const std::string video = R"({"model_name":"video","start_time":1735689600000,"end_time":1735776000000,
+        "current_interval_total_count":3,"current_interval_usage_count":3,"current_interval_remaining_percent":100})";
+    for (const auto& rows : {general + ',' + video, video + ',' + general}) {
+        adapter.setMockQuotaResponse("{\"model_remains\":[" + rows + "]}");
+        const auto quota = adapter.fetchQuota();
+        if (std::string_view(plan) == "token_plan") {
+            REQUIRE(quota.success);
+            CHECK(quota.providerSurface == "minimax_subscription_token_plan");
+            CHECK(quota.windowStart == 1735689600);
+            CHECK(quota.windowEnd == 1735696800);
+            CHECK(quota.windowType == "interval");
+            CHECK(quota.limit == 0);
+        } else {
+            CHECK_FALSE(quota.success);
+        }
+    }
+}
+
 TEST_CASE("MiniMax quota distinguishes an exhausted five-hour allowance from unsupported rows",
           "[minimax][quota_order]") {
     MiniMaxAdapter adapter("test-key");
