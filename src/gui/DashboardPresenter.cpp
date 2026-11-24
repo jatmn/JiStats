@@ -1152,6 +1152,8 @@ public:
     std::condition_variable readyCv;
     HWND window = nullptr;
     HWND preferencesWindow = nullptr;
+    HWND preferencesViewport = nullptr;
+    HWND preferencesPage = nullptr;
     UINT preferencesDpi = 96;
     HFONT preferencesFont = nullptr;
     HWND analysisWindow = nullptr;
@@ -1375,6 +1377,7 @@ public:
     static constexpr int kPreferencesCodexModelAttributionCheckboxId = 1121;
     static constexpr int kPreferencesSaveStatusId = 1122;
     static constexpr int kPreferencesRetryButtonId = 1123;
+    static constexpr int kPreferencesViewportId = 1124;
     static constexpr int kPreferencesScheduledExportCheckboxId = 1108;
     static constexpr int kPreferencesScheduledExportIntervalEditId = 1109;
     static constexpr int kPreferencesCloseButtonId = 1106;
@@ -2314,12 +2317,84 @@ public:
         }
     }
 
-    void layoutPreferencesControls(HWND hwnd) {
-        if (preferencesTab == nullptr) {
+    int preferencesPixels(int value) const {
+        return MulDiv(value, preferencesDpi, 96);
+    }
+
+    void setPreferencesScrollPosition(int position) {
+        SCROLLINFO scroll{sizeof(scroll), SIF_POS};
+        scroll.nPos = position;
+        const int offset = SetScrollInfo(preferencesViewport, SB_VERT, &scroll, TRUE);
+        SetWindowPos(preferencesPage, nullptr, 0, -offset, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    void scrollPreferences(UINT command) {
+        SCROLLINFO info{sizeof(info), SIF_ALL};
+        if (!GetScrollInfo(preferencesViewport, SB_VERT, &info)) {
             return;
         }
 
-        const auto px = [this](int value) { return MulDiv(value, preferencesDpi, 96); };
+        switch (command) {
+            case SB_LINEUP:
+                setPreferencesScrollPosition(info.nPos - preferencesPixels(22));
+                break;
+            case SB_LINEDOWN:
+                setPreferencesScrollPosition(info.nPos + preferencesPixels(22));
+                break;
+            case SB_PAGEUP:
+                setPreferencesScrollPosition(info.nPos - static_cast<int>(info.nPage));
+                break;
+            case SB_PAGEDOWN:
+                setPreferencesScrollPosition(info.nPos + static_cast<int>(info.nPage));
+                break;
+            case SB_THUMBTRACK:
+                setPreferencesScrollPosition(info.nTrackPos);
+                break;
+            case SB_TOP:
+                setPreferencesScrollPosition(0);
+                break;
+            case SB_BOTTOM:
+                setPreferencesScrollPosition(info.nMax);
+                break;
+        }
+    }
+
+    void scrollPreferencesWheel(int delta) {
+        SCROLLINFO info{sizeof(info), SIF_PAGE | SIF_POS};
+        if (!GetScrollInfo(preferencesViewport, SB_VERT, &info)) {
+            return;
+        }
+        UINT lines = 3;
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+        const int distance =
+            lines == WHEEL_PAGESCROLL ? static_cast<int>(info.nPage) : preferencesPixels(22) * static_cast<int>(lines);
+        setPreferencesScrollPosition(info.nPos - MulDiv(distance, delta, WHEEL_DELTA));
+    }
+
+    void revealFocusedPreference() {
+        const HWND control = GetFocus();
+        if (!IsChild(preferencesPage, control)) {
+            return;
+        }
+        RECT bounds{};
+        RECT viewport{};
+        GetWindowRect(control, &bounds);
+        GetClientRect(preferencesViewport, &viewport);
+        MapWindowPoints(HWND_DESKTOP, preferencesViewport, reinterpret_cast<POINT*>(&bounds), 2);
+        const int position = GetScrollPos(preferencesViewport, SB_VERT);
+        if (bounds.top < 0) {
+            setPreferencesScrollPosition(position + bounds.top);
+        } else if (bounds.bottom > viewport.bottom) {
+            setPreferencesScrollPosition(position + bounds.bottom - viewport.bottom);
+        }
+    }
+
+    void layoutPreferencesControls(HWND hwnd) {
+        if (preferencesTab == nullptr || preferencesPage == nullptr) {
+            return;
+        }
+
+        const auto px = [this](int value) { return preferencesPixels(value); };
         RECT clientRect{};
         GetClientRect(hwnd, &clientRect);
         const int margin = px(12);
@@ -2327,20 +2402,34 @@ public:
         const int buttonHeight = px(28);
         const int closeBottomMargin = px(16);
         const int tabTop = margin;
-        const int contentWidth = clientRect.right - (margin * 2);
-        const int tabHeight = clientRect.bottom - tabTop - buttonHeight - closeBottomMargin - (margin * 2);
+        const int contentWidth = std::max(0L, clientRect.right - margin * 2);
+        const int tabHeight = std::max(0L, clientRect.bottom - tabTop - buttonHeight - closeBottomMargin - margin * 2);
         MoveWindow(preferencesTab, margin, tabTop, contentWidth, tabHeight, TRUE);
 
         RECT tabRect{};
         GetClientRect(preferencesTab, &tabRect);
         TabCtrl_AdjustRect(preferencesTab, FALSE, &tabRect);
-        const int pageLeft = margin + tabRect.left;
-        const int pageTop = tabTop + tabRect.top;
-        const int pageWidth = tabRect.right - tabRect.left;
-        const int pageHeight = tabRect.bottom - tabRect.top;
+        const int viewportWidth = std::max(0L, tabRect.right - tabRect.left);
+        const int viewportHeight = std::max(0L, tabRect.bottom - tabRect.top);
+        SetWindowPos(preferencesViewport, nullptr, margin + tabRect.left, tabTop + tabRect.top, viewportWidth,
+                     viewportHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 
-        const int innerLeft = pageLeft + px(14);
-        const int innerTop = pageTop + px(18);
+        // Bottom of each tab's controls plus padding, in logical pixels.
+        constexpr std::array minimumPageHeights{388, 174, 358, 280, 168, 280, 184};
+        const int pageHeight = std::max(viewportHeight, px(minimumPageHeights[selectedPreferencesTab]));
+        SCROLLINFO scroll{sizeof(scroll), SIF_RANGE | SIF_PAGE};
+        scroll.nMax = pageHeight - 1;
+        scroll.nPage = static_cast<UINT>(viewportHeight);
+        const int offset = SetScrollInfo(preferencesViewport, SB_VERT, &scroll, TRUE);
+        RECT viewportRect{};
+        GetClientRect(preferencesViewport, &viewportRect);
+        const int pageWidth = viewportRect.right;
+        MoveWindow(preferencesPage, 0, -offset, pageWidth, pageHeight, TRUE);
+
+        const int pageLeft = 0;
+        const int pageTop = 0;
+        const int innerLeft = px(14);
+        const int innerTop = px(18);
         const int innerWidth = pageWidth - px(28);
         const int rowHeight = px(22);
 
@@ -2519,6 +2608,7 @@ public:
         }
 
         syncPreferencesTabVisibility();
+        revealFocusedPreference();
     }
 
     bool createMainMenuBar(HWND hwnd) {
@@ -4261,19 +4351,45 @@ public:
         }
 
         const HFONT oldFont = std::exchange(preferencesFont, newFont);
-        for (HWND control = GetWindow(hwnd, GW_CHILD); control != nullptr; control = GetWindow(control, GW_HWNDNEXT)) {
-            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(preferencesFont), FALSE);
+        for (HWND parent : {hwnd, preferencesPage}) {
+            for (HWND control = GetWindow(parent, GW_CHILD); control != nullptr;
+                 control = GetWindow(control, GW_HWNDNEXT)) {
+                SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(preferencesFont), FALSE);
+            }
         }
         if (oldFont != nullptr) {
             DeleteObject(oldFont);
         }
     }
 
-    void createPreferencesControls(HWND hwnd) {
+    static LRESULT CALLBACK preferencesPanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR,
+                                                 DWORD_PTR context) {
+        auto& self = *reinterpret_cast<Impl*>(context);
+        if (const auto result = self.desktopTheme.panelMessage(hwnd, msg, wParam, lParam)) {
+            return *result;
+        }
+        switch (msg) {
+            case WM_COMMAND:
+            case WM_NOTIFY:
+                return SendMessageW(GetParent(hwnd), msg, wParam, lParam);
+            case WM_VSCROLL:
+                self.scrollPreferences(LOWORD(wParam));
+                return 0;
+            case WM_MOUSEWHEEL:
+                self.scrollPreferencesWheel(GET_WHEEL_DELTA_WPARAM(wParam));
+                return 0;
+        }
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+
+    bool createPreferencesControls(HWND hwnd) {
         preferencesTab = CreateWindowExW(
             0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS | TCS_OWNERDRAWFIXED, 12, 12,
             520, 470, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesTabId)), GetModuleHandleW(nullptr),
             nullptr);
+        if (preferencesTab == nullptr) {
+            return false;
+        }
         desktopTheme.styleTab(preferencesTab);
         const auto tabLabels = preferencesTabLabels();
         for (int index = 0; index < static_cast<int>(tabLabels.size()); ++index) {
@@ -4285,6 +4401,30 @@ public:
         }
         TabCtrl_SetCurSel(preferencesTab, selectedPreferencesTab);
 
+        preferencesViewport = CreateWindowExW(
+            WS_EX_CONTROLPARENT, L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesViewportId)),
+            GetModuleHandleW(nullptr), nullptr);
+        if (preferencesViewport == nullptr) {
+            return false;
+        }
+        preferencesPage = CreateWindowExW(WS_EX_CONTROLPARENT, L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+                                          0, 0, 0, 0, preferencesViewport, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (preferencesPage == nullptr ||
+            !SetWindowSubclass(preferencesViewport, preferencesPanelProc, 0, reinterpret_cast<DWORD_PTR>(this)) ||
+            !SetWindowSubclass(preferencesPage, preferencesPanelProc, 0, reinterpret_cast<DWORD_PTR>(this))) {
+            return false;
+        }
+
+        createPreferencesPageControls(preferencesPage);
+        createPreferencesFooterControls(hwnd);
+        applyPreferencesFont(hwnd);
+        layoutPreferencesControls(hwnd);
+        syncPreferencesWindowState();
+        return true;
+    }
+
+    void createPreferencesPageControls(HWND hwnd) {
         preferencesGeneralGroup = CreateWindowExW(
             0, L"BUTTON", L"General Settings",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 10, 10, 484, 170,
@@ -4858,7 +4998,9 @@ public:
             nullptr,
             GetModuleHandleW(nullptr),
             nullptr);
+    }
 
+    void createPreferencesFooterControls(HWND hwnd) {
         preferencesSaveStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
                                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesSaveStatusId)),
                                                 GetModuleHandleW(nullptr), nullptr);
@@ -4887,10 +5029,6 @@ public:
                 SetWindowLongPtrW(control, GWL_STYLE, GetWindowLongPtrW(control, GWL_STYLE) | WS_TABSTOP);
             }
         }
-
-        applyPreferencesFont(hwnd);
-        layoutPreferencesControls(hwnd);
-        syncPreferencesWindowState();
     }
 
     void openPreferencesWindow() {
@@ -5169,8 +5307,7 @@ public:
                 if (preferencesDpi == 0) {
                     preferencesDpi = 96;
                 }
-                createPreferencesControls(hwnd);
-                return 0;
+                return createPreferencesControls(hwnd) ? 0 : -1;
             case WM_DRAWITEM: {
                 const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
                 if (draw != nullptr && draw->hwndItem == preferencesTab) {
@@ -5179,6 +5316,9 @@ public:
                 }
                 return DefWindowProcW(hwnd, msg, wParam, lParam);
             }
+            case WM_MOUSEWHEEL:
+                scrollPreferencesWheel(GET_WHEEL_DELTA_WPARAM(wParam));
+                return 0;
             case WM_DPICHANGED: {
                 if (lParam == 0 || HIWORD(wParam) == 0) {
                     return 0;
@@ -5187,7 +5327,10 @@ public:
                 applyPreferencesFont(hwnd);
                 RECT bounds = *reinterpret_cast<const RECT*>(lParam);
                 RECT workArea{};
-                if (tryGetMonitorWorkArea(bounds, workArea)) {
+                const bool foundWorkArea = tryGetMonitorWorkArea(bounds, workArea);
+                bounds.right = bounds.left + preferencesPixels(kPreferencesWidth);
+                bounds.bottom = bounds.top + preferencesPixels(kPreferencesHeight);
+                if (foundWorkArea) {
                     clampRectToWorkArea(bounds, workArea);
                 }
                 SetWindowPos(hwnd, nullptr, bounds.left, bounds.top, bounds.right - bounds.left,
@@ -5334,6 +5477,7 @@ public:
                     header->code == TCN_SELCHANGE) {
                     commitScheduledExportSettingsFromControls();
                     selectedPreferencesTab = std::max(0, TabCtrl_GetCurSel(preferencesTab));
+                    setPreferencesScrollPosition(0);
                     layoutPreferencesControls(hwnd);
                     syncPreferencesWindowState();
                     return 0;
@@ -5372,6 +5516,8 @@ public:
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 preferencesWindow = nullptr;
+                preferencesViewport = nullptr;
+                preferencesPage = nullptr;
                 preferencesTab = nullptr;
                 preferencesGeneralGroup = nullptr;
                 preferencesInfo = nullptr;
@@ -7131,9 +7277,19 @@ public:
                     continue;
                 }
             } else if (preferencesWindow != nullptr &&
-                       (msg.hwnd == preferencesWindow || IsChild(preferencesWindow, msg.hwnd)) &&
-                       IsDialogMessageW(preferencesWindow, &msg)) {
-                continue;
+                       (msg.hwnd == preferencesWindow || IsChild(preferencesWindow, msg.hwnd))) {
+                if (msg.hwnd == preferencesTab && msg.message == WM_KEYDOWN &&
+                    (msg.wParam == VK_PRIOR || msg.wParam == VK_NEXT)) {
+                    scrollPreferences(msg.wParam == VK_PRIOR ? SB_PAGEUP : SB_PAGEDOWN);
+                    continue;
+                }
+                const bool tabNavigation = msg.message == WM_KEYDOWN && msg.wParam == VK_TAB;
+                if (IsDialogMessageW(preferencesWindow, &msg)) {
+                    if (tabNavigation) {
+                        revealFocusedPreference();
+                    }
+                    continue;
+                }
             } else if (analysisWindow != nullptr && (msg.hwnd == analysisWindow || IsChild(analysisWindow, msg.hwnd)) &&
                        IsDialogMessageW(analysisWindow, &msg)) {
                 continue;
