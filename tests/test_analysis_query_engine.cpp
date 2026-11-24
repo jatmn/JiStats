@@ -1073,6 +1073,46 @@ TEST_CASE("AnalysisQueryEngine keeps Codex model usage buckets granular for rece
     CHECK(analysis.openAiCodexModelUsage.series.front().totalTokens == 1000);
 }
 
+TEST_CASE("AnalysisQueryEngine keeps an account selectable after only daily rollups remain",
+          "[analysis][query_engine][analysis_query_engine]") {
+    requireSqlite();
+
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    const std::time_t day = makeUtcTime(2026, 4, 18);
+    for (int hour = 8; hour < 13; ++hour) {
+        seedUsageEvent(storage, "openai", "OpenAI", day + hour * 3600, 100, 0, "gpt-4.1");
+    }
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    REQUIRE(storage.rebuildUsageRollups(UsageRollupResolution::Daily, providerId, accountId, day, day));
+    REQUIRE(storage.execute("DELETE FROM usage_events WHERE account_id = ?;", {std::to_string(accountId)}).success());
+    seedUsageEvent(storage, "minimax", "MiniMax", day + 3600, 777, 1, "minimax-m1");
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("minimax", "MiniMax", "minimax.runtime_status")};
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = "openai.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = day;
+    preferences.analysisCustomRangeEndUtc = day;
+
+    AnalysisQueryEngine engine(storage);
+    const auto analysis = engine.buildViewModel(dashboard, preferences, makeUtcTime(2026, 4, 20));
+    CHECK(analysis.scope.selectedProviderId == "openai");
+    CHECK(analysis.scope.selectedAccountId == "openai.runtime_status");
+    CHECK(optionPairs(analysis.availableAccounts) ==
+          std::vector<std::string>{"|All Accounts", "openai.runtime_status|OpenAI / OpenAI Runtime"});
+    const auto daily = findDailySummary(analysis.dailySummaries, "2026-04-18");
+    REQUIRE(daily.has_value());
+    CHECK(daily->activityCount == 5);
+    REQUIRE(analysis.accountBreakdown.size() == 1);
+    CHECK(analysis.accountBreakdown.front().label == "OpenAI Runtime");
+    CHECK(analysis.accountBreakdown.front().activityCount == 5);
+}
+
 TEST_CASE("AnalysisQueryEngine clears stale scope selections without inventing scoped account rows", "[analysis][query_engine][analysis_query_engine]") {
     StorageService storage;
     AnalysisQueryEngine engine(storage);
