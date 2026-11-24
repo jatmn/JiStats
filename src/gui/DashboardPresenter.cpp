@@ -4917,10 +4917,6 @@ public:
         DashboardShellDialog dialog = DashboardShellDialog::Help;
     };
 
-    struct MiniMaxActionMessageParams {
-        DashboardMiniMaxCredentialRequest request;
-    };
-
     static DashboardShellDialog shellDialogFromWindow(HWND hwnd) {
         const auto value = reinterpret_cast<INT_PTR>(GetPropW(hwnd, kShellDialogKindProperty));
         return static_cast<DashboardShellDialog>(value);
@@ -5287,27 +5283,27 @@ public:
             commitScheduledExportSettingsFromControls();
             DestroyWindow(hwnd);
             return 0;
-        case WM_JISTATS_TEST_MINIMAX_ACTION:
-            {
-                std::unique_ptr<MiniMaxActionMessageParams> params(
-                    reinterpret_cast<MiniMaxActionMessageParams*>(lParam));
-                if (!params) {
-                    return 0;
-                }
-
-                if (miniMaxPlanCombo != nullptr) {
-                    const int selection = params->request.planKey == "token_plan" ? 1 : 0;
-                    SendMessageW(miniMaxPlanCombo, CB_SETCURSEL, selection, 0);
-                }
-                if (miniMaxAccountEdit != nullptr) {
-                    setWindowText(miniMaxAccountEdit, utf8ToWide(params->request.accountDisplayName));
-                }
-                if (miniMaxSecretEdit != nullptr) {
-                    setWindowText(miniMaxSecretEdit, utf8ToWide(params->request.secret));
-                }
-                queueMiniMaxCredentialAction(params->request);
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        case WM_JISTATS_TEST_MINIMAX_ACTION: {
+            const auto* request = reinterpret_cast<const DashboardMiniMaxCredentialRequest*>(lParam);
+            if (request == nullptr) {
+                return FALSE;
             }
-            return 0;
+
+            if (miniMaxPlanCombo != nullptr) {
+                const int selection = request->planKey == "token_plan" ? 1 : 0;
+                SendMessageW(miniMaxPlanCombo, CB_SETCURSEL, selection, 0);
+            }
+            if (miniMaxAccountEdit != nullptr) {
+                setWindowText(miniMaxAccountEdit, utf8ToWide(request->accountDisplayName));
+            }
+            if (miniMaxSecretEdit != nullptr) {
+                setWindowText(miniMaxSecretEdit, utf8ToWide(request->secret));
+            }
+            queueMiniMaxCredentialAction(*request);
+            return TRUE;
+        }
+#endif
         case WM_DESTROY:
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -7440,34 +7436,13 @@ bool DashboardPresenter::submitMiniMaxCredentialActionForTesting(
     const DashboardMiniMaxCredentialRequest& request) {
 #ifdef _WIN32
     HWND hwnd = nullptr;
-    HWND planCombo = nullptr;
-    HWND accountEdit = nullptr;
-    HWND secretEdit = nullptr;
     {
         std::lock_guard<std::mutex> lock(pImpl->mutex);
         hwnd = pImpl->preferencesWindow;
-        planCombo = pImpl->miniMaxPlanCombo;
-        accountEdit = pImpl->miniMaxAccountEdit;
-        secretEdit = pImpl->miniMaxSecretEdit;
     }
-
-    if (hwnd == nullptr) {
-        return false;
-    }
-
-    if (planCombo != nullptr) {
-        const int selection = request.planKey == "token_plan" ? 1 : 0;
-        SendMessageW(planCombo, CB_SETCURSEL, selection, 0);
-    }
-    if (accountEdit != nullptr) {
-        setWindowText(accountEdit, utf8ToWide(request.accountDisplayName));
-    }
-    if (secretEdit != nullptr) {
-        setWindowText(secretEdit, utf8ToWide(request.secret));
-    }
-
-    pImpl->queueMiniMaxCredentialAction(request);
-    return true;
+    // Synchronous dispatch keeps the borrowed request alive and the worker handle UI-owned.
+    return hwnd != nullptr &&
+           SendMessageW(hwnd, Impl::WM_JISTATS_TEST_MINIMAX_ACTION, 0, reinterpret_cast<LPARAM>(&request)) != FALSE;
 #else
     static_cast<void>(request);
     return false;
