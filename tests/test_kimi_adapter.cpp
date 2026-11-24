@@ -3,6 +3,7 @@
 #include <catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <ctime>
 #include <cstdlib>
 #include <filesystem>
@@ -18,6 +19,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include "core/HttpClient.hpp"
 #include "db/SchemaManager.hpp"
 #include "db/StorageService.hpp"
 #include "providers/kimi/KimiAdapter.hpp"
@@ -106,6 +108,7 @@ struct ExpectedHttpExchange {
     int statusCode = 200;
     std::string body;
     std::string contentType = "application/json";
+    std::chrono::milliseconds responseDelay{0};
 };
 
 class LocalHttpSequenceServer {
@@ -245,6 +248,9 @@ private:
                 }
             }
 
+            if (exchanges_[index].responseDelay.count() > 0) {
+                std::this_thread::sleep_for(exchanges_[index].responseDelay);
+            }
             std::ostringstream response;
             response << "HTTP/1.1 " << exchanges_[index].statusCode << " "
                      << statusText(exchanges_[index].statusCode) << "\r\n";
@@ -289,6 +295,24 @@ std::string sampleKimiUsagesResponse() {
 }
 
 } // namespace
+
+TEST_CASE("WinHTTP requests report the configured receive timeout", "[http][timeout]") {
+    const std::string method = GENERATE("GET", "POST");
+    ScopedWinsock winsock;
+    LocalHttpSequenceServer server({{method, "/slow", 200, "{}", "application/json", std::chrono::milliseconds(750)}});
+    HttpClient client;
+    client.setTimeout(100);
+
+    const auto url = server.baseUrl() + "/slow";
+    const HttpResponse response = method == "GET" ? client.get(url) : client.post(url, "{}");
+
+    CHECK(server.handledRequestCount() == 1);
+    CHECK(server.failure().empty());
+    CHECK_FALSE(response.success);
+    CHECK(response.statusCode == 0);
+    CHECK(response.error == "Failed to receive response: request timed out");
+    CHECK(client.getLastError() == response.error);
+}
 
 TEST_CASE("Kimi parser reads bounded synthetic fixture snapshots", "[kimi][fixtures]") {
     const KimiLocalParseResult result = KimiAdapter::parseLocalState(kFixtureRoot);

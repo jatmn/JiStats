@@ -4,6 +4,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 ## Handoffs
 
+- WinHTTP now applies the configured timeout to name resolution, connection, sending, and receiving for GET and POST. The delayed loopback regression returned HTTP 200 on the old code and now reports a timeout for both methods. Portable CTest and all MinGW targets passed locally. Hosted Windows CI verifies native WinHTTP behavior. [Issue #75](https://github.com/jatmn/JiStats/issues/75)
+
 - The Claude upgrade now shares a single five-second lock-wait budget across SQLite and the outer checkpoint retry loop. The normal connection timeout is restored when the checkpoint finishes. A bundled-SQLite probe held a WAL reader open while two instances attempted the upgrade and reproduced the previous 9.2-second wait. [PR #62 review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672838396)
 
 - The version 13 Claude upgrade now retries a busy WAL checkpoint when two instances open an older database together. A bundled-SQLite regression holds the checkpoint lock until the second opener reaches it. Both instances now open with persistence, and the upgrade still records version 13 only after a checkpoint succeeds. [PR #62 review](https://github.com/jatmn/JiStats/pull/62#discussion_r4672761310)
