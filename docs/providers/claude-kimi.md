@@ -8,6 +8,8 @@ Both integrations are opt-in. Use [the local redaction contract](local-redaction
 
 Existing Claude backfill rows retain their original timestamps. Replaying a day previously saved at local midnight can add a UTC-dated row for the same totals. Reports that include both timestamps can count those tokens twice.
 
+Claude local activity freshness uses the start of the UTC day recorded in `lastComputedDate`. If the cache has no valid source date, the counter is displayed with unknown freshness and omitted from timestamped snapshot history. Startup prefers source-dated snapshots and shows older cached counts with unknown freshness when only polling-time snapshots exist. JiStats records the successful check independently.
+
 Replay the [Claude fixtures](../fixtures/claude/) with [the Claude parser tests](../../tests/test_claude_local_parser.cpp). Keep transcripts, tool payloads, and credentials outside the parser and fixture scope.
 
 An activity day counts once per cache and account across cache revisions.

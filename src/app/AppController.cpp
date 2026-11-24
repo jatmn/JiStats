@@ -102,6 +102,7 @@ constexpr std::time_t kRetryDelayEscalatedSeconds = 15 * 60;
 constexpr std::time_t kOfflineNoticeCooldownSeconds = 60 * 60;
 constexpr const char* kRuntimeRefreshSyncKind = "runtime_refresh";
 constexpr const char* kRuntimeBackfillSyncKind = "runtime_backfill";
+constexpr const char* kClaudeSourceDaySnapshotBasis = "Claude local activity dated by the cache source day";
 constexpr auto kOpenAICodexRefreshPollInterval = std::chrono::seconds(2);
 constexpr auto kMiniMaxRefreshPollInterval = std::chrono::seconds(45);
 constexpr auto kTaskbarRefreshPollInterval = std::chrono::minutes(5);
@@ -2573,13 +2574,15 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
 
     QueryResult result = storage.execute(
         "WITH latest_provider_snapshots AS ("
-        "    SELECT provider_id, MAX(snapshot_time_utc) AS latest_snapshot_time "
+        "    SELECT provider_id, MAX(snapshot_time_utc) AS latest_snapshot_time, "
+        "           MAX(snapshot_time_utc) FILTER (WHERE basis_summary = ?1) AS latest_claude_source_time "
         "    FROM quota_snapshots "
         "    GROUP BY provider_id"
         ") "
         "SELECT p.provider_key, "
         "       p.display_name, "
-        "       qs.snapshot_time_utc, "
+        "       CASE WHEN p.provider_key = 'claude_code' THEN COALESCE(latest.latest_claude_source_time, '') "
+        "            ELSE qs.snapshot_time_utc END, "
         "       COALESCE(pl.plan_key, ''), "
         "       COALESCE(pl.display_name, ''), "
         "       COALESCE(pl.quota_window, ''), "
@@ -2593,13 +2596,22 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         "FROM latest_provider_snapshots latest "
         "JOIN quota_snapshots qs "
         "  ON qs.provider_id = latest.provider_id "
-        " AND qs.snapshot_time_utc = latest.latest_snapshot_time "
+        " AND qs.snapshot_time_utc = COALESCE(latest.latest_claude_source_time, latest.latest_snapshot_time) "
         "JOIN providers p ON p.id = qs.provider_id "
         "LEFT JOIN plans pl ON pl.id = qs.plan_id "
         "WHERE p.enabled = 1 "
+        "AND (latest.latest_claude_source_time IS NULL OR qs.basis_summary = ?1) "
+        "AND (p.provider_key <> 'claude_code' OR qs.id = ("
+        "    SELECT MAX(other.id) FROM quota_snapshots other "
+        "    WHERE other.provider_id = qs.provider_id AND other.account_id = qs.account_id "
+        "    AND other.plan_id IS qs.plan_id AND other.quota_dimension = qs.quota_dimension "
+        "    AND other.snapshot_time_utc = qs.snapshot_time_utc "
+        "    AND (latest.latest_claude_source_time IS NULL OR other.basis_summary = ?1)"
+        ")) "
         "ORDER BY p.display_name ASC, COALESCE(pl.display_name, '') ASC, "
         "         CASE WHEN codex_sample THEN qs.snapshot_subsecond_ns END DESC, "
-        "         CASE WHEN codex_sample THEN -qs.id ELSE qs.id END;");
+        "         CASE WHEN codex_sample THEN -qs.id ELSE qs.id END;",
+        {kClaudeSourceDaySnapshotBasis});
     if (!result.success() || result.rowCount() == 0) {
         return std::nullopt;
     }
@@ -2678,6 +2690,9 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
             QuotaResponse snapshotQuota;
             snapshotQuota.success = true;
             snapshotQuota.snapshotTime = snapshotTime;
+            if (providerKey == "claude_code") {
+                snapshotQuota.providerSurface = ClaudeCodeLocalParser::kProviderSurface;
+            }
             provider.state = determineProviderState(snapshotQuota, now);
             viewModel.providers.push_back(std::move(provider));
             providerIt = std::prev(viewModel.providers.end());
@@ -2807,8 +2822,9 @@ void applyRuntimeStateToViewModel(DashboardViewModel& viewModel) {
     viewModel.isOnline = runtimeStateIsOnline(viewModel.runtimeState);
 }
 
-bool isUndatedCodexQuota(const QuotaResponse& quota) {
-    return quota.providerSurface == "openai_subscription_codex_local" && quota.snapshotTime <= 0;
+bool isUndatedLocalSnapshot(const QuotaResponse& quota) {
+    return quota.snapshotTime <= 0 && (quota.providerSurface == "openai_subscription_codex_local" ||
+                                       quota.providerSurface == ClaudeCodeLocalParser::kProviderSurface);
 }
 
 ProviderState determineProviderState(const QuotaResponse& quota, std::time_t now) {
@@ -2819,7 +2835,7 @@ ProviderState determineProviderState(const QuotaResponse& quota, std::time_t now
         return ProviderState::Offline;
     }
 
-    if (isUndatedCodexQuota(quota)) {
+    if (isUndatedLocalSnapshot(quota)) {
         return ProviderState::Unknown;
     }
 
@@ -3341,14 +3357,15 @@ std::optional<int> ensureQuotaSnapshotPlanId(
     return static_cast<int>(insert.lastInsertRowId());
 }
 
-enum class QuotaSnapshotKind { Count, Percentage, CodexPercentage };
+enum class QuotaSnapshotKind { Count, Percentage, CodexPercentage, ClaudeLocalActivity };
 
 bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accountId, std::optional<int> planId,
                              std::time_t snapshotTime, std::time_t windowStart, std::time_t windowEnd, long long used,
                              long long limit, long long remaining, const std::string& confidenceTier,
                              const std::string& basisSummary, QuotaSnapshotKind kind,
                              const std::optional<int>& snapshotSubsecondNs) {
-    const bool percentageReading = kind != QuotaSnapshotKind::Count;
+    const bool percentageReading = kind == QuotaSnapshotKind::Percentage || kind == QuotaSnapshotKind::CodexPercentage;
+    const bool claudeReading = kind == QuotaSnapshotKind::ClaudeLocalActivity;
     if (percentageReading && !planId.has_value()) {
         return false;
     }
@@ -3371,7 +3388,7 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
         "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled, "
         "snapshot_subsecond_ns";
     sql += codexReading ? ", id) " : ") ";
-    sql += percentageReading ? "SELECT ?, ?, " : "VALUES (?, ?, ";
+    sql += percentageReading || claudeReading ? "SELECT ?, ?, " : "VALUES (?, ?, ";
     sql += planId.has_value() ? "?" : "NULL";
     sql += ", ?, ?, ?, ?, ";
     sql += limit > 0 ? "?" : "NULL";
@@ -3404,6 +3421,12 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
                ") replay ON TRUE WHERE TRUE "
                "ON CONFLICT(id) DO UPDATE SET snapshot_subsecond_ns = excluded.snapshot_subsecond_ns "
                "WHERE quota_snapshots.snapshot_subsecond_ns IS NULL AND excluded.snapshot_subsecond_ns IS NOT NULL;";
+    } else if (claudeReading) {
+        // The source day is shared by every read. Save a changed counter, including a return to a prior value.
+        sql += " WHERE (SELECT used_value FROM quota_snapshots WHERE provider_id = ? AND account_id = ? "
+               "AND plan_id IS CAST(NULLIF(?, '') AS INTEGER) AND snapshot_time_utc = ? "
+               "AND quota_dimension = 'requests' AND basis_summary = ? "
+               "ORDER BY id DESC LIMIT 1) IS NOT CAST(? AS INTEGER);";
     } else if (percentageReading) {
         sql += " WHERE NOT EXISTS (SELECT 1 FROM quota_snapshots WHERE provider_id = ? AND account_id = ? "
                "AND plan_id = ? AND snapshot_time_utc = ?);";
@@ -3442,11 +3465,15 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
         params.push_back(std::to_string(std::max<long long>(0, limit)));
         params.push_back(remainingText);
     }
-    if (percentageReading) {
+    if (percentageReading || claudeReading) {
         params.push_back(std::to_string(providerId));
         params.push_back(std::to_string(accountId));
-        params.push_back(std::to_string(*planId));
+        params.push_back(planId ? std::to_string(*planId) : std::string{});
         params.push_back(snapshotTimeUtc);
+    }
+    if (claudeReading) {
+        params.push_back(basisSummary);
+        params.push_back(usedText);
     }
     if (codexReading) {
         // Older Codex rows used the capture time when the rollout omitted its window.
@@ -4476,8 +4503,8 @@ public:
         for (size_t index = 0; index < pairCount; ++index) {
             const auto& provider = providers[index];
             const auto& quota = quotaResponses[index];
-            // Quota history requires an observation time. Undated Codex values can still be displayed.
-            if (!provider || !shouldExposeQuotaSnapshot(quota) || isUndatedCodexQuota(quota)) {
+            // Undated local values can be displayed without adding a history row.
+            if (!provider || !shouldExposeQuotaSnapshot(quota) || isUndatedLocalSnapshot(quota)) {
                 continue;
             }
 
@@ -4498,6 +4525,9 @@ public:
                 snapshotKind = QuotaSnapshotKind::CodexPercentage;
             } else if (providerKey == "grok" || providerKey == "cursor") {
                 snapshotKind = QuotaSnapshotKind::Percentage;
+            } else if (providerKey == "claude_code" &&
+                       quota.providerSurface == ClaudeCodeLocalParser::kProviderSurface) {
+                snapshotKind = QuotaSnapshotKind::ClaudeLocalActivity;
             }
             const std::time_t snapshotTime = quota.snapshotTime > 0 ? quota.snapshotTime : now;
 
@@ -4511,8 +4541,11 @@ public:
                 displayName,
                 primaryValues.limit);
             const std::string primaryBasisSummary =
-                "Runtime quota snapshot captured from " +
-                reportSourceLabelForSurface(quota.providerSurface.empty() ? providerKey : quota.providerSurface);
+                snapshotKind == QuotaSnapshotKind::ClaudeLocalActivity
+                    ? kClaudeSourceDaySnapshotBasis
+                    : "Runtime quota snapshot captured from " +
+                          reportSourceLabelForSurface(quota.providerSurface.empty() ? providerKey
+                                                                                    : quota.providerSurface);
             persistQuotaSnapshotRow(storageService, *providerId, *accountId, primaryPlanId, snapshotTime,
                                     quota.windowStart, quota.windowEnd, primaryValues.used, primaryValues.limit,
                                     primaryValues.remaining, confidenceTier, primaryBasisSummary, snapshotKind,
@@ -6509,9 +6542,12 @@ public:
                     (provider.state == ProviderState::Stale ? "stale" : "online");
                 connectivity.failureCategory.clear();
                 connectivity.nextRetryAt = 0;
-                staged.fetchedRecovery =
-                    (provider.state == ProviderState::Live || provider.state == ProviderState::Stale) &&
-                    refresh.fetchedProviderKeys.count(provider.providerKey) != 0;
+                const bool usableUndatedClaude =
+                    provider.state == ProviderState::Unknown && provider.providerKey == "claude_code" &&
+                    provider.quotaSource == ClaudeCodeLocalParser::kProviderSurface && !provider.quotas.empty();
+                staged.fetchedRecovery = (provider.state == ProviderState::Live ||
+                                          provider.state == ProviderState::Stale || usableUndatedClaude) &&
+                                         refresh.fetchedProviderKeys.count(provider.providerKey) != 0;
 
                 syncState.lastSuccessAt = now;
                 syncState.lastFailureCategory.clear();
