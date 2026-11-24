@@ -1633,6 +1633,71 @@ TEST_CASE("AnalysisQueryEngine builds reset-aware quota trend series from scoped
     CHECK(quotaSeries.points[2].resetPoint == true);
 }
 
+TEST_CASE("Quota rollups preserve the lowest percentage across changing limits", "[analysis][quota][low_water]") {
+    requireSqlite();
+
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    const auto plan =
+        storage.execute("INSERT INTO plans (account_id, plan_key, plan_type, display_name, quota_window, limit_value) "
+                        "VALUES (?, 'variable-limit', 'subscription', 'Variable Limit', 'daily', 100);",
+                        {std::to_string(accountId)});
+    REQUIRE(plan.success());
+
+    auto insert = [&](const char* capturedAt, const char* used, const char* limit, const char* remaining) {
+        REQUIRE(storage
+                    .execute("INSERT INTO quota_snapshots (provider_id, account_id, plan_id, snapshot_time_utc, "
+                             "window_start_utc, window_end_utc, used_value, limit_value, confidence_tier, "
+                             "quota_dimension, remaining_value) "
+                             "VALUES (?, ?, ?, ?, '2026-04-01T00:00:00Z', '2026-04-02T00:00:00Z', ?, "
+                             "NULLIF(?, ''), 'high', 'requests', NULLIF(?, ''));",
+                             {std::to_string(providerId), std::to_string(accountId),
+                              std::to_string(plan.lastInsertRowId()), capturedAt, used, limit, remaining})
+                    .success());
+    };
+
+    const bool includeUnquantifiedReading = GENERATE(false, true);
+    CAPTURE(includeUnquantifiedReading);
+    insert("2026-04-01T08:00:00Z", "80", "100", "20");
+    insert("2026-04-01T09:00:00Z", "900", "1000", "");
+    if (includeUnquantifiedReading) {
+        insert("2026-04-01T10:00:00Z", "0", "", "1");
+    }
+    insert("2026-04-01T11:00:00Z", "50", "100", "50");
+
+    const auto day = makeUtcTime(2026, 4, 1);
+    const auto now = makeUtcTime(2026, 4, 20, 12);
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "openai";
+    preferences.analysisSelectedAccountId = "openai.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = day;
+    preferences.analysisCustomRangeEndUtc = now;
+    AnalysisQueryEngine engine(storage);
+
+    const auto raw = engine.buildViewModel({}, preferences, now);
+    REQUIRE(raw.quotaTrendSeries.size() == 1);
+    CHECK(raw.quotaTrendSeries.front().lowWaterRemainingPercentage == Catch::Approx(10));
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, day, day));
+
+    const auto saved = storage.getQuotaSnapshotRollups(providerId, accountId, day, day);
+    REQUIRE(saved.size() == 1);
+    CHECK(saved.front().lowWaterRemainingValue == 100);
+    CHECK(saved.front().lowWaterLimitValue == 1000);
+
+    const auto rebuilt = engine.buildViewModel({}, preferences, now);
+    REQUIRE(rebuilt.quotaTrendSeries.size() == 1);
+    const auto& series = rebuilt.quotaTrendSeries.front();
+    REQUIRE(series.points.size() == 1);
+    CHECK(series.points.front().dailyRollup);
+    CHECK(series.latestRemainingPercentage == Catch::Approx(50));
+    CHECK(series.lowWaterRemainingPercentage == Catch::Approx(10));
+}
+
 TEST_CASE("AnalysisQueryEngine prefers daily quota rollups for long-range quota history", "[analysis][query_engine][analysis_query_engine]") {
     requireSqlite();
 

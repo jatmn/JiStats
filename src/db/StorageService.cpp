@@ -2523,11 +2523,15 @@ bool StorageService::rebuildQuotaSnapshotRollups(
         }
 
         const auto remainingValue = normalizedQuotaRemainingValue(snapshot);
-        if (remainingValue.has_value() &&
-            (!aggregate.lowWaterRemainingValue.has_value() ||
-             *remainingValue < *aggregate.lowWaterRemainingValue)) {
-            aggregate.lowWaterRemainingValue = remainingValue;
-            aggregate.lowWaterLimitValue = snapshot.limitValue;
+        if (remainingValue && snapshot.limitValue && *snapshot.limitValue > 0) {
+            const auto limit = *snapshot.limitValue;
+            const auto boundedRemaining = std::min(*remainingValue, limit);
+            const double fraction = static_cast<double>(boundedRemaining) / limit;
+            if (!aggregate.lowWaterRemainingValue ||
+                fraction < static_cast<double>(*aggregate.lowWaterRemainingValue) / *aggregate.lowWaterLimitValue) {
+                aggregate.lowWaterRemainingValue = boundedRemaining;
+                aggregate.lowWaterLimitValue = limit;
+            }
         }
 
         if (snapshot.snapshotTime >= aggregate.latestSnapshotTime) {
