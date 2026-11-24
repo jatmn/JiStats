@@ -846,7 +846,11 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
         "INSERT INTO activity_events ("
         "provider_id, account_id, plan_id, provider_surface, activity_kind, started_at_utc, ended_at_utc, "
         "duration_seconds, source_type, source_run_id, surface_key, window_title_hint, confidence_tier, raw_reference"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(provider_id, account_id, started_at_utc, raw_reference) "
+        "WHERE provider_surface = 'claude_code_local_stats' AND activity_kind = 'session_active' "
+        "AND source_type = 'local' AND surface_key = 'stats-cache' AND raw_reference GLOB 'scope:fnv1a64:?*' "
+        "DO NOTHING;";
 
     int rc = sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -898,7 +902,14 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
         sqlite3_bind_null(stmt, 14);
     }
 
+    // Keep the conflict result and insert ID tied to this step on the shared connection.
+    sqlite3_mutex* const dbMutex = sqlite3_db_mutex(pImpl->db);
+    sqlite3_mutex_enter(dbMutex);
     rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE && insertedId && sqlite3_changes(pImpl->db) != 0) {
+        *insertedId = sqlite3_last_insert_rowid(pImpl->db);
+    }
+    sqlite3_mutex_leave(dbMutex);
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE) {
@@ -907,9 +918,6 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
     }
 
     pImpl->lastError.clear();
-    if (insertedId) {
-        *insertedId = sqlite3_last_insert_rowid(pImpl->db);
-    }
     return true;
 #else
     pImpl->lastError = SQLITE_UNAVAILABLE_ERROR;

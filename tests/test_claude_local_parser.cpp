@@ -353,7 +353,8 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
     backfill.rawReference = source.path();
     REQUIRE(storage.insertUsageEvents({backfill}));
     REQUIRE(storage
-                .execute("DELETE FROM schema_version WHERE version >= 13;"
+                .execute("DROP INDEX idx_activity_events_claude_cache_day;"
+                         "DELETE FROM schema_version WHERE version >= 13;"
                          "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
                 .success());
 
@@ -362,7 +363,10 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
         std::ofstream updated(source.path());
         updated << R"json({
             "lastComputedDate": "2025-01-03",
-            "dailyActivity": [{"date": "2025-01-02", "messageCount": 3}],
+            "dailyActivity": [
+                {"date": "2025-01-02", "messageCount": 3},
+                {"date": "2025-01-03", "messageCount": 4}
+            ],
             "dailyModelTokens": [{"date": "2025-01-02", "tokensByModel": {"fixture-model": 42}}]
         })json";
         REQUIRE(updated.good());
@@ -392,16 +396,20 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
 
     storage.close();
     REQUIRE(storage.init(tempDb.path()));
-    const auto activityRows = storage.execute("SELECT raw_reference FROM activity_events;");
+    const auto activityRows =
+        storage.execute("SELECT id, raw_reference, started_at_utc FROM activity_events ORDER BY started_at_utc;");
     REQUIRE(activityRows.success());
-    const size_t expectedRows = advanceCache ? 2 : 1;
-    REQUIRE(activityRows.rowCount() == expectedRows);
+    REQUIRE(activityRows.rowCount() == (advanceCache ? 2 : 1));
     for (size_t row = 0; row < activityRows.rowCount(); ++row) {
-        CHECK(activityRows.getString(row, 0) == reference);
+        CHECK(activityRows.getString(row, 1) == reference);
+    }
+    CHECK(activityRows.getInt64(0, 0) == binding.getInt64(0, 3));
+    if (advanceCache) {
+        CHECK(activityRows.getString(0, 2) != activityRows.getString(1, 2));
     }
     const auto usageRows =
         storage.getUsageEvents(backfill.providerId, backfill.accountId, backfill.eventTime - 1, backfill.eventTime + 1);
-    REQUIRE(usageRows.size() == expectedRows);
+    REQUIRE(usageRows.size() == (advanceCache ? 2 : 1));
     for (const auto& row : usageRows) {
         CHECK(row.rawReference == reference);
         CHECK(row.totalTokens == 42);

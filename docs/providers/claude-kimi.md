@@ -8,6 +8,8 @@ Both integrations are opt-in. Use [the local redaction contract](local-redaction
 
 Replay the [Claude fixtures](../fixtures/claude/) with [the Claude parser tests](../../tests/test_claude_local_parser.cpp). Keep transcripts, tool payloads, and credentials outside the parser and fixture scope.
 
+An activity day counts once per cache and account across cache revisions.
+
 ## Kimi Code
 
 [KimiAdapter](../../src/providers/kimi/KimiAdapter.cpp) reads selected configuration and runtime metadata under `~/.kimi`. An existing root can indicate the client is installed before session activity is available. The local path reports activity from approved session, task, and notification metadata. Those records carry no token usage.
