@@ -21,6 +21,8 @@
 
 #include <winsock2.h>
 #include <windows.h>
+#include <aclapi.h>
+#include <sddl.h>
 #include <ws2tcpip.h>
 
 #include "core/HttpClient.hpp"
@@ -60,6 +62,30 @@ public:
 private:
     TempTestDirectory directory_{"jistats_kimi_fixture"};
 };
+
+void setFixtureDacl(const std::filesystem::path& path, SECURITY_INFORMATION attributes, const wchar_t* sddl) {
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    REQUIRE(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, nullptr));
+    const std::unique_ptr<void, decltype(&LocalFree)> security(descriptor, LocalFree);
+    REQUIRE(SetFileSecurityW(path.c_str(), attributes | DACL_SECURITY_INFORMATION, descriptor));
+}
+
+std::vector<unsigned char> credentialDacl(const std::filesystem::path& path, bool requireUnprotected = false) {
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    REQUIRE(GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl,
+                                  nullptr, &descriptor) == ERROR_SUCCESS);
+    const std::unique_ptr<void, decltype(&LocalFree)> security(descriptor, LocalFree);
+    REQUIRE(dacl != nullptr);
+    if (requireUnprotected) {
+        SECURITY_DESCRIPTOR_CONTROL control = 0;
+        DWORD revision = 0;
+        REQUIRE(GetSecurityDescriptorControl(descriptor, &control, &revision));
+        REQUIRE((control & SE_DACL_PROTECTED) == 0);
+    }
+    const auto* bytes = reinterpret_cast<const unsigned char*>(dacl);
+    return {bytes, bytes + dacl->AclSize};
+}
 
 class ScopedEnvironmentVariable {
 public:
@@ -884,8 +910,10 @@ default_model = "kimi-code/kimi-for-coding"
 }
 
 TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting quota", "[kimi]") {
-    const bool blockReplacement = GENERATE(false, true);
-    CAPTURE(blockReplacement);
+    enum class Rotation { Normal, Locked, NarrowDacl, DeleteDenied };
+    const Rotation rotation =
+        GENERATE(Rotation::Normal, Rotation::Locked, Rotation::NarrowDacl, Rotation::DeleteDenied);
+    CAPTURE(static_cast<int>(rotation));
     ScopedWinsock winsock;
     LocalHttpSequenceServer server({
         {"POST", "/api/oauth/token", 200, R"json({
@@ -915,8 +943,34 @@ TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting qu
   "expires_at": 1.0
 })json";
     const auto credentialsPath = fixture.makeFile("credentials/kimi-code.json", originalCredentials);
+    const auto directory = credentialsPath.parent_path();
+    const auto restoreDacl = [&directory](void* descriptor) {
+        SetFileSecurityW(directory.c_str(), DACL_SECURITY_INFORMATION, descriptor);
+        LocalFree(descriptor);
+    };
+    std::unique_ptr<void, decltype(restoreDacl)> originalDirectoryDacl(nullptr, restoreDacl);
+    if (rotation == Rotation::DeleteDenied || rotation == Rotation::NarrowDacl) {
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        REQUIRE(GetNamedSecurityInfoW(directory.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr,
+                                      nullptr, nullptr, &descriptor) == ERROR_SUCCESS);
+        originalDirectoryDacl.reset(descriptor);
+    }
+
+    std::vector<unsigned char> originalDacl;
+    if (rotation == Rotation::NarrowDacl) {
+        setFixtureDacl(credentialsPath, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:(A;;FA;;;OW)");
+        originalDacl = credentialDacl(credentialsPath, true);
+        // SetFileSecurityW changes inheritance for new files without rewriting the existing credential DACL.
+        setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;FA;;;OW)(A;OIIO;FR;;;WD)");
+        REQUIRE(credentialDacl(credentialsPath, true) == originalDacl);
+    } else if (rotation == Rotation::DeleteDenied) {
+        // The owner can write files, but cannot delete an existing file by reopening it by path.
+        setFixtureDacl(credentialsPath, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;0x1e01ff;;;OW)");
+        setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;0x1e01bf;;;OW)");
+    }
+
     std::unique_ptr<void, decltype(&CloseHandle)> lockedFile(nullptr, CloseHandle);
-    if (blockReplacement) {
+    if (rotation == Rotation::Locked) {
         const HANDLE file = CreateFileW(credentialsPath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         REQUIRE(file != INVALID_HANDLE_VALUE);
@@ -927,12 +981,11 @@ TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting qu
     const QuotaResponse quota = adapter.fetchQuota();
 
     REQUIRE(server.failure().empty());
-    const auto directory = credentialsPath.parent_path();
     CHECK(std::distance(std::filesystem::directory_iterator(directory), std::filesystem::directory_iterator()) == 1);
     std::ifstream input(credentialsPath, std::ios::binary);
     REQUIRE(input.is_open());
     const std::string savedCredentials(std::istreambuf_iterator<char>(input), {});
-    if (blockReplacement) {
+    if (rotation == Rotation::Locked || rotation == Rotation::DeleteDenied) {
         CHECK(server.handledRequestCount() == 1);
         CHECK_FALSE(quota.success);
         CHECK(quota.error == "Failed to persist refreshed Kimi OAuth credentials");
@@ -948,6 +1001,9 @@ TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting qu
 
     CHECK(savedCredentials.find("fresh-access-token") != std::string::npos);
     CHECK(savedCredentials.find("fresh-refresh-token") != std::string::npos);
+    if (rotation == Rotation::NarrowDacl) {
+        CHECK(credentialDacl(credentialsPath) == originalDacl);
+    }
 }
 
 TEST_CASE("Kimi adapter refreshes OAuth credentials after a 401 usages response and retries quota", "[kimi]") {

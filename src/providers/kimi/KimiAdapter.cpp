@@ -9,8 +9,10 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -21,6 +23,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <aclapi.h>
 #else
 #include <unistd.h>
 #endif
@@ -453,18 +456,38 @@ bool replaceCredentialFile(const std::filesystem::path& path, const std::string&
         return false;
     }
 
-    // Use the original file's DACL when creating the staged credentials.
-    DWORD descriptorSize = 0;
-    GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, nullptr, 0, &descriptorSize);
-    if (descriptorSize == 0) {
+    const DWORD originalAttributes = GetFileAttributesW(path.c_str());
+    if (originalAttributes == INVALID_FILE_ATTRIBUTES) {
         return false;
     }
-    std::vector<unsigned char> descriptor(descriptorSize);
-    if (!GetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, descriptor.data(), descriptorSize,
-                          &descriptorSize)) {
+    const bool encrypted = (originalAttributes & FILE_ATTRIBUTE_ENCRYPTED) != 0;
+
+    PSID owner = nullptr;
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR original = nullptr;
+    const DWORD securityResult =
+        GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                              &owner, nullptr, &dacl, nullptr, &original);
+    const std::unique_ptr<void, decltype(&LocalFree)> originalSecurity(original, LocalFree);
+    SECURITY_DESCRIPTOR protectedSecurity{};
+    // Preserve the original owner and effective DACL without merging the directory's inheritable entries.
+    if (securityResult != ERROR_SUCCESS || !owner || !dacl ||
+        !InitializeSecurityDescriptor(&protectedSecurity, SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorOwner(&protectedSecurity, owner, FALSE) ||
+        !SetSecurityDescriptorDacl(&protectedSecurity, TRUE, dacl, FALSE) ||
+        !SetSecurityDescriptorControl(&protectedSecurity, SE_DACL_PROTECTED, SE_DACL_PROTECTED)) {
         return false;
     }
-    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), descriptor.data(), FALSE};
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), &protectedSecurity, FALSE};
+
+    FILE_RENAME_INFO rename{};
+    rename.ReplaceIfExists = TRUE;
+    rename.FileNameLength = static_cast<DWORD>(path.native().size() * sizeof(wchar_t));
+    constexpr auto nameOffset = offsetof(FILE_RENAME_INFO, FileName);
+    const auto nameSize = rename.FileNameLength + sizeof(wchar_t);
+    std::vector<unsigned char> renameRequest(nameOffset + nameSize);
+    std::memcpy(renameRequest.data(), &rename, nameOffset);
+    std::memcpy(renameRequest.data() + nameOffset, path.c_str(), nameSize);
 
     static std::atomic<unsigned long> sequence{0};
     std::filesystem::path staged;
@@ -472,7 +495,8 @@ bool replaceCredentialFile(const std::filesystem::path& path, const std::string&
     do {
         staged = path;
         staged += L".tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(++sequence);
-        file = CreateFileW(staged.c_str(), GENERIC_WRITE, 0, &attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        file = CreateFileW(staged.c_str(), GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE, 0, &attributes, CREATE_NEW,
+                           encrypted ? FILE_ATTRIBUTE_ENCRYPTED : FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) {
             return false;
         }
@@ -480,13 +504,19 @@ bool replaceCredentialFile(const std::filesystem::path& path, const std::string&
 
     DWORD written = 0;
     const DWORD size = static_cast<DWORD>(contents.size());
-    const bool flushed =
-        WriteFile(file, contents.data(), size, &written, nullptr) && written == size && FlushFileBuffers(file);
-    const bool closed = CloseHandle(file) != FALSE;
-    if (flushed && closed && MoveFileExW(staged.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        return true;
+    BY_HANDLE_FILE_INFORMATION stagedInfo{};
+    const bool encryptionPreserved = !encrypted || (GetFileInformationByHandle(file, &stagedInfo) &&
+                                                    (stagedInfo.dwFileAttributes & FILE_ATTRIBUTE_ENCRYPTED) != 0);
+    const bool saved = encryptionPreserved && WriteFile(file, contents.data(), size, &written, nullptr) &&
+                       written == size && FlushFileBuffers(file) &&
+                       SetFileInformationByHandle(file, FileRenameInfo, renameRequest.data(),
+                                                  static_cast<DWORD>(renameRequest.size()));
+    if (!saved) {
+        FILE_DISPOSITION_INFO removeStaged{TRUE};
+        SetFileInformationByHandle(file, FileDispositionInfo, &removeStaged, sizeof(removeStaged));
     }
-    DeleteFileW(staged.c_str());
+    CloseHandle(file);
+    return saved;
 #else
     std::string staged = path.string() + ".tmp-XXXXXX";
     const int descriptor = mkstemp(staged.data());
@@ -506,8 +536,8 @@ bool replaceCredentialFile(const std::filesystem::path& path, const std::string&
         close(descriptor);
     }
     unlink(staged.c_str());
-#endif
     return false;
+#endif
 }
 
 bool saveOAuthCredentials(const std::filesystem::path& rootPath, const KimiOAuthCredentials& credentials) {
