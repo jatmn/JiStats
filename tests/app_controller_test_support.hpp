@@ -91,8 +91,9 @@ inline std::optional<int> loadProviderId(StorageService& storage, const std::str
 }
 
 inline std::string makeCodexRolloutPayload(double usedPercent, std::time_t eventTime, std::time_t resetsAt) {
-    return "{\"timestamp\":\"" + toUtcIso(eventTime) +
-           "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"rate_limits\":"
+    const std::string timestamp = eventTime > 0 ? "\"timestamp\":\"" + toUtcIso(eventTime) + "\"," : "";
+    return "{" + timestamp +
+           "\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"rate_limits\":"
            "{\"limit_id\":\"codex\",\"primary\":{\"used_percent\":" +
            std::to_string(usedPercent) + ",\"window_minutes\":300,\"resets_at\":" + std::to_string(resetsAt) +
            "},\"secondary\":null,\"plan_type\":\"prolite\"}}}\n";

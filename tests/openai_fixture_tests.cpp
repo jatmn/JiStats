@@ -345,7 +345,7 @@ TEST_CASE("OpenAI Codex rate-limit fixture parsing extracts primary bucket metad
     REQUIRE(snapshot.success);
     REQUIRE(snapshot.error.empty());
     REQUIRE(snapshot.sourceType == "codex_local_fixture");
-    REQUIRE(snapshot.snapshotTime > 0);
+    REQUIRE(snapshot.snapshotTime == 0);
     REQUIRE(snapshot.primary.present);
     REQUIRE(snapshot.primary.bucketKey == "primary");
     REQUIRE(snapshot.primary.usedPercent == 25.0);

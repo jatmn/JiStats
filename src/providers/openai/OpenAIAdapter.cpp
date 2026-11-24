@@ -402,7 +402,7 @@ bool tryParseCodexRateLimitSnapshot(const JsonValue& rateLimitsObject, const std
     }
 
     snapshot.success = true;
-    snapshot.snapshotTime = eventTime > 0 ? eventTime : std::time(nullptr);
+    snapshot.snapshotTime = eventTime;
     snapshot.eventTime = eventTime;
     snapshot.sourcePath = sourcePath;
     snapshot.sourceType = sourceType;
