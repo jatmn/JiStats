@@ -6,36 +6,6 @@
 
 namespace JiStats {
 
-namespace {
-
-std::time_t cacheSnapshotTime(const ClaudeCodeLocalParseResult& result) {
-    const auto& date = result.lastComputedDate;
-    if (date.size() != 10) {
-        return 0;
-    }
-
-    const auto snapshotTime = parseRuntimeTimestamp(date + "T00:00:00Z");
-    if (snapshotTime <= 0 || snapshotTime > result.parsedAt) {
-        return 0;
-    }
-
-    std::tm utcDate{};
-#ifdef _WIN32
-    if (gmtime_s(&utcDate, &snapshotTime) != 0) {
-#else
-    if (gmtime_r(&snapshotTime, &utcDate) == nullptr) {
-#endif
-        return 0;
-    }
-
-    // Reject calendar dates that the timestamp parser normalized into a different day.
-    char canonicalDate[11]{};
-    std::strftime(canonicalDate, sizeof(canonicalDate), "%Y-%m-%d", &utcDate);
-    return date == canonicalDate ? snapshotTime : 0;
-}
-
-} // namespace
-
 struct ClaudeCodeAdapter::Impl {
 public:
     bool enabled = true;
@@ -95,6 +65,36 @@ UsageResponse ClaudeCodeAdapter::fetchUsage(std::time_t from, std::time_t to) {
 
     return response;
 }
+
+namespace {
+
+std::time_t cacheSnapshotTime(const ClaudeCodeLocalParseResult& result) {
+    const auto& date = result.lastComputedDate;
+    if (date.size() != 10) {
+        return 0;
+    }
+
+    const auto snapshotTime = parseRuntimeTimestamp(date + "T00:00:00Z");
+    if (snapshotTime <= 0 || snapshotTime > result.parsedAt) {
+        return 0;
+    }
+
+    std::tm utcDate{};
+#ifdef _WIN32
+    if (gmtime_s(&utcDate, &snapshotTime) != 0) {
+#else
+    if (gmtime_r(&snapshotTime, &utcDate) == nullptr) {
+#endif
+        return 0;
+    }
+
+    // Reject calendar dates that the timestamp parser normalized into a different day.
+    char canonicalDate[11]{};
+    std::strftime(canonicalDate, sizeof(canonicalDate), "%Y-%m-%d", &utcDate);
+    return date == canonicalDate ? snapshotTime : 0;
+}
+
+} // namespace
 
 QuotaResponse ClaudeCodeAdapter::fetchQuota() {
     QuotaResponse response;

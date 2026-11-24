@@ -178,9 +178,17 @@ TEST_CASE("AppController provider path gives Claude local quotas a readable plan
     const std::time_t now = std::time(nullptr);
     const bool hasSourceDate = GENERATE(false, true);
     const std::time_t sourceDate = hasSourceDate ? now - 86400 : 0;
+    const std::time_t legacyPollTime = now - 300;
+    std::promise<void> releaseFirstQuota;
+    if (hasSourceDate) {
+        seedPersistedQuotaSnapshot(dbPath.path(), "claude_code", "claude_code.runtime_status",
+                                   "Claude Code Runtime Status", "claude_code_local_stats:local_aggregate",
+                                   "Local Activity", "local_aggregate", legacyPollTime, 41, 0, 0, "Unknown");
+    }
     auto claudeProvider = std::make_shared<ControlledQuotaProviderAdapter>(
         "claude_code", "Claude Code",
-        makeQuotaResponse(sourceDate, 31415, 0, "local_aggregate", "claude_code_local_stats"));
+        makeQuotaResponse(sourceDate, 31415, 0, "local_aggregate", "claude_code_local_stats"),
+        hasSourceDate ? releaseFirstQuota.get_future().share() : std::shared_future<void>{});
     auto providerManager = std::make_shared<ProviderManager>();
     providerManager->addProvider(claudeProvider);
 
@@ -188,7 +196,20 @@ TEST_CASE("AppController provider path gives Claude local quotas a readable plan
     controller.setHeadlessForTesting(true);
     controller.setDatabasePathForTesting(dbPath.path());
     controller.setProviderManagerForTesting(providerManager);
-    REQUIRE(controller.init());
+    const bool started = controller.init();
+    const auto startup = controller.getDashboardViewModelForTesting();
+    if (hasSourceDate) {
+        releaseFirstQuota.set_value();
+    }
+    REQUIRE(started);
+    if (hasSourceDate) {
+        REQUIRE(startup.providers.size() == 1);
+        CHECK(startup.providers.front().state == ProviderState::Unknown);
+        CHECK(startup.providers.front().lastSyncTime.empty());
+        REQUIRE(startup.providers.front().quotas.size() == 1);
+        CHECK(startup.providers.front().quotas.front().used == 41);
+        controller.refreshRuntimeForTesting();
+    }
 
     const DashboardViewModel viewModel = controller.getDashboardViewModelForTesting();
     REQUIRE(viewModel.providers.size() == 1);
@@ -219,14 +240,16 @@ TEST_CASE("AppController provider path gives Claude local quotas a readable plan
     REQUIRE(storage.init(dbPath.path()));
     const auto snapshots = storage.execute("SELECT snapshot_time_utc, used_value FROM quota_snapshots ORDER BY id");
     REQUIRE(snapshots.success());
-    REQUIRE(snapshots.rowCount() == (hasSourceDate ? 2 : 0));
+    REQUIRE(snapshots.rowCount() == (hasSourceDate ? 3 : 0));
     if (!hasSourceDate) {
         return;
     }
-    CHECK(parseRuntimeTimestamp(snapshots.getString(0, 0)) == sourceDate);
+    CHECK(parseRuntimeTimestamp(snapshots.getString(0, 0)) == legacyPollTime);
     CHECK(parseRuntimeTimestamp(snapshots.getString(1, 0)) == sourceDate);
-    CHECK(snapshots.getInt64(0, 1) == 31415);
-    CHECK(snapshots.getInt64(1, 1) == 42);
+    CHECK(parseRuntimeTimestamp(snapshots.getString(2, 0)) == sourceDate);
+    CHECK(snapshots.getInt64(0, 1) == 41);
+    CHECK(snapshots.getInt64(1, 1) == 31415);
+    CHECK(snapshots.getInt64(2, 1) == 42);
     storage.close();
 
     std::promise<void> releaseQuota;
@@ -247,6 +270,8 @@ TEST_CASE("AppController provider path gives Claude local quotas a readable plan
 
     REQUIRE(initialized);
     REQUIRE(hydrated.providers.size() == 1);
+    CHECK(hydrated.providers.front().state == ProviderState::Stale);
+    CHECK(parseRuntimeTimestamp(hydrated.providers.front().lastSyncTime) == sourceDate);
     REQUIRE(hydrated.providers.front().quotas.size() == 1);
     CHECK(hydrated.providers.front().quotas.front().used == 42);
 }
