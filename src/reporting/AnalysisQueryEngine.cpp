@@ -337,7 +337,8 @@ void applyQuotaRollupResetEvidence(const std::vector<PersistedQuotaSnapshotRollu
         std::vector<const PersistedQuotaSnapshotRollup*> rollups;
         std::vector<const PersistedQuotaSnapshot*> snapshots;
         std::vector<AnalysisQuotaTrendPoint*> rawPoints;
-        int resets = 0;
+        std::time_t latestDisplayedRollup = 0;
+        bool rolledReset = false;
     };
     std::map<std::pair<std::time_t, std::string>, DayEvidence> days;
     for (const auto& rollup : rollups) {
@@ -357,8 +358,11 @@ void applyQuotaRollupResetEvidence(const std::vector<PersistedQuotaSnapshotRollu
 
     for (auto& [key, series] : seriesByKey) {
         for (auto& point : series.points) {
-            if (!point.dailyRollup) {
-                days[{utcDayStart(point.snapshotTime), key}].rawPoints.push_back(&point);
+            auto& day = days[{utcDayStart(point.snapshotTime), key}];
+            if (point.dailyRollup) {
+                day.latestDisplayedRollup = std::max(day.latestDisplayedRollup, point.snapshotTime);
+            } else {
+                day.rawPoints.push_back(&point);
             }
         }
     }
@@ -370,28 +374,27 @@ void applyQuotaRollupResetEvidence(const std::vector<PersistedQuotaSnapshotRollu
         const auto eligible = [](const PersistedQuotaSnapshot* snapshot) {
             return snapshot->limitValue && *snapshot->limitValue > 0;
         };
+        const auto firstAfter = [&](std::time_t time) {
+            return std::upper_bound(
+                evidence.snapshots.begin(), evidence.snapshots.end(), time,
+                [](std::time_t cutoff, const auto* snapshot) { return cutoff < snapshot->snapshotTime; });
+        };
+        auto firstNew = evidence.snapshots.begin();
         const bool hasCompleteRaw = std::all_of(evidence.rollups.begin(), evidence.rollups.end(), [&](const auto* row) {
-            return (!row->observedBillingWindows || !evidence.rawPoints.empty()) &&
-                   static_cast<long long>(evidence.snapshots.size()) >= row->sampleCount;
+            const auto end = firstAfter(row->latestSnapshotTime);
+            return end - evidence.snapshots.begin() >= row->sampleCount &&
+                   std::any_of(evidence.snapshots.begin(), end, eligible);
         });
-        if (hasCompleteRaw && std::any_of(evidence.snapshots.begin(), evidence.snapshots.end(), eligible)) {
-            auto rawPoint = evidence.rawPoints.begin();
-            for (const auto* snapshot : evidence.snapshots) {
-                if (eligible(snapshot)) {
-                    const bool reset = snapshot->observeBillingWindow(previous);
-                    evidence.resets += reset;
-                    if (rawPoint != evidence.rawPoints.end()) {
-                        (*rawPoint++)->resetPoint = reset;
-                    }
-                }
-            }
-        } else {
+        int resets = 0;
+        if (!hasCompleteRaw) {
+            // Append only unsummarized readings after replaying the saved windows in source order.
             for (const auto* rollup : evidence.rollups) {
+                firstNew = std::max(firstNew, firstAfter(rollup->latestSnapshotTime));
                 if (!rollup->observedBillingWindows) {
                     // Incomplete retained history cannot replace a legacy day's count or establish continuity.
                     previous.reset();
                     if (rollup->latestLimitValue && *rollup->latestLimitValue > 0) {
-                        evidence.resets += rollup->resetCount;
+                        resets += rollup->resetCount;
                     }
                     continue;
                 }
@@ -400,17 +403,38 @@ void applyQuotaRollupResetEvidence(const std::vector<PersistedQuotaSnapshotRollu
                 for (const auto& bounds : *rollup->observedBillingWindows) {
                     observation.windowStart = bounds.first;
                     observation.windowEnd = bounds.second;
-                    evidence.resets += observation.observeBillingWindow(previous);
+                    resets += observation.observeBillingWindow(previous);
                 }
             }
         }
-        seriesByKey.at(key).resetCount += evidence.resets;
+        evidence.rolledReset = resets > 0;
+        auto rawPoint = evidence.rawPoints.begin();
+        for (auto reading = firstNew; reading != evidence.snapshots.end(); ++reading) {
+            const auto* snapshot = *reading;
+            if (!eligible(snapshot)) {
+                continue;
+            }
+
+            const bool reset = snapshot->observeBillingWindow(previous);
+            resets += reset;
+            if (snapshot->snapshotTime <= evidence.latestDisplayedRollup) {
+                evidence.rolledReset |= reset;
+            }
+            // Some records participate in reset accounting without a plotted raw point.
+            while (rawPoint != evidence.rawPoints.end() && (*rawPoint)->snapshotTime < snapshot->snapshotTime) {
+                ++rawPoint;
+            }
+            if (rawPoint != evidence.rawPoints.end() && (*rawPoint)->snapshotTime == snapshot->snapshotTime) {
+                (*rawPoint++)->resetPoint = reset;
+            }
+        }
+        seriesByKey.at(key).resetCount += resets;
     }
     for (auto& [key, series] : seriesByKey) {
         for (auto& point : series.points) {
             if (point.dailyRollup) {
                 const auto day = days.find({utcDayStart(point.snapshotTime), key});
-                point.resetPoint = day != days.end() && day->second.resets > 0;
+                point.resetPoint = day != days.end() && day->second.rolledReset;
             }
         }
     }
@@ -1879,12 +1903,10 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
 
         std::map<std::string, AnalysisQuotaTrendSeries> quotaSeriesByKey;
         std::map<std::string, std::optional<std::pair<std::time_t, std::time_t>>> previousWindowsByKey;
-        std::map<std::string, double> rollupLowWaterBySeriesKey;
-        const auto rememberLowWater = [&](const std::string& key, double percentage) {
-            auto [entry, inserted] = rollupLowWaterBySeriesKey.try_emplace(key, percentage);
-            if (!inserted) {
-                entry->second = std::min(entry->second, percentage);
-            }
+        std::map<std::string, double> quotaLowWaterBySeriesKey;
+        const auto recordQuotaLowWater = [&](const std::string& key, double remainingPercentage) {
+            auto entry = quotaLowWaterBySeriesKey.try_emplace(key, remainingPercentage).first;
+            entry->second = std::min(entry->second, remainingPercentage);
         };
         const auto configureQuotaSeries =
             [&](AnalysisQuotaTrendSeries& series,
@@ -1924,9 +1946,9 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
 
         std::optional<std::pair<std::time_t, std::time_t>> completeQuotaDays;
         std::vector<PersistedQuotaSnapshotRollup> quotaRollups;
-        std::set<std::pair<std::time_t, std::string>> coveredQuotaDays;
+        std::map<std::pair<std::time_t, std::string>, std::time_t> latestDisplayedQuotaRollups;
         if (shouldUseQuotaSnapshotRollups(window.start, window.end)) {
-            // Daily reset evidence cannot be clipped to a partial UTC day.
+            // Reset evidence and minima for a whole UTC day cannot be clipped to a partial day.
             constexpr std::time_t daySeconds = 86400;
             const auto firstDay = utcDayStart(window.start);
             const auto lastDay = utcDayStart(window.end);
@@ -1935,22 +1957,27 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
             quotaRollups = storage_->getQuotaSnapshotRollups(scopedProviderAccountIds->providerId,
                                                              scopedProviderAccountIds->accountId, firstDay, lastDay);
             for (const auto& rollup : quotaRollups) {
-                const std::string seriesKey = quotaSeriesKey(rollup.planId, rollup.quotaDimension);
-                if (rollup.lowWaterRemainingValue && rollup.lowWaterLimitValue && *rollup.lowWaterLimitValue > 0 &&
-                    rollup.latestSnapshotTime <= window.end) {
-                    rememberLowWater(seriesKey, 100.0 * static_cast<double>(*rollup.lowWaterRemainingValue) /
-                                                    *rollup.lowWaterLimitValue);
-                }
-                if (!rollup.latestLimitValue || *rollup.latestLimitValue <= 0) {
-                    continue;
-                }
-
                 const auto snapshotTime =
                     rollup.latestSnapshotTime > 0 ? rollup.latestSnapshotTime : rollup.periodStart;
                 if (snapshotTime < window.start || snapshotTime > window.end) {
                     continue;
                 }
-                coveredQuotaDays.emplace(rollup.periodStart, seriesKey);
+                const std::string seriesKey = quotaSeriesKey(rollup.planId, rollup.quotaDimension);
+                if (rollup.periodStart >= completeQuotaDays->first && rollup.periodStart <= completeQuotaDays->second &&
+                    rollup.lowWaterRemainingValue && rollup.lowWaterLimitValue && *rollup.lowWaterLimitValue > 0) {
+                    const double lowWaterPercentage = (static_cast<double>(*rollup.lowWaterRemainingValue) /
+                                                       static_cast<double>(*rollup.lowWaterLimitValue)) *
+                                                      100.0;
+                    recordQuotaLowWater(seriesKey, lowWaterPercentage);
+                }
+                if (!rollup.latestLimitValue || *rollup.latestLimitValue <= 0) {
+                    continue;
+                }
+
+                auto latest =
+                    latestDisplayedQuotaRollups.try_emplace(std::make_pair(rollup.periodStart, seriesKey), snapshotTime)
+                        .first;
+                latest->second = std::max(latest->second, snapshotTime);
                 const long long limitValue = *rollup.latestLimitValue;
                 const long long remainingValue = rollup.latestRemainingValue.has_value()
                     ? std::clamp(*rollup.latestRemainingValue, 0LL, limitValue)
@@ -1979,7 +2006,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
                 point.dailyRollup = true;
                 series.points.push_back(std::move(point));
             }
-            quotaHistoryUsesRollups = !coveredQuotaDays.empty();
+            quotaHistoryUsesRollups = !latestDisplayedQuotaRollups.empty();
             if (quotaHistoryUsesRollups) {
                 // An older rollup may have saved the minimum count. Retained raw readings can
                 // establish a lower percentage without replacing history or transferring all samples.
@@ -1999,16 +2026,16 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
                      formatTimeUtcIso(window.end)});
                 if (retainedMinima.success()) {
                     for (size_t row = 0; row < retainedMinima.rowCount(); ++row) {
-                        rememberLowWater(
+                        recordQuotaLowWater(
                             quotaSeriesKey(retainedMinima.getInt(row, 0), retainedMinima.getString(row, 1)),
                             retainedMinima.getDouble(row, 2));
                     }
                 }
-
             }
         }
 
-        // The reset replay query also returns raw readings for uncovered days and series.
+        const bool replayQuotaRollups = !quotaRollups.empty();
+        // The reset replay query also returns raw readings outside the displayed rollups' coverage.
         const auto quotaSnapshots = storage_->getQuotaSnapshots(
             scopedProviderAccountIds->providerId, scopedProviderAccountIds->accountId, window.start, window.end,
             quotaHistoryUsesRollups ? completeQuotaDays : std::nullopt);
@@ -2018,16 +2045,21 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
             }
 
             const std::string seriesKey = quotaSeriesKey(snapshot.planId, snapshot.quotaDimension);
-            if (coveredQuotaDays.count({utcDayStart(snapshot.snapshotTime), seriesKey}) != 0) {
-                continue;
-            }
-
             const long long limitValue = *snapshot.limitValue;
             const long long remainingValue = snapshot.remainingValue.has_value()
                                                  ? std::clamp(*snapshot.remainingValue, 0LL, limitValue)
                                                  : std::clamp(limitValue - snapshot.usedValue, 0LL, limitValue);
             const double remainingPercentage =
                 (static_cast<double>(remainingValue) / static_cast<double>(limitValue)) * 100.0;
+            const auto day = utcDayStart(snapshot.snapshotTime);
+            const auto rollup = latestDisplayedQuotaRollups.find({day, seriesKey});
+            if (rollup != latestDisplayedQuotaRollups.end() && snapshot.snapshotTime <= rollup->second) {
+                if (day < completeQuotaDays->first || day > completeQuotaDays->second) {
+                    recordQuotaLowWater(seriesKey, remainingPercentage);
+                }
+                continue;
+            }
+
             auto& series = quotaSeriesByKey[seriesKey];
             configureQuotaSeries(series, snapshot.planId, snapshot.quotaDimension, snapshot.windowStart,
                                  snapshot.windowEnd, seriesKey);
@@ -2040,13 +2072,13 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
             point.remainingPercentage = remainingPercentage;
             point.remainingValue = remainingValue;
             point.limitValue = limitValue;
-            if (!quotaHistoryUsesRollups) {
+            if (!replayQuotaRollups) {
                 point.resetPoint = snapshot.observeBillingWindow(previousWindowsByKey[seriesKey]);
             }
             point.reconciled = snapshot.isReconciled;
             series.points.push_back(std::move(point));
         }
-        if (quotaHistoryUsesRollups) {
+        if (replayQuotaRollups) {
             applyQuotaRollupResetEvidence(quotaRollups, quotaSnapshots, *completeQuotaDays, quotaSeriesByKey);
         }
 
@@ -2072,14 +2104,12 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
             series.latestRemainingValue = latest.remainingValue;
             series.limitValue = latest.limitValue;
 
-            series.lowWaterRemainingPercentage = lowWaterIt->remainingPercentage;
-            const auto savedLowWater = rollupLowWaterBySeriesKey.find(entry.first);
-            if (savedLowWater != rollupLowWaterBySeriesKey.end()) {
-                series.lowWaterRemainingPercentage =
-                    std::min(series.lowWaterRemainingPercentage, savedLowWater->second);
-            }
+            const auto lowWater = quotaLowWaterBySeriesKey.find(entry.first);
+            series.lowWaterRemainingPercentage = lowWater == quotaLowWaterBySeriesKey.end()
+                                                     ? lowWaterIt->remainingPercentage
+                                                     : std::min(lowWaterIt->remainingPercentage, lowWater->second);
 
-            if (!quotaHistoryUsesRollups) {
+            if (!replayQuotaRollups) {
                 series.resetCount = static_cast<int>(std::count_if(
                     series.points.begin(),
                     series.points.end(),

@@ -1723,7 +1723,11 @@ TEST_CASE("Quota rollups preserve the lowest percentage across changing limits",
     const auto rebuilt = engine.buildViewModel({}, preferences, now);
     REQUIRE(rebuilt.quotaTrendSeries.size() == 1);
     const auto& series = rebuilt.quotaTrendSeries.front();
-    REQUIRE(series.points.size() == (includeUnquantifiedReading ? 1 : 2));
+    REQUIRE(series.points.size() == (includeUnquantifiedReading ? 3 : 2));
+    if (includeUnquantifiedReading) {
+        CHECK_FALSE(series.points[0].dailyRollup);
+        CHECK_FALSE(series.points[1].dailyRollup);
+    }
     CHECK(series.points.back().dailyRollup);
     CHECK(series.latestRemainingPercentage == Catch::Approx(50));
     CHECK(series.lowWaterRemainingPercentage == Catch::Approx(10));
@@ -1931,13 +1935,13 @@ TEST_CASE("Analysis counts rollup resets only inside the selected partial UTC da
     REQUIRE(storage.init(tempDb.path()));
     const int providerId = requireProviderId(storage, "grok");
     const int accountId = ensureRuntimeAccountId(storage, "grok", "Grok");
-    const auto insert = [&](const char* time, const char* start, const char* end) {
+    const auto insert = [&](const char* time, const char* start, const char* end, const char* used = "40") {
         REQUIRE(
             storage
                 .execute("INSERT INTO quota_snapshots (provider_id, account_id, snapshot_time_utc, window_start_utc, "
                          "window_end_utc, used_value, limit_value, confidence_tier, quota_dimension) "
-                         "VALUES (?, ?, ?, ?, ?, 40, 100, 'high', 'percent');",
-                         {std::to_string(providerId), std::to_string(accountId), time, start, end})
+                         "VALUES (?, ?, ?, ?, ?, ?, 100, 'high', 'percent');",
+                         {std::to_string(providerId), std::to_string(accountId), time, start, end, used})
                 .success());
     };
     DashboardViewModel dashboard;
@@ -1952,9 +1956,10 @@ TEST_CASE("Analysis counts rollup resets only inside the selected partial UTC da
     const char* partialDay = "2026-04-01";
     SECTION("Current quota window starts after a recorded morning reset boundary") {
         preferences.analysisDateRangePreset = AnalysisDateRangePreset::CurrentQuotaWindow;
-        insert("2026-04-01T08:00:00Z", "2026-03-02T12:00:00Z", currentStart);
-        insert("2026-04-01T13:00:00Z", currentStart, currentEnd);
-        insert("2026-04-02T13:00:00Z", currentStart, currentEnd);
+        insert("2026-04-01T08:00:00Z", "2026-03-02T12:00:00Z", currentStart, "90");
+        insert("2026-04-01T12:30:00Z", currentStart, currentEnd, "30");
+        insert("2026-04-01T13:00:00Z", currentStart, currentEnd, "10");
+        insert("2026-04-02T13:00:00Z", currentStart, currentEnd, "20");
     }
     SECTION("The current day has a later observation outside the selected end") {
         preferences.analysisDateRangePreset = AnalysisDateRangePreset::ThisMonth;
@@ -1987,11 +1992,81 @@ TEST_CASE("Analysis counts rollup resets only inside the selected partial UTC da
             }
         }
         CHECK(series.resetCount == 0);
+        if (!hasPartialFinalDay) {
+            CHECK(series.lowWaterRemainingPercentage == Catch::Approx(rawRetained ? 70.0 : 80.0));
+        }
     };
     checkRollups(true);
     REQUIRE(storage.execute("DELETE FROM quota_snapshots WHERE substr(snapshot_time_utc, 1, 10) = ?;", {partialDay})
                 .success());
     checkRollups(false);
+}
+
+TEST_CASE("Analysis includes quota readings appended after a daily rollup",
+          "[analysis][query_engine][quota_rollup_coverage]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    const int providerId = requireProviderId(storage, "grok");
+    const int accountId = ensureRuntimeAccountId(storage, "grok", "Grok");
+    const auto insert = [&](const char* time, const char* start, const char* end, const char* used,
+                            const char* limit = "100") {
+        REQUIRE(
+            storage
+                .execute("INSERT INTO quota_snapshots (provider_id, account_id, snapshot_time_utc, "
+                         "window_start_utc, window_end_utc, used_value, limit_value, confidence_tier, quota_dimension) "
+                         "VALUES (?, ?, ?, ?, ?, ?, ?, 'high', 'percent');",
+                         {std::to_string(providerId), std::to_string(accountId), time, start, end, used, limit})
+                .success());
+    };
+    const char* firstStart = "2026-04-01T12:00:00Z";
+    const char* firstEnd = "2026-04-02T12:00:00Z";
+    const char* secondEnd = "2026-04-03T12:00:00Z";
+    insert("2026-04-01T23:00:00Z", firstStart, firstEnd, "40");
+    insert("2026-04-02T08:00:00Z", firstStart, firstEnd, "60");
+    insert("2026-04-02T09:00:00Z", firstStart, firstEnd, "90");
+    const auto firstDay = makeUtcTime(2026, 4, 1);
+    const auto secondDay = makeUtcTime(2026, 4, 2);
+    const auto now = makeUtcTime(2026, 4, 20, 12);
+    bool retainDisplayableRollup = true;
+    SECTION("The old rollup contributes a point and its covered raw readings stay hidden") {}
+    SECTION("An incomplete non-displayable rollup still establishes the earlier window") {
+        insert("2026-04-02T10:00:00Z", firstStart, firstEnd, "0", "0");
+        retainDisplayableRollup = false;
+    }
+
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, firstDay, secondDay));
+    if (!retainDisplayableRollup) {
+        REQUIRE(storage.execute("DELETE FROM quota_snapshots;").success());
+    }
+    insert("2026-04-02T13:00:00Z", firstEnd, secondEnd, "10");
+
+    DashboardViewModel dashboard;
+    dashboard.providers = {makeProvider("grok", "Grok", "grok.runtime_status")};
+    DashboardPreferences preferences;
+    preferences.analysisSelectedProviderId = "grok";
+    preferences.analysisSelectedAccountId = "grok.runtime_status";
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = firstDay;
+    preferences.analysisCustomRangeEndUtc = now;
+    AnalysisQueryEngine engine(storage);
+    const auto analysis = engine.buildViewModel(dashboard, preferences, now);
+    REQUIRE(analysis.quotaTrendSeries.size() == 1);
+    const auto& series = analysis.quotaTrendSeries.front();
+    CHECK(series.latestRemainingPercentage == Catch::Approx(90.0));
+    CHECK(series.resetCount == 1);
+    CHECK(series.points.back().snapshotTime == makeUtcTime(2026, 4, 2, 13));
+    CHECK_FALSE(series.points.back().dailyRollup);
+    CHECK(series.points.back().resetPoint);
+    REQUIRE(series.points.size() == (retainDisplayableRollup ? 3 : 2));
+    CHECK(series.points.front().dailyRollup);
+    CHECK_FALSE(series.points.front().resetPoint);
+    if (retainDisplayableRollup) {
+        CHECK(series.points[1].snapshotTime == makeUtcTime(2026, 4, 2, 9));
+        CHECK(series.points[1].dailyRollup);
+        CHECK_FALSE(series.points[1].resetPoint);
+    }
 }
 
 TEST_CASE("Analysis uses retained raw reset evidence for legacy and unrolled quota days",
