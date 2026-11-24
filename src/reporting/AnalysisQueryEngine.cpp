@@ -1913,31 +1913,25 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
 
         for (auto& entry : quotaSeriesByKey) {
             auto& series = entry.second;
-            std::sort(
-                series.points.begin(),
-                series.points.end(),
-                [](const AnalysisQuotaTrendPoint& left, const AnalysisQuotaTrendPoint& right) {
-                    return left.snapshotTime < right.snapshotTime;
-                });
+            std::stable_sort(series.points.begin(), series.points.end(),
+                             [](const AnalysisQuotaTrendPoint& left, const AnalysisQuotaTrendPoint& right) {
+                                 return left.snapshotTime < right.snapshotTime;
+                             });
             if (series.points.empty()) {
                 continue;
             }
 
-            const auto latestIt = std::max_element(
-                series.points.begin(),
-                series.points.end(),
-                [](const AnalysisQuotaTrendPoint& left, const AnalysisQuotaTrendPoint& right) {
-                    return left.snapshotTime < right.snapshotTime;
-                });
+            // Snapshot rows are read in insertion order when capture times compare equal.
+            const auto& latest = series.points.back();
             const auto lowWaterIt = std::min_element(
                 series.points.begin(),
                 series.points.end(),
                 [](const AnalysisQuotaTrendPoint& left, const AnalysisQuotaTrendPoint& right) {
                     return left.remainingPercentage < right.remainingPercentage;
                 });
-            series.latestRemainingPercentage = latestIt->remainingPercentage;
-            series.latestRemainingValue = latestIt->remainingValue;
-            series.limitValue = latestIt->limitValue;
+            series.latestRemainingPercentage = latest.remainingPercentage;
+            series.latestRemainingValue = latest.remainingValue;
+            series.limitValue = latest.limitValue;
 
             const auto lowWaterOverrideIt = rollupLowWaterBySeriesKey.find(entry.first);
             if (lowWaterOverrideIt != rollupLowWaterBySeriesKey.end() &&

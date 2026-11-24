@@ -2595,7 +2595,7 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         "JOIN providers p ON p.id = qs.provider_id "
         "LEFT JOIN plans pl ON pl.id = qs.plan_id "
         "WHERE p.enabled = 1 "
-        "ORDER BY p.display_name ASC, COALESCE(pl.display_name, '') ASC;");
+        "ORDER BY p.display_name ASC, COALESCE(pl.display_name, '') ASC, qs.id DESC;");
     if (!result.success() || result.rowCount() == 0) {
         return std::nullopt;
     }
@@ -2608,21 +2608,26 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
     // Match the saved window and values before preferring the weekly row.
     using SavedQuotaWindow = std::tuple<int, std::time_t, std::time_t, long long, long long, long long>;
     const auto savedWindow = [&result](size_t row) -> SavedQuotaWindow {
-        return {result.getInt(row, 12),
-                parseRuntimeTimestamp(result.getString(row, 11)),
-                parseRuntimeTimestamp(result.getString(row, 10)),
-                result.getInt64(row, 6),
-                result.getInt64(row, 7),
+        auto start = parseRuntimeTimestamp(result.getString(row, 11));
+        auto end = parseRuntimeTimestamp(result.getString(row, 10));
+        if (start == end) {
+            start = 0;
+            if (end == parseRuntimeTimestamp(result.getString(row, 2))) {
+                end = 0;
+            }
+        }
+        return {result.getInt(row, 12), start, end, result.getInt64(row, 6), result.getInt64(row, 7),
                 result.getInt64(row, 8)};
     };
-    std::map<SavedQuotaWindow, size_t> firstWeeklyRow;
+    std::set<SavedQuotaWindow> weeklyWindows;
     for (size_t row = 0; row < result.rowCount(); ++row) {
         if (result.getString(row, 0) == "openai" &&
             result.getString(row, 3) == "openai_subscription_codex_local:weekly") {
-            firstWeeklyRow.try_emplace(savedWindow(row), row);
+            weeklyWindows.insert(savedWindow(row));
         }
     }
 
+    std::set<std::tuple<std::string, int, std::time_t, std::time_t>> seenCodexWindows;
     std::time_t freshestSnapshotTime = 0;
     for (size_t row = 0; row < result.rowCount(); ++row) {
         const std::string providerKey = result.getString(row, 0);
@@ -2631,13 +2636,17 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         }
 
         const auto planKey = result.getString(row, 3);
-        const bool codexWeekly = providerKey == "openai" && planKey == "openai_subscription_codex_local:weekly";
-        const bool codexInterval = providerKey == "openai" && planKey == "openai_subscription_codex_local:interval";
-        if (codexWeekly || codexInterval) {
+        const bool codexPlan =
+            providerKey == "openai" && planKey.substr(0, planKey.find(':')) == "openai_subscription_codex_local";
+        if (codexPlan) {
             const auto window = savedWindow(row);
-            const auto weekly = firstWeeklyRow.find(window);
-            if (weekly != firstWeeklyRow.end() &&
-                (codexWeekly ? row != weekly->second : std::get<2>(window) - std::get<1>(window) == 7 * 86400)) {
+            const auto start = std::get<1>(window);
+            const auto end = std::get<2>(window);
+            if (planKey == "openai_subscription_codex_local:interval" && end - start == 7 * 86400 &&
+                weeklyWindows.count(window) != 0) {
+                continue;
+            }
+            if (!seenCodexWindows.emplace(planKey, std::get<0>(window), start, end).second) {
                 continue;
             }
         }
@@ -3324,10 +3333,13 @@ std::optional<int> ensureQuotaSnapshotPlanId(
     return static_cast<int>(insert.lastInsertRowId());
 }
 
+enum class QuotaSnapshotKind { Count, Percentage, CodexPercentage };
+
 bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accountId, std::optional<int> planId,
                              std::time_t snapshotTime, std::time_t windowStart, std::time_t windowEnd, long long used,
                              long long limit, long long remaining, const std::string& confidenceTier,
-                             const std::string& basisSummary, bool percentageReading) {
+                             const std::string& basisSummary, QuotaSnapshotKind kind) {
+    const bool percentageReading = kind != QuotaSnapshotKind::Count;
     if (percentageReading && !planId.has_value()) {
         return false;
     }
@@ -3356,7 +3368,14 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
     if (percentageReading) {
         // Refreshes may reuse the same provider response until its polling budget expires.
         sql += " WHERE NOT EXISTS (SELECT 1 FROM quota_snapshots WHERE provider_id = ? AND account_id = ? "
-               "AND plan_id = ? AND snapshot_time_utc = ?);";
+               "AND plan_id = ? AND snapshot_time_utc = ?";
+        if (kind == QuotaSnapshotKind::CodexPercentage) {
+            sql += " AND ((window_start_utc = ? AND window_end_utc = ?) OR "
+                   "(quota_dimension = 'requests' AND window_start_utc = ? AND window_end_utc = ?)) "
+                   "AND used_value = ? AND COALESCE(limit_value, 0) = CAST(? AS INTEGER) "
+                   "AND COALESCE(remaining_value, limit_value - used_value, 0) = CAST(? AS INTEGER)";
+        }
+        sql += ");";
     } else {
         sql += ");";
     }
@@ -3368,9 +3387,11 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
     if (planId.has_value()) {
         params.push_back(std::to_string(*planId));
     }
+    const auto windowStartUtc = windowStart > 0 ? formatTimeUtcIso(windowStart) : std::string{};
+    const auto windowEndUtc = windowEnd > 0 ? formatTimeUtcIso(windowEnd) : std::string{};
     params.push_back(formatTimeUtcIso(snapshotTime));
-    params.push_back(windowStart > 0 ? formatTimeUtcIso(windowStart) : std::string{});
-    params.push_back(windowEnd > 0 ? formatTimeUtcIso(windowEnd) : std::string{});
+    params.push_back(windowStartUtc);
+    params.push_back(windowEndUtc);
     params.push_back(std::to_string(std::max<long long>(0, used)));
     if (limit > 0) {
         params.push_back(std::to_string(limit));
@@ -3385,6 +3406,18 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
         params.push_back(std::to_string(accountId));
         params.push_back(std::to_string(*planId));
         params.push_back(formatTimeUtcIso(snapshotTime));
+    }
+    if (kind == QuotaSnapshotKind::CodexPercentage) {
+        // Older Codex rows used the capture time when the rollout omitted its window.
+        const auto legacyEnd = windowEnd > 0 ? windowEnd : snapshotTime;
+        const auto legacyStart = windowStart > 0 ? windowStart : legacyEnd;
+        params.push_back(windowStartUtc);
+        params.push_back(windowEndUtc);
+        params.push_back(formatTimeUtcIso(legacyStart));
+        params.push_back(formatTimeUtcIso(legacyEnd));
+        params.push_back(std::to_string(std::max<long long>(0, used)));
+        params.push_back(std::to_string(std::max<long long>(0, limit)));
+        params.push_back(std::to_string(std::max<long long>(0, remaining)));
     }
 
     QueryResult insert = storage.execute(sql, params);
@@ -4420,7 +4453,12 @@ public:
 
             const std::string confidenceTier = quotaConfidenceTierForResponse(providerKey, quota);
             const std::string displayName = quotaPlanLabelForResponse(providerKey, quota);
-            const bool percentageReading = providerKey == "grok" || providerKey == "cursor";
+            QuotaSnapshotKind snapshotKind = QuotaSnapshotKind::Count;
+            if (providerKey == "openai" && quota.providerSurface == "openai_subscription_codex_local") {
+                snapshotKind = QuotaSnapshotKind::CodexPercentage;
+            } else if (providerKey == "grok" || providerKey == "cursor") {
+                snapshotKind = QuotaSnapshotKind::Percentage;
+            }
             const std::time_t snapshotTime = quota.snapshotTime > 0 ? quota.snapshotTime : now;
 
             const NormalizedQuotaValues primaryValues = normalizeQuotaValues(quota);
@@ -4437,7 +4475,7 @@ public:
                 reportSourceLabelForSurface(quota.providerSurface.empty() ? providerKey : quota.providerSurface);
             persistQuotaSnapshotRow(storageService, *providerId, *accountId, primaryPlanId, snapshotTime,
                                     quota.windowStart, quota.windowEnd, primaryValues.used, primaryValues.limit,
-                                    primaryValues.remaining, confidenceTier, primaryBasisSummary, percentageReading);
+                                    primaryValues.remaining, confidenceTier, primaryBasisSummary, snapshotKind);
 
             if (quota.secondaryLimit > 0 || quota.secondaryUsed > 0 || quota.secondaryRemaining > 0) {
                 QuotaResponse secondaryQuota = quota;
@@ -4471,7 +4509,7 @@ public:
                 persistQuotaSnapshotRow(storageService, *providerId, *accountId, secondaryPlanId, snapshotTime,
                                         secondaryQuota.windowStart, secondaryQuota.windowEnd, secondaryValues.used,
                                         secondaryValues.limit, secondaryValues.remaining, confidenceTier,
-                                        secondaryBasisSummary, percentageReading);
+                                        secondaryBasisSummary, snapshotKind);
             }
         }
 

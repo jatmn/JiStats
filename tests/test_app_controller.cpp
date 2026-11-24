@@ -3602,7 +3602,7 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
                          "FROM plans WHERE plan_key = 'openai_subscription_codex_local:weekly';")
                 .success());
     }
-    // Replay the weekly reading and, for the weekly-only case, mimic the old interval copy.
+    // Replay both observed windows and, for the weekly-only case, mimic the old interval copy.
     REQUIRE(
         storage
             .execute(
@@ -3616,7 +3616,7 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
                 "qs.remaining_value, "
                 "qs.is_reconciled FROM quota_snapshots qs JOIN plans original ON original.id = qs.plan_id "
                 "JOIN plans copy ON copy.account_id = qs.account_id "
-                "WHERE original.plan_key = 'openai_subscription_codex_local:weekly' "
+                "WHERE original.plan_key GLOB 'openai_subscription_codex_local:*' "
                 "AND (copy.plan_key = original.plan_key OR ? = 'legacy');",
                 {paired ? "paired" : "legacy"})
             .success());
@@ -3640,6 +3640,119 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
                         [](const DashboardSummaryItem& item) { return item.badge == "7-day: 94% remaining"; }) == 1);
     releasePublication.set_value();
     restarted.shutdown();
+}
+
+TEST_CASE("AppController records each dated Codex percentage observation once",
+          "[app][runtime][codex][quota_history]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true);
+    const std::time_t now = std::time(nullptr);
+    const std::time_t first = now - 120;
+    const bool windowKnown = GENERATE(false, true);
+    CAPTURE(windowKnown);
+    auto quota = makeQuotaResponse(first, 25, 100, "interval", "openai_subscription_codex_local");
+    quota.windowStart = windowKnown ? first - 3600 : 0;
+    quota.windowEnd = windowKnown ? first + 3600 : 0;
+    auto codex = std::make_shared<ControlledQuotaProviderAdapter>("openai", "OpenAI", quota);
+    auto countBased =
+        makeCurrentQuotaProvider("minimax", "MiniMax", 41, 120, now, "interval", "minimax_subscription_coding_plan");
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(codex);
+    providers->addProvider(countBased);
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+    app.refreshRuntimeForTesting();
+    app.refreshRuntimeForTesting();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    auto snapshots = storage.execute(
+        "SELECT qs.quota_dimension, qs.remaining_value FROM quota_snapshots qs "
+        "JOIN plans pl ON pl.id = qs.plan_id WHERE pl.plan_key = 'openai_subscription_codex_local:interval';");
+    REQUIRE(snapshots.success());
+    CHECK(snapshots.rowCount() == 1);
+    CHECK(snapshots.getString(0, 0) == "percent");
+    CHECK(snapshots.getInt64(0, 1) == 75);
+    auto countUnits = storage.execute(
+        "SELECT DISTINCT qs.quota_dimension FROM quota_snapshots qs JOIN providers p ON p.id = qs.provider_id "
+        "WHERE p.provider_key = 'minimax';");
+    REQUIRE(countUnits.success());
+    REQUIRE(countUnits.rowCount() == 1);
+    CHECK(countUnits.getString(0, 0) == "requests");
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = requireAccountId(storage, providerId, "openai.runtime_status");
+    REQUIRE(storage
+                .execute("UPDATE quota_snapshots SET quota_dimension = 'requests', "
+                         "window_start_utc = COALESCE(NULLIF(window_start_utc, ''), snapshot_time_utc), "
+                         "window_end_utc = COALESCE(NULLIF(window_end_utc, ''), snapshot_time_utc) "
+                         "WHERE account_id = ?;",
+                         {std::to_string(accountId)})
+                .success());
+    app.refreshRuntimeForTesting();
+
+    ++quota.snapshotTime;
+    codex->setQuotaResponse(quota);
+    app.refreshRuntimeForTesting();
+    quota.used = 40;
+    quota.remaining = 60;
+    codex->setQuotaResponse(quota);
+    app.refreshRuntimeForTesting();
+    app.refreshRuntimeForTesting();
+    snapshots = storage.execute(
+        "SELECT qs.quota_dimension, qs.remaining_value FROM quota_snapshots qs "
+        "JOIN plans pl ON pl.id = qs.plan_id WHERE pl.plan_key = 'openai_subscription_codex_local:interval' "
+        "ORDER BY qs.id;");
+    REQUIRE(snapshots.success());
+    REQUIRE(snapshots.rowCount() == 3);
+    CHECK(snapshots.getInt64(0, 1) == 75);
+    CHECK(snapshots.getInt64(1, 1) == 75);
+    CHECK(snapshots.getInt64(2, 1) == 60);
+
+    const auto dashboard = app.getDashboardViewModelForTesting();
+    app.shutdown();
+    // Simulate a second identical history row already present before this fix.
+    REQUIRE(storage
+                .execute("INSERT INTO quota_snapshots (provider_id, account_id, plan_id, snapshot_time_utc, "
+                         "window_start_utc, window_end_utc, used_value, limit_value, remaining_value, "
+                         "confidence_tier, quota_dimension) "
+                         "SELECT provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, "
+                         "window_end_utc, used_value, limit_value, remaining_value, confidence_tier, quota_dimension "
+                         "FROM quota_snapshots WHERE account_id = ? ORDER BY id LIMIT 1;",
+                         {std::to_string(accountId)})
+                .success());
+
+    auto scope = dashboard.preferences;
+    scope.analysisSelectedProviderId = "openai";
+    scope.analysisSelectedAccountId = "openai.runtime_status";
+    scope.analysisDateRangePreset = AnalysisDateRangePreset::Last7Days;
+    AnalysisQueryEngine engine(storage);
+    const auto analysis = engine.buildViewModel(dashboard, scope, now);
+    REQUIRE(analysis.quotaTrendSeries.size() == 1);
+    CHECK(analysis.quotaTrendSeries.front().quotaDimension == "percent");
+    CHECK(analysis.quotaTrendSeries.front().points.size() == 3);
+    CHECK(analysis.quotaTrendSeries.front().latestRemainingValue == 60);
+
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, first, now));
+    REQUIRE(storage
+                .execute("UPDATE quota_snapshot_rollups_daily SET quota_dimension = 'requests' "
+                         "WHERE account_id = ?;",
+                         {std::to_string(accountId)})
+                .success());
+    REQUIRE(
+        storage.execute("DELETE FROM quota_snapshots WHERE account_id = ?;", {std::to_string(accountId)}).success());
+    scope.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    scope.analysisCustomRangeStartUtc = now - 30 * 86400;
+    scope.analysisCustomRangeEndUtc = now;
+    const auto retained = engine.buildViewModel(dashboard, scope, now);
+    REQUIRE(retained.quotaTrendSeries.size() == 1);
+    CHECK(retained.quotaTrendSeries.front().quotaDimension == "percent");
+    REQUIRE_FALSE(retained.quotaTrendSeries.front().points.empty());
+    CHECK(retained.quotaTrendSeries.front().points.back().dailyRollup);
 }
 
 TEST_CASE("AppController labels Codex-local quota rows without generic API wording", "[app][runtime]") {
