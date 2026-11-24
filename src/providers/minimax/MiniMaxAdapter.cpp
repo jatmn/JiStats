@@ -630,12 +630,21 @@ bool MiniMaxAdapter::validateCredentials() {
     return valid;
 }
 
-std::function<MiniMaxSubscriptionCredentialProfile()>
+PreparedMiniMaxSubscriptionValidation
 MiniMaxAdapter::prepareSubscriptionCredentialValidation(const MiniMaxSubscriptionCredentialProfile& profile) {
     std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
-    return [request = pImpl->prepareValidation(Impl::normalizeProfile(profile))]() mutable {
-        Impl::validate(request);
-        return std::move(request.profile);
+    auto request = pImpl->prepareValidation(Impl::normalizeProfile(profile));
+    auto matchesCredential = [submitted = request.profile, bearer = request.bearerToken](MiniMaxAdapter& adapter) {
+        std::lock_guard<std::mutex> credentialLock(adapter.pImpl->credentialMutex);
+        std::string error;
+        return adapter.pImpl->resolveBearerToken(submitted, error) == bearer;
+    };
+    return {
+        [request = std::move(request)]() mutable {
+            Impl::validate(request);
+            return std::move(request.profile);
+        },
+        std::move(matchesCredential),
     };
 }
 

@@ -149,10 +149,15 @@ bool isProviderTrackingEnabled(
     return true;
 }
 
-// Consent writes and source scans share the same lock across JiStats processes.
-class CodexProfileLock {
+constexpr wchar_t kCodexProfileLockName[] = L"Global\\JiStats.CodexAttribution.";
+constexpr wchar_t kMiniMaxProfileLockName[] = L"Global\\JiStats.MiniMaxCredentials.";
+
+class ProfileDatabaseLock {
   public:
-    CodexProfileLock(const std::string& databasePath, DWORD waitMs) {
+    ProfileDatabaseLock(const std::string& databasePath, const wchar_t* prefix, DWORD waitMs) {
+        if (databasePath.empty()) {
+            return;
+        }
         const auto path = std::filesystem::path(databasePath).wstring();
         const HANDLE database =
             CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -168,9 +173,9 @@ class CodexProfileLock {
         }
 
         // The file identity also matches when a peer opened the database through a path alias.
-        const std::wstring name =
-            L"Global\\JiStats.CodexAttribution." + std::to_wstring(identity.dwVolumeSerialNumber) + L"." +
-            std::to_wstring(identity.nFileIndexHigh) + L"." + std::to_wstring(identity.nFileIndexLow);
+        const std::wstring name = prefix + std::to_wstring(identity.dwVolumeSerialNumber) + L"." +
+                                  std::to_wstring(identity.nFileIndexHigh) + L"." +
+                                  std::to_wstring(identity.nFileIndexLow);
         // An existing mutex may allow synchronization without granting security-control rights.
         const HANDLE mutex = CreateMutexExW(nullptr, name.c_str(), 0, SYNCHRONIZE | MUTEX_MODIFY_STATE);
         if (mutex != nullptr) {
@@ -183,15 +188,15 @@ class CodexProfileLock {
         }
     }
 
-    ~CodexProfileLock() {
+    ~ProfileDatabaseLock() {
         if (mutex_ != nullptr) {
             ReleaseMutex(mutex_);
             CloseHandle(mutex_);
         }
     }
 
-    CodexProfileLock(const CodexProfileLock&) = delete;
-    CodexProfileLock& operator=(const CodexProfileLock&) = delete;
+    ProfileDatabaseLock(const ProfileDatabaseLock&) = delete;
+    ProfileDatabaseLock& operator=(const ProfileDatabaseLock&) = delete;
 
     bool ownsLock() const {
         return mutex_ != nullptr;
@@ -4132,6 +4137,7 @@ public:
     bool taskbarTestModeForTesting = false;
     bool disableCodexTokenImportForTesting = false;
     std::shared_future<void> miniMaxValidationReleaseForTesting;
+    std::function<void()> afterMiniMaxValidationClearForTesting;
     std::function<void()> afterSettingsDequeueForTesting;
     std::function<void()> beforeRuntimePublicationForTesting;
     std::function<void()> beforeCodexSourceReadForTesting;
@@ -5884,23 +5890,26 @@ public:
     }
 
     void queueMiniMaxCredentialValidation(const std::string& planKey, std::uint64_t revision,
-                                          std::function<MiniMaxSubscriptionCredentialProfile()> validate) {
+                                          std::shared_ptr<MiniMaxAdapter> adapter,
+                                          PreparedMiniMaxSubscriptionValidation validation) {
         std::lock_guard<std::mutex> lock(miniMaxValidationMutex);
 #ifdef JISTATS_ENABLE_TEST_HOOKS
         if (miniMaxValidationReleaseForTesting.valid()) {
-            validate = [release = miniMaxValidationReleaseForTesting, validate = std::move(validate)] {
+            validation.validate = [release = miniMaxValidationReleaseForTesting,
+                                   validate = std::move(validation.validate)] {
                 release.wait();
                 return validate();
             };
         }
 #endif
 
-        miniMaxValidationThreads.emplace_back([this, planKey, revision, validate = std::move(validate)]() {
+        miniMaxValidationThreads.emplace_back([this, planKey, revision, adapter = std::move(adapter),
+                                               validation = std::move(validation)]() {
             if (shouldStopMiniMaxValidation()) {
                 return;
             }
 
-            auto validatedProfile = validate();
+            auto validatedProfile = validation.validate();
             validatedProfile.lastValidationError =
                 normalizeMiniMaxValidationError(validatedProfile.lastValidationError);
 
@@ -5911,10 +5920,18 @@ public:
                     return;
                 }
 
-                std::string persistError;
-                if (!persistMiniMaxCredentialProfile(validatedProfile, persistError)) {
-                    validatedProfile.validationState = "invalid";
-                    validatedProfile.lastValidationError = persistError;
+                const ProfileDatabaseLock profileLock(storageAvailable ? storageService.getDbPath() : "",
+                                                      kMiniMaxProfileLockName, 5000);
+                if ((storageAvailable && !profileLock.ownsLock()) || !validation.matchesCredential(*adapter)) {
+                    validatedProfile.validationState = "unknown";
+                    validatedProfile.lastValidatedAt = 0;
+                    validatedProfile.lastValidationError.clear();
+                } else {
+                    std::string persistError;
+                    if (!persistMiniMaxCredentialProfile(validatedProfile, persistError)) {
+                        validatedProfile.validationState = "invalid";
+                        validatedProfile.lastValidationError = persistError;
+                    }
                 }
                 updateMiniMaxCredentialProfile(planKey, validatedProfile);
             }
@@ -6169,6 +6186,14 @@ public:
             adapter->setCredentialStore(miniMaxCredentialStore);
         }
 
+        // Share the complete clear, credential write, and recovery sequence with peer instances.
+        const ProfileDatabaseLock profileLock(storageAvailable ? storageService.getDbPath() : "",
+                                              kMiniMaxProfileLockName, 0);
+        if (storageAvailable && !profileLock.ownsLock()) {
+            result.message = "Could not lock the MiniMax credential profile. Try again.";
+            return result;
+        }
+
         const std::string planKey = request.planKey == "token_plan" ? "token_plan" : "coding_plan";
         auto& revision = miniMaxCredentialRevisions[planKey];
         const auto storedProfile = getMiniMaxCredentialProfile(planKey);
@@ -6197,6 +6222,11 @@ public:
                     result.message = "Could not clear the previous MiniMax validation result.";
                     return result;
                 }
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+                if (afterMiniMaxValidationClearForTesting) {
+                    afterMiniMaxValidationClearForTesting();
+                }
+#endif
                 profile.lastValidatedAt = 0;
             }
 
@@ -6256,7 +6286,8 @@ public:
         profile.lastValidationError.clear();
         updateMiniMaxCredentialProfile(planKey, profile);
         syncActiveMiniMaxRuntimeProfile(planKey);
-        queueMiniMaxCredentialValidation(planKey, revision, adapter->prepareSubscriptionCredentialValidation(profile));
+        queueMiniMaxCredentialValidation(planKey, revision, adapter,
+                                         adapter->prepareSubscriptionCredentialValidation(profile));
         result.success = true;
         result.accountDisplayName = profile.accountDisplayName;
         result.message = "Validating " + minimaxPlanDisplayName(planKey) + " credential...";
@@ -7055,7 +7086,7 @@ public:
         if (!openCodexAttributionStorage()) {
             return false;
         }
-        const CodexProfileLock profileLock(codexAttributionStorage.getDbPath(), 5000);
+        const ProfileDatabaseLock profileLock(codexAttributionStorage.getDbPath(), kCodexProfileLockName, 5000);
         if (!profileLock.ownsLock()) {
             return false;
         }
@@ -7118,7 +7149,7 @@ public:
             return;
         }
 
-        const CodexProfileLock profileLock(codexAttributionStorage.getDbPath(), 0);
+        const ProfileDatabaseLock profileLock(codexAttributionStorage.getDbPath(), kCodexProfileLockName, 0);
         if (!profileLock.ownsLock() || readCodexAttributionGeneration() != generation || hasPendingCodexRevocation()) {
             return;
         }
@@ -8355,6 +8386,10 @@ void AppController::setMiniMaxValidationResponseForTesting(
 void AppController::setMiniMaxValidationReleaseForTesting(std::shared_future<void> release) {
     std::lock_guard<std::mutex> lock(pImpl->miniMaxValidationMutex);
     pImpl->miniMaxValidationReleaseForTesting = std::move(release);
+}
+
+void AppController::setAfterMiniMaxValidationClearForTesting(std::function<void()> callback) {
+    pImpl->afterMiniMaxValidationClearForTesting = std::move(callback);
 }
 
 void AppController::waitForMiniMaxValidationForTesting() {

@@ -112,6 +112,7 @@ public:
         const std::string& body = "",
         const std::string& error = "");
     void setMiniMaxValidationReleaseForTesting(std::shared_future<void> release);
+    void setAfterMiniMaxValidationClearForTesting(std::function<void()> callback);
     void waitForMiniMaxValidationForTesting();
     void setOpenAICodexRefreshPollIntervalForTesting(int intervalMs);
     void setLocalProviderRefreshPollIntervalForTesting(int intervalMs);

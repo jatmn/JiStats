@@ -36,6 +36,8 @@ struct MiniMaxSubscriptionPollingConfig {
     std::string bearerToken;
 };
 
+struct PreparedMiniMaxSubscriptionValidation;
+
 class MiniMaxAdapter : public IProviderAdapter {
 public:
     MiniMaxAdapter(const std::string& apiKey = "", const std::string& groupId = "");
@@ -66,7 +68,7 @@ public:
     MiniMaxSubscriptionCredentialProfile getSubscriptionCredentialProfile() const;
     bool storeSubscriptionCredential(const MiniMaxSubscriptionCredentialProfile& profile, const std::string& secret,
                                      bool* previousSecretPreserved = nullptr);
-    std::function<MiniMaxSubscriptionCredentialProfile()>
+    PreparedMiniMaxSubscriptionValidation
     prepareSubscriptionCredentialValidation(const MiniMaxSubscriptionCredentialProfile& profile);
     std::optional<MiniMaxSubscriptionPollingConfig> resolveSubscriptionPollingConfig(
         std::string& error);
@@ -92,6 +94,11 @@ public:
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl;
+};
+
+struct PreparedMiniMaxSubscriptionValidation {
+    std::function<MiniMaxSubscriptionCredentialProfile()> validate;
+    std::function<bool(MiniMaxAdapter&)> matchesCredential;
 };
 
 } // namespace JiStats
