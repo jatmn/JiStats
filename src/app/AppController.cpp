@@ -4817,10 +4817,7 @@ public:
             if (shouldStopMiniMaxValidation()) {
                 return;
             }
-            refreshProviderRuntimeState(
-                std::time(nullptr),
-                refreshProviderDiscovery,
-                importLocalActivity);
+            refreshProviderRuntimeState(currentTime(), refreshProviderDiscovery, importLocalActivity);
         });
     }
 
@@ -6652,10 +6649,11 @@ public:
         }
 
         // Rebuild usage rollups for the recovery range
-        if (!rebuildUsageRollupsForRange(storageService, recoveryStart, now)) {
+        if (!rebuildUsageRollupsForRange(storageService, recoveryStart, now) || exitRequested.load()) {
             return false;
         }
 
+        // Once gap writes start, finish the recovery marker update even if Exit arrives.
         for (const auto& provider : viewModel.providers) {
             const auto providerId = findProviderIdByKey(storageService, provider.providerKey);
             const auto runtimeAccountId =
@@ -6687,9 +6685,6 @@ public:
             storageService.upsertGapMarker(marker);
         }
 
-        if (exitRequested.load()) {
-            return false;
-        }
         runtimeState->recoveryMarker.clear();
         runtimeState->lastSuccessfulSyncAt = now;
         storageService.upsertRuntimeState(*runtimeState);

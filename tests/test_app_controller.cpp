@@ -1077,6 +1077,89 @@ TEST_CASE("AppController preserves recovery when Exit interrupts the deferred st
     CHECK(runtime->recoveryMarker == marker);
 }
 
+TEST_CASE("AppController does not count recovery twice after Exit during rollup rebuild", "[app][startup][recovery]") {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    const auto now = std::time(nullptr);
+    const auto gapStart = now - 3 * 3600;
+    const auto retryTime = now + 120;
+    const std::string marker = "catchup:" + std::to_string(gapStart);
+    seedRuntimeState(dbPath.path(), gapStart, gapStart, marker);
+    seedPersistedQuotaSnapshot(dbPath.path(), "openai", "cached-openai", "OpenAI", "openai_subscription",
+                               "OpenAI Subscription", "interval", now - 300, 30, 100, 70);
+
+    auto providers = makeProviderManager(
+        {makeCurrentQuotaProvider("openai", "OpenAI", 10, 100, now, "interval", "openai_subscription_codex_local")});
+    static std::atomic<AppController*> appToExit{nullptr};
+    const auto extension = reinterpret_cast<void (*)()>(+[](sqlite3* db, char**, const sqlite3_api_routines*) {
+        return sqlite3_trace_v2(
+            db, SQLITE_TRACE_STMT,
+            [](unsigned, void*, void* statement, void*) {
+                const char* sql = sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
+                constexpr char rebuildScopeQuery[] = "SELECT DISTINCT provider_id, account_id FROM usage_events ";
+                if (sql != nullptr && sqlite3_strnicmp(sql, rebuildScopeQuery, sizeof(rebuildScopeQuery) - 1) == 0) {
+                    if (auto* app = appToExit.exchange(nullptr)) {
+                        app->requestShutdown();
+                    }
+                }
+                return 0;
+            },
+            nullptr);
+    });
+
+    {
+        AppController app;
+        app.setHeadlessForTesting(true);
+        app.setDatabasePathForTesting(dbPath.path());
+        app.setProviderManagerForTesting(providers);
+        app.setCurrentTimeForTesting(now);
+        REQUIRE(sqlite3_auto_extension(extension) == SQLITE_OK);
+        appToExit.store(&app);
+        const bool started = app.init();
+        const bool interrupted = waitForCondition([&]() { return appToExit.load() == nullptr; });
+        app.shutdown();
+        appToExit.store(nullptr);
+        sqlite3_cancel_auto_extension(extension);
+        REQUIRE(started);
+        REQUIRE(interrupted);
+    }
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto interruptedRuntime = storage.getRuntimeState();
+    REQUIRE(interruptedRuntime.has_value());
+    CHECK(interruptedRuntime->recoveryMarker == marker);
+    const auto countBeforeRetry =
+        storage.execute("SELECT COUNT(*) FROM gap_markers WHERE source_kind = 'runtime_recovery';");
+    REQUIRE(countBeforeRetry.success());
+    CHECK(countBeforeRetry.getInt(0, 0) == 0);
+    storage.close();
+
+    AppController restarted;
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(providers);
+    restarted.setCurrentTimeForTesting(retryTime);
+    REQUIRE(restarted.init());
+    REQUIRE(waitForCondition([&]() {
+        const auto runtime = restarted.getPersistedRuntimeStateForTesting();
+        return runtime && runtime->recoveryMarker.empty();
+    }));
+    restarted.shutdown();
+
+    REQUIRE(storage.init(dbPath.path()));
+    const auto completed = storage.execute(
+        "SELECT period_start_utc, period_end_utc FROM gap_markers WHERE source_kind = 'runtime_recovery';");
+    REQUIRE(completed.success());
+    REQUIRE(completed.rowCount() == 1);
+    CHECK(completed.getString(0, 0) == toUtcIso(gapStart));
+    CHECK(completed.getString(0, 1) == toUtcIso(retryTime));
+#else
+    requireSqlite();
+#endif
+}
+
 TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds startup", "[app][startup][shell]") {
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     TempTestDatabase dbPath;
