@@ -32,6 +32,8 @@ These commands build the desktop app without compiling or running the tests. Onc
 
 For an existing Visual Studio build tree, run `cmake --build build --config Release --target JiStats` and open `build/bin/Release/JiStats.exe`. Replace `build` with your configured directory.
 
+The PowerShell [Release build wrapper](scripts/build_release.ps1) reports running executables from the selected build directory and targets. Close any reported process normally before rebuilding its executable. The wrapper runs CMake and returns its exit code.
+
 ### Building on Linux
 
 Use MinGW-w64 and ImageMagick to build the Windows desktop app from Debian or Ubuntu.
