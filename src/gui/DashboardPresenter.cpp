@@ -1428,6 +1428,10 @@ public:
         return L"JiStatsPreferencesWindow";
     }
 
+    static const wchar_t* preferencesViewportClassName() {
+        return L"JiStatsPreferencesViewport";
+    }
+
     static const wchar_t* analysisWindowClassName() {
         return L"JiStatsAnalysisWindow";
     }
@@ -2389,6 +2393,22 @@ public:
         }
     }
 
+    void clipPreferencesTabPane(const RECT& tabBounds, const RECT& paneBounds) {
+        // Keep the tab first in dialog order while allowing the viewport to paint in the pane.
+        HRGN frame = CreateRectRgnIndirect(&tabBounds);
+        HRGN pane = CreateRectRgnIndirect(&paneBounds);
+        if (frame != nullptr && pane != nullptr && CombineRgn(frame, frame, pane, RGN_DIFF) != ERROR &&
+            SetWindowRgn(preferencesTab, frame, TRUE)) {
+            frame = nullptr;
+        }
+        if (frame != nullptr) {
+            DeleteObject(frame);
+        }
+        if (pane != nullptr) {
+            DeleteObject(pane);
+        }
+    }
+
     void layoutPreferencesControls(HWND hwnd) {
         if (preferencesTab == nullptr || preferencesPage == nullptr) {
             return;
@@ -2406,9 +2426,11 @@ public:
         const int tabHeight = std::max(0L, clientRect.bottom - tabTop - buttonHeight - closeBottomMargin - margin * 2);
         MoveWindow(preferencesTab, margin, tabTop, contentWidth, tabHeight, TRUE);
 
-        RECT tabRect{};
-        GetClientRect(preferencesTab, &tabRect);
+        RECT tabBounds{};
+        GetClientRect(preferencesTab, &tabBounds);
+        RECT tabRect = tabBounds;
         TabCtrl_AdjustRect(preferencesTab, FALSE, &tabRect);
+        clipPreferencesTabPane(tabBounds, tabRect);
         const int viewportWidth = std::max(0L, tabRect.right - tabRect.left);
         const int viewportHeight = std::max(0L, tabRect.bottom - tabRect.top);
         SetWindowPos(preferencesViewport, nullptr, margin + tabRect.left, tabTop + tabRect.top, viewportWidth,
@@ -4362,7 +4384,7 @@ public:
         }
     }
 
-    static LRESULT CALLBACK preferencesPanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR,
+    static LRESULT CALLBACK preferencesPanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR id,
                                                  DWORD_PTR context) {
         auto& self = *reinterpret_cast<Impl*>(context);
         if (const auto result = self.desktopTheme.panelMessage(hwnd, msg, wParam, lParam)) {
@@ -4378,6 +4400,9 @@ public:
             case WM_MOUSEWHEEL:
                 self.scrollPreferencesWheel(GET_WHEEL_DELTA_WPARAM(wParam));
                 return 0;
+            case WM_NCDESTROY:
+                RemoveWindowSubclass(hwnd, preferencesPanelProc, id);
+                break;
         }
         return DefSubclassProc(hwnd, msg, wParam, lParam);
     }
@@ -4402,9 +4427,9 @@ public:
         TabCtrl_SetCurSel(preferencesTab, selectedPreferencesTab);
 
         preferencesViewport = CreateWindowExW(
-            WS_EX_CONTROLPARENT, L"STATIC", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL,
-            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesViewportId)),
-            GetModuleHandleW(nullptr), nullptr);
+            WS_EX_CONTROLPARENT, preferencesViewportClassName(), L"",
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL, 0, 0, 0, 0, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPreferencesViewportId)), GetModuleHandleW(nullptr), nullptr);
         if (preferencesViewport == nullptr) {
             return false;
         }
@@ -7204,6 +7229,13 @@ public:
         preferencesClass.lpszClassName = preferencesWindowClassName();
         RegisterClassW(&preferencesClass);
 
+        WNDCLASSW preferencesViewportClass{};
+        preferencesViewportClass.lpfnWndProc = DefWindowProcW;
+        preferencesViewportClass.hInstance = instance;
+        preferencesViewportClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        preferencesViewportClass.lpszClassName = preferencesViewportClassName();
+        RegisterClassW(&preferencesViewportClass);
+
         WNDCLASSW analysisClass{};
         analysisClass.lpfnWndProc = &Impl::analysisWindowProc;
         analysisClass.hInstance = instance;
@@ -7300,6 +7332,7 @@ public:
 
         UnregisterClassW(shellDialogWindowClassName(), instance);
         UnregisterClassW(analysisWindowClassName(), instance);
+        UnregisterClassW(preferencesViewportClassName(), instance);
         UnregisterClassW(preferencesWindowClassName(), instance);
         UnregisterClassW(viewportClassName(), instance);
         UnregisterClassW(windowClassName(), instance);

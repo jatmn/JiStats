@@ -24,23 +24,18 @@
 #include "db/StorageService.hpp"
 #include "gui/AnalysisPresenter.hpp"
 #include "gui/DashboardPresenter.hpp"
+#include "settings_window_test_support.hpp"
 #include "temp_test_directory.hpp"
 
 using namespace JiStats;
+using JiStats::TestSupport::settingsPage;
+using JiStats::TestSupport::settingsViewport;
 using JiStats::TestSupport::TempTestDirectory;
 
 namespace {
 
 const std::filesystem::path kOpenAIExportFixturePath =
     std::filesystem::path("docs/fixtures/openai/chatgpt-export-redacted/conversations.json");
-
-HWND settingsViewport(HWND settings) {
-    return GetDlgItem(settings, 1124);
-}
-
-HWND settingsPage(HWND settings) {
-    return GetWindow(settingsViewport(settings), GW_CHILD);
-}
 
 bool waitForCondition(const std::function<bool()>& predicate,
                       std::chrono::milliseconds timeout = std::chrono::milliseconds(1500)) {
@@ -435,6 +430,25 @@ TEST_CASE("DashboardPresenter rescales Settings fonts and controls on a DPI chan
     REQUIRE(GetWindowRect(close, &footerBefore));
     CHECK(lastRunBounds.bottom > viewportBounds.bottom);
     CHECK(footerBefore.top >= viewportBounds.bottom);
+
+    // The tab must leave the page controls visible to the window manager.
+    const HDC checkboxDc = GetDC(checkbox);
+    REQUIRE(checkboxDc != nullptr);
+    RECT visibleCheckbox{};
+    const int clip = GetClipBox(checkboxDc, &visibleCheckbox);
+    ReleaseDC(checkbox, checkboxDc);
+    CHECK((clip == SIMPLEREGION || clip == COMPLEXREGION));
+    CHECK_FALSE(IsRectEmpty(&visibleCheckbox));
+
+    // Use the actual non-client scrollbar position for hit testing.
+    SCROLLBARINFO bar{};
+    bar.cbSize = sizeof(bar);
+    REQUIRE(GetScrollBarInfo(viewport, OBJID_VSCROLL, &bar));
+    const int scrollbarX = (bar.rcScrollBar.left + bar.rcScrollBar.right) / 2;
+    const int arrowY = bar.rcScrollBar.top + bar.dxyLineButton / 2;
+    const int thumbY = bar.rcScrollBar.top + (bar.xyThumbTop + bar.xyThumbBottom) / 2;
+    CHECK(SendMessageW(viewport, WM_NCHITTEST, 0, MAKELPARAM(scrollbarX, arrowY)) == HTVSCROLL);
+    CHECK(SendMessageW(viewport, WM_NCHITTEST, 0, MAKELPARAM(scrollbarX, thumbY)) == HTVSCROLL);
 
     SendMessageW(viewport, WM_VSCROLL, SB_BOTTOM, 0);
     REQUIRE(GetWindowRect(lastRun, &lastRunBounds));
