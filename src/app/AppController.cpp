@@ -4340,7 +4340,7 @@ public:
         for (auto nextProvider = providers.begin(); nextProvider != providers.end();) {
             const auto& provider = *nextProvider;
             const auto key = provider->getProviderKey();
-            if (hasProviderOptOutInProgress(key)) {
+            if (exitRequested.load() || hasProviderOptOutInProgress(key)) {
                 nextProvider = providers.erase(nextProvider);
                 continue;
             }
@@ -6511,6 +6511,9 @@ public:
                 continue;
             }
 
+            if (exitRequested.load()) {
+                return false;
+            }
             if (hasProviderOptOutInProgress(provider.providerKey)) {
                 continue;
             }
@@ -7681,6 +7684,9 @@ bool AppController::init(bool launchInBackground) {
             pImpl->importEnabledLocalProviderActivity(loadedPreferences);
             Impl::QuotaRefresh refresh{++pImpl->quotaRefreshGeneration, {}, {}, true};
             viewModel = pImpl->buildDashboardViewModel(now, refresh);
+            if (pImpl->exitRequested.load()) {
+                return true;
+            }
             viewModel.preferences = loadedPreferences; // Use persisted preferences
             executedStartupCatchUp =
                 pImpl->applyRecoveryPersistenceCycle(

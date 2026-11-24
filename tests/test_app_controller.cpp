@@ -966,6 +966,9 @@ TEST_CASE("AppController shows the dashboard and tray while startup quota is pen
     const bool hiddenAtLaunch = !app.isDashboardVisibleForTesting();
     const bool trayShowHandled = app.dispatchTrayEventForTesting(TrayController::TestEvent::MenuShowDashboard);
     const bool dashboardShown = waitForCondition([&]() { return app.isDashboardVisibleForTesting(); });
+    const HWND dashboard = FindWindowW(L"JiStatsDashboardWindow", nullptr);
+    const HWND settings = FindWindowExW(dashboard, nullptr, L"Button", L"&Settings...");
+    const bool settingsDisabled = settings != nullptr && !IsWindowEnabled(settings);
     releaseQuota.set_value();
 
     REQUIRE(startup.get());
@@ -978,12 +981,48 @@ TEST_CASE("AppController shows the dashboard and tray while startup quota is pen
     CHECK(hiddenAtLaunch);
     CHECK(trayShowHandled);
     CHECK(dashboardShown);
+    CHECK(settingsDisabled);
+    CHECK(waitForCondition([settings]() { return settings != nullptr && IsWindowEnabled(settings) != FALSE; }));
     const auto ready = app.getDashboardViewModelForTesting();
     CHECK_FALSE(ready.startupPending);
     const auto* openai = findProviderStatus(ready, "openai");
     REQUIRE(openai != nullptr);
     REQUIRE_FALSE(openai->quotas.empty());
     CHECK(openai->quotas.front().used == 20);
+}
+
+TEST_CASE("AppController stops starting provider requests when exiting during startup", "[app][startup][shell]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, false, true);
+    const auto now = std::time(nullptr);
+    std::promise<void> releaseQuota;
+    auto first = std::make_shared<ControlledQuotaProviderAdapter>(
+        "claude_code", "Claude Code", makeQuotaResponse(now, 10, 100, "interval", "claude_code_local"),
+        releaseQuota.get_future().share());
+    auto later = std::make_shared<ControlledQuotaProviderAdapter>(
+        "openai", "OpenAI", makeQuotaResponse(now, 20, 100, "interval", "openai_subscription_codex_local"));
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(first);
+    providers->addProvider(later);
+    ScopedTrayTestHandler tray([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                  std::string&) -> std::optional<bool> { return true; });
+    AppController app;
+    app.setDisableTaskbarForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+
+    auto startup = std::async(std::launch::async, [&]() { return app.init(); });
+    const bool fetchPending =
+        waitForCondition([&]() { return first->getQuotaFetchCount() > first->getCompletedQuotaFetchCount(); });
+    const bool exitHandled = app.dispatchTrayEventForTesting(TrayController::TestEvent::MenuExit);
+    releaseQuota.set_value();
+
+    REQUIRE(startup.get());
+    CHECK(fetchPending);
+    CHECK(exitHandled);
+    CHECK(later->getQuotaFetchCount() == 0);
+    CHECK(app.run() == 0);
 }
 
 TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds startup", "[app][startup][shell]") {

@@ -1332,6 +1332,7 @@ public:
     std::wstring updatedTooltipBody;
     StorageService placementStorage;
     RECT initialMainWindowRect{}; // Read and written by the UI thread.
+    std::optional<RECT> deferredStartupMainPlacement;
     std::optional<RECT> savedAnalysisWindowRect;
     std::optional<RECT> initialAnalysisFallbackRect;
     std::thread placementWriter;
@@ -1525,8 +1526,22 @@ public:
         return RECT{*x, *y, *x + *width, *y + *height};
     }
 
+    void restoreMainPlacementWhenWindowed(HWND hwnd) {
+        if (!deferredStartupMainPlacement || IsIconic(hwnd) || IsZoomed(hwnd)) {
+            return;
+        }
+        const RECT saved = *deferredStartupMainPlacement;
+        deferredStartupMainPlacement.reset();
+        RECT current{};
+        if (GetWindowRect(hwnd, &current) && EqualRect(&current, &initialMainWindowRect)) {
+            SetWindowPos(hwnd, nullptr, saved.left, saved.top, saved.right - saved.left, saved.bottom - saved.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            fitInitialDashboardBounds(hwnd);
+        }
+    }
+
     void persistMainWindowPlacement(HWND hwnd) {
-        if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd)) {
+        if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd) || deferredStartupMainPlacement) {
             return;
         }
 
@@ -4082,6 +4097,7 @@ public:
             EnableMenuItem(menu, kMenuFileExportHtmlId, availability);
         }
         EnableWindow(historyButton, !model.startupPending);
+        EnableWindow(dashboardSettingsButton, !model.startupPending);
         setWindowText(
             offlineNoticeTitle,
             utf8ToWide(model.offlineNoticeTitle.empty()
@@ -5699,6 +5715,9 @@ public:
                 }
                 return 0;
             }
+            if (wParam == SIZE_RESTORED) {
+                restoreMainPlacementWhenWindowed(hwnd);
+            }
             layoutMainControls();
             return 0;
         case WM_COMMAND:
@@ -5885,17 +5904,10 @@ public:
             }
             return 0;
         }
-        case WM_JISTATS_RESTORE_MAIN_PLACEMENT: {
-            RECT current{};
-            if (!IsIconic(hwnd) && !IsZoomed(hwnd) && GetWindowRect(hwnd, &current) &&
-                EqualRect(&current, &initialMainWindowRect)) {
-                const auto& saved = *reinterpret_cast<const RECT*>(lParam);
-                SetWindowPos(hwnd, nullptr, saved.left, saved.top, saved.right - saved.left, saved.bottom - saved.top,
-                             SWP_NOZORDER | SWP_NOACTIVATE);
-                fitInitialDashboardBounds(hwnd);
-            }
+        case WM_JISTATS_RESTORE_MAIN_PLACEMENT:
+            deferredStartupMainPlacement = *reinterpret_cast<const RECT*>(lParam);
+            restoreMainPlacementWhenWindowed(hwnd);
             return 0;
-        }
         case WM_JISTATS_ATTACH_ANALYSIS:
             if (analysisWindow != nullptr && analysisPresenter != nullptr) {
                 PostMessageW(analysisWindow, WM_JISTATS_ATTACH_ANALYSIS, 0, 0);
@@ -7184,6 +7196,7 @@ bool DashboardPresenter::init(bool deferPlacement) {
 #ifdef _WIN32
     std::optional<RECT> savedMainRect;
     pImpl->savedAnalysisWindowRect.reset();
+    pImpl->deferredStartupMainPlacement.reset();
     if (!deferPlacement) {
         if (pImpl->ensurePlacementStorage()) {
             savedMainRect = pImpl->loadSavedMainWindowRect();
