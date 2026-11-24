@@ -121,6 +121,10 @@ constexpr std::time_t kRetentionGapMarkerDays = 90;
 constexpr std::time_t kRetentionIntervalSeconds = 24 * 3600;
 constexpr auto kRetentionCheckInterval = std::chrono::hours(1);
 
+constexpr std::time_t rawUsageRetentionCutoff(std::time_t now) {
+    return std::max<std::time_t>(0, now - kRetentionRawEventDays * 86400);
+}
+
 bool isProviderTrackingEnabled(
     const DashboardPreferences& preferences,
     const std::string& providerKey) {
@@ -3522,7 +3526,13 @@ bool providerHasBackfilledUsage(
     return result.getInt64(0, 0) > 0;
 }
 
-bool rebuildUsageRollupsForRange(StorageService& storage, std::time_t from, std::time_t to) {
+bool rebuildUsageRollupsForRange(StorageService& storage, std::time_t from, std::time_t to,
+                                 std::time_t rawEventCutoff) {
+    // Storage normalizes the requested range down to bucket boundaries. Round the cutoff
+    // forward first so a bucket with pruned raw events keeps its saved total.
+    const std::time_t hourlyFrom = std::max(from, utcHourStart(rawEventCutoff + 3600 - 1));
+    const std::time_t dailyFrom = std::max(from, utcDayStart(rawEventCutoff + 86400 - 1));
+
     QueryResult scopes = storage.execute(
         "SELECT DISTINCT provider_id, account_id FROM usage_events "
         "WHERE event_time_utc >= ? AND event_time_utc <= ? "
@@ -3536,18 +3546,15 @@ bool rebuildUsageRollupsForRange(StorageService& storage, std::time_t from, std:
     for (size_t row = 0; row < scopes.rowCount(); ++row) {
         const int providerId = scopes.getInt(row, 0);
         const int accountId = scopes.getInt(row, 1);
-        success = storage.rebuildUsageRollups(
-            UsageRollupResolution::Hourly,
-            providerId,
-            accountId,
-            from,
-            to) && success;
-        success = storage.rebuildUsageRollups(
-            UsageRollupResolution::Daily,
-            providerId,
-            accountId,
-            from,
-            to) && success;
+        if (hourlyFrom <= to) {
+            success =
+                storage.rebuildUsageRollups(UsageRollupResolution::Hourly, providerId, accountId, hourlyFrom, to) &&
+                success;
+        }
+        if (dailyFrom <= to) {
+            success = storage.rebuildUsageRollups(UsageRollupResolution::Daily, providerId, accountId, dailyFrom, to) &&
+                      success;
+        }
     }
 
     return success;
@@ -4097,6 +4104,8 @@ public:
     std::string kimiCodeDetectionMessage;
     std::time_t lastScheduledExportAt = 0;
     std::time_t lastRetentionRunAt = 0;
+    std::mutex rawUsageRetentionMutex;
+    std::time_t rawUsagePrunedBefore = 0;
     std::atomic<bool> shuttingDown{false};
     std::atomic<bool> exitRequested{false};
 #ifdef JISTATS_ENABLE_TEST_HOOKS
@@ -5736,6 +5745,7 @@ public:
 
     void loadRetentionStateFromStorage() {
         lastRetentionRunAt = 0;
+        rawUsagePrunedBefore = 0;
         if (!storageAvailable) {
             return;
         }
@@ -5743,6 +5753,7 @@ public:
         if (const auto value = settingsService.getString(preference_keys::RETENTION_LAST_RUN_UTC)) {
             if (const auto parsed = parseTimeUtcIso(*value)) {
                 lastRetentionRunAt = *parsed;
+                rawUsagePrunedBefore = rawUsageRetentionCutoff(*parsed);
             }
         }
     }
@@ -5764,7 +5775,7 @@ public:
 
         constexpr std::time_t kSecondsPerDay = 24 * 3600;
 
-        const std::time_t rawEventCutoff = now - (kRetentionRawEventDays * kSecondsPerDay);
+        const std::time_t rawEventCutoff = rawUsageRetentionCutoff(now);
         const std::time_t hourlyRollupCutoff = now - (kRetentionHourlyRollupDays * kSecondsPerDay);
         const std::time_t dailyRollupCutoff = now - (kRetentionDailyRollupDays * kSecondsPerDay);
         const std::time_t gapMarkerCutoff = now - (kRetentionGapMarkerDays * kSecondsPerDay);
@@ -5772,9 +5783,14 @@ public:
         JISTATS_LOG_INFO(LogCategory::Db, "Retention pass starting");
 
         bool allSucceeded = true;
-        if (!storageService.deleteUsageEventsOlderThan(rawEventCutoff)) {
-            JISTATS_LOG_WARN(LogCategory::Db, "Retention: failed to delete old usage events");
-            allSucceeded = false;
+        {
+            std::lock_guard<std::mutex> retentionLock(rawUsageRetentionMutex);
+            if (storageService.deleteUsageEventsOlderThan(rawEventCutoff)) {
+                rawUsagePrunedBefore = std::max(rawUsagePrunedBefore, rawEventCutoff);
+            } else {
+                JISTATS_LOG_WARN(LogCategory::Db, "Retention: failed to delete old usage events");
+                allSucceeded = false;
+            }
         }
         if (!storageService.deleteUsageRollupsOlderThan(
                 UsageRollupResolution::Hourly, hourlyRollupCutoff)) {
@@ -6816,9 +6832,15 @@ public:
             }
         }
 
-        // Rebuild usage rollups for the recovery range
-        if (!rebuildUsageRollupsForRange(storageService, recoveryStart, now) || exitRequested.load()) {
-            return false;
+        {
+            // Raw pruning must wait until the rebuild has finished using this cutoff.
+            std::lock_guard<std::mutex> retentionLock(rawUsageRetentionMutex);
+            const std::time_t rawEventCutoff =
+                std::max(rawUsagePrunedBefore, rawUsageRetentionCutoff(std::max(now, currentTime())));
+            if (!rebuildUsageRollupsForRange(storageService, recoveryStart, now, rawEventCutoff) ||
+                exitRequested.load()) {
+                return false;
+            }
         }
 
         std::vector<PersistedGapMarker> gapMarkers;

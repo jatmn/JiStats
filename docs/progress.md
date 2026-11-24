@@ -86,6 +86,8 @@ Record completed work, the revision and evidence, and any remaining verification
 
 - The startup dashboard shows the Codex source and the saved reset time for each cached quota window. The controller test saves a synthetic rollout, restarts, and checks the weekly-only and paired allowances before the first live refresh can publish. An explicit window ending at capture keeps its reset, while a legacy placeholder still shows an unknown reset. [Issue #88](https://github.com/jatmn/JiStats/issues/88)
 
+- Catch-up preserves retained usage rollups for buckets that start before the raw-event cutoff. On `dc43493`, the [SQLite controller regression](../tests/test_app_controller.cpp) failed nine assertions under Wine in the catch-up case that preserves rollups outside complete raw history. It verifies that recent and fully retained boundary buckets update. The first fix still failed three assertions after a clock rollback. Catch-up now accounts for recorded retention and preserves those cutoff buckets as well. [Issue #98](https://github.com/jatmn/JiStats/issues/98)
+
 - Analysis keeps providers and accounts selectable when daily rollups outlive raw usage. The SQLite regression rebuilds five requests into a daily rollup, removes the raw rows, and verifies the saved account selection and totals. [Issue #81](https://github.com/jatmn/JiStats/issues/81)
 
 - The dashboard joins completed import, export, MiniMax and offline action workers as their results arrive. Each action keeps at most one worker handle, and shutdown still joins outstanding work. The repeated-retry regression exercises the callback and completion path. Native Windows CI verifies its process handle assertion. [Issue #77](https://github.com/jatmn/JiStats/issues/77)
