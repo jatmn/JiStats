@@ -244,7 +244,7 @@ TEST_CASE("MiniMax live capture validates stored credentials through MiniMax ada
         credentialStore,
         []() {
             auto adapter = std::make_shared<MiniMaxAdapter>();
-            adapter->setMockValidationResponse(true, 200, "{\"model_remains\":[]}");
+            adapter->setMockValidationResponse(true, 200, R"({"base_resp":{"status_code":0},"model_remains":[]})");
             return adapter;
         });
 
@@ -306,7 +306,7 @@ TEST_CASE("MiniMax live capture writes successful capture output to JSON",
         credentialStore,
         [mockQuotaResponse]() {
             auto adapter = std::make_shared<MiniMaxAdapter>();
-            adapter->setMockValidationResponse(true, 200, "{\"model_remains\":[]}");
+            adapter->setMockValidationResponse(true, 200, R"({"base_resp":{"status_code":0},"model_remains":[]})");
             adapter->setMockQuotaResponse(mockQuotaResponse);
             return adapter;
         });
@@ -361,7 +361,7 @@ TEST_CASE("MiniMax live capture creates nested output directories when writing J
         credentialStore,
         [mockQuotaResponse]() {
             auto adapter = std::make_shared<MiniMaxAdapter>();
-            adapter->setMockValidationResponse(true, 200, "{\"model_remains\":[]}");
+            adapter->setMockValidationResponse(true, 200, R"({"base_resp":{"status_code":0},"model_remains":[]})");
             adapter->setMockQuotaResponse(mockQuotaResponse);
             return adapter;
         });

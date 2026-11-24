@@ -249,14 +249,34 @@ TEST_CASE("MiniMax adapter validates subscription credentials against the config
 
     MiniMaxSubscriptionCredentialProfile profile = makeSubscriptionProfile("token_plan");
     REQUIRE(adapter.storeSubscriptionCredential(profile, "sk-tp-secret"));
-    adapter.setMockValidationResponse(true, 200, "{\"model_remains\":[]}");
+    adapter.setMockValidationResponse(true, 200, R"({"base_resp":{"status_code":0},"model_remains":[]})");
 
     REQUIRE(adapter.validateCredentials());
 
     const MiniMaxSubscriptionCredentialProfile stored = adapter.getSubscriptionCredentialProfile();
     REQUIRE(stored.validationState == "valid");
     REQUIRE(stored.lastValidatedAt > 0);
+    CHECK(stored.lastValidationError.empty());
     REQUIRE(adapter.getLastResolvedEndpointForTesting() == "/v1/token_plan/remains");
+
+    SECTION("provider rejection over HTTP 200 replaces the valid state") {
+        adapter.setMockValidationResponse(true, 200,
+                                          R"({"base_resp":{"status_code":1004,"status_msg":"authentication failed"}})");
+        REQUIRE_FALSE(adapter.validateCredentials());
+        const auto rejected = adapter.getSubscriptionCredentialProfile();
+        CHECK(rejected.validationState == "invalid");
+        CHECK(rejected.lastValidatedAt > 0);
+        CHECK(rejected.lastValidationError == "MiniMax subscription validation failed with a provider error");
+    }
+
+    SECTION("a missing or malformed provider status cannot validate the key") {
+        const auto body = GENERATE(R"({"model_remains":[]})", R"({"base_resp":{"status_code":"0"}})");
+        adapter.setMockValidationResponse(true, 200, body);
+        REQUIRE_FALSE(adapter.validateCredentials());
+        const auto unconfirmed = adapter.getSubscriptionCredentialProfile();
+        CHECK(unconfirmed.validationState == "unreachable");
+        CHECK(unconfirmed.lastValidationError == "MiniMax subscription validation response has no numeric status code");
+    }
 }
 
 TEST_CASE("MiniMax adapter prefers stored subscription credentials over legacy API keys for hydrated profiles",
