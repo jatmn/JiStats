@@ -541,8 +541,8 @@ bool tryMapCodexSnapshotToQuotaResponse(
     response.used = usedPercent;
     response.limit = 100;
     response.remaining = response.limit - response.used;
-    response.windowType = "interval";
-    if (snapshot.secondary.present) {
+    response.windowType = bucket->windowDurationMinutes == (7 * 24 * 60) ? "weekly" : "interval";
+    if (snapshot.primary.present && snapshot.secondary.present) {
         const long long secondaryUsedPercent = std::clamp<long long>(
             static_cast<long long>(std::llround(snapshot.secondary.usedPercent)),
             0,

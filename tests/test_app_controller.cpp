@@ -3261,6 +3261,70 @@ TEST_CASE("AppController applies taskbar overlay preference toggles without leav
     app.shutdown();
 }
 
+TEST_CASE("AppController displays and saves one Codex allowance per observed window",
+          "[app][runtime][openai][codex][quota_windows]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true);
+    TempTestDirectory codexHome("jistats_codex_windows");
+    ScopedEnvironmentVariable codexHomeEnv("CODEX_HOME", codexHome.path().string());
+    std::filesystem::create_directories(codexHome.path() / "sessions");
+    const std::time_t now = std::time(nullptr);
+    const bool paired = GENERATE(false, true);
+    const std::string primary =
+        paired ? R"json({"used_percent":28,"window_minutes":300,"resets_at":)json" + std::to_string(now + 3600) + "}"
+               : "null";
+    std::ofstream rollout(codexHome.path() / "sessions" / "rollout-windows.jsonl");
+    REQUIRE(rollout.is_open());
+    rollout << R"json({"type":"event_msg","timestamp":")json" << toUtcIso(now)
+            << R"json(","payload":{"type":"token_count","rate_limits":{"primary":)json" << primary
+            << R"json(,"secondary":{"used_percent":6,"window_minutes":10080,"resets_at":)json" << now + 86400 << "}}}}";
+    rollout.close();
+    REQUIRE(rollout.good());
+
+    auto adapter = std::make_shared<OpenAIAdapter>();
+    const QuotaResponse quota = adapter->fetchQuota();
+    REQUIRE(quota.success);
+    CHECK(quota.windowType == (paired ? "interval" : "weekly"));
+    CHECK(quota.remaining == (paired ? 72 : 94));
+    CHECK(quota.secondaryLimit == (paired ? 100 : 0));
+    if (paired) {
+        CHECK(quota.secondaryWindowType == "weekly");
+        CHECK(quota.secondaryRemaining == 94);
+    }
+
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(adapter);
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+
+    const auto summaries = app.getDashboardUsageProgressSummariesForTesting();
+    const auto isCodexSummary = [](const DashboardSummaryItem& item) { return item.label == "OpenAI Subscription"; };
+    REQUIRE(std::count_if(summaries.begin(), summaries.end(), isCodexSummary) == 1);
+    const auto summary = std::find_if(summaries.begin(), summaries.end(), isCodexSummary);
+    CHECK(summary->badge == (paired ? "Primary window: 72% remaining" : "7-day: 94% remaining"));
+    CHECK(summary->secondaryBadge == (paired ? "Secondary window: 94% remaining" : ""));
+    app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto snapshots =
+        storage.execute("SELECT plans.quota_window, quota_snapshots.remaining_value FROM quota_snapshots "
+                        "JOIN plans ON plans.id = quota_snapshots.plan_id ORDER BY plans.quota_window;");
+    REQUIRE(snapshots.success());
+    REQUIRE(snapshots.rowCount() == (paired ? 2 : 1));
+    if (paired) {
+        CHECK(snapshots.getString(0, 0) == "interval");
+        CHECK(snapshots.getInt64(0, 1) == 72);
+    }
+    CHECK(snapshots.getString(snapshots.rowCount() - 1, 0) == "weekly");
+    CHECK(snapshots.getInt64(snapshots.rowCount() - 1, 1) == 94);
+}
+
 TEST_CASE("AppController labels Codex-local quota rows without generic API wording", "[app][runtime]") {
     const std::time_t now = std::time(nullptr);
     auto codexProvider = makeCurrentQuotaProvider(
