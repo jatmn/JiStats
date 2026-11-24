@@ -6,6 +6,8 @@
 #include <fstream>
 #include <sstream>
 
+#include <windows.h>
+
 namespace JiStats {
 
 namespace {
@@ -50,20 +52,97 @@ std::string jsonEscape(const std::string& value) {
     return stream.str();
 }
 
-bool ensureOutputParentDirectory(const std::string& outputPath, std::string& error) {
-    const std::filesystem::path path(outputPath);
-    const std::filesystem::path parent = path.parent_path();
-    if (!parent.empty()) {
-        std::error_code ec;
-        std::filesystem::create_directories(parent, ec);
-        if (ec) {
-            error = "Failed to create output directory: " + parent.string();
-            return false;
+std::filesystem::path resolveCaptureOutputPath(std::filesystem::path path) {
+    std::filesystem::path suffix;
+    while (!path.empty()) {
+        const HANDLE handle =
+            CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (handle != INVALID_HANDLE_VALUE) {
+            const DWORD capacity = GetFinalPathNameByHandleW(handle, nullptr, 0, FILE_NAME_NORMALIZED);
+            std::wstring resolved(capacity, L'\0');
+            const DWORD length =
+                capacity == 0 ? 0 : GetFinalPathNameByHandleW(handle, resolved.data(), capacity, FILE_NAME_NORMALIZED);
+            CloseHandle(handle);
+            if (length == 0 || length >= capacity) {
+                return {};
+            }
+
+            resolved.resize(length);
+            // Keep Win32's extended prefix for marker checks and writes to deep paths.
+            auto resolvedPath = std::filesystem::path(resolved);
+            return suffix.empty() ? resolvedPath : resolvedPath / suffix;
+        }
+
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+            return {};
+        }
+        // A dangling reparse point is not a missing path component we can append safely.
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            return {};
+        }
+        const auto parent = path.parent_path();
+        if (parent == path) {
+            return {};
+        }
+        suffix = suffix.empty() ? path.filename() : path.filename() / suffix;
+        path = parent;
+    }
+    return {};
+}
+
+std::filesystem::path normalizeCaptureOutputPath(const std::filesystem::path& path) {
+    // Explicit extended paths already use Win32's literal naming rules.
+    if (path.native().compare(0, 4, LR"(\\?\)") == 0) {
+        return path;
+    }
+
+    const DWORD capacity = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    if (capacity == 0) {
+        return {};
+    }
+    std::wstring normalized(capacity, L'\0');
+    const DWORD length = GetFullPathNameW(path.c_str(), capacity, normalized.data(), nullptr);
+    if (length == 0 || length >= capacity) {
+        return {};
+    }
+    normalized.resize(length);
+    return std::filesystem::path(normalized);
+}
+
+std::optional<std::filesystem::path> prepareCaptureOutputPath(const std::string& outputPath, std::string& error) {
+    std::error_code ec;
+    const auto normalized = normalizeCaptureOutputPath(std::filesystem::path(outputPath));
+    const auto path = normalized.empty() ? std::filesystem::path{} : resolveCaptureOutputPath(normalized);
+    if (path.empty()) {
+        error = "Failed to resolve output path: " + outputPath;
+        return std::nullopt;
+    }
+
+    const auto parent = path.parent_path();
+    for (auto directory = parent; !directory.empty(); directory = directory.parent_path()) {
+        // Recognize a source tree even for an out-of-tree build or an extracted source archive.
+        if (std::filesystem::is_regular_file(directory / "CMakeLists.txt", ec) &&
+            std::filesystem::is_regular_file(directory / "AGENTS.md", ec) &&
+            std::filesystem::is_regular_file(directory / "src" / "providers" / "minimax" / "MiniMaxLiveCapture.cpp",
+                                             ec)) {
+            error = "Capture output must be outside the JiStats source checkout.";
+            return std::nullopt;
+        }
+        if (directory == directory.root_path()) {
+            break;
         }
     }
 
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+        error = "Failed to create output directory: " + parent.string();
+        return std::nullopt;
+    }
     error.clear();
-    return true;
+    return path;
 }
 
 std::string planDisplayName(const std::string& planKey) {
@@ -321,11 +400,12 @@ bool MiniMaxLiveCapture::writeCaptureJson(
     const MiniMaxCaptureResult& result,
     const std::string& outputPath,
     std::string& error) const {
-    if (!ensureOutputParentDirectory(outputPath, error)) {
+    const auto path = prepareCaptureOutputPath(outputPath, error);
+    if (!path) {
         return false;
     }
 
-    std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+    std::ofstream output(*path, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
         error = "Failed to open output path: " + outputPath;
         return false;
@@ -385,11 +465,12 @@ bool MiniMaxLiveCapture::writeDiagnosticJson(
     const MiniMaxDiagnosticReport& report,
     const std::string& outputPath,
     std::string& error) const {
-    if (!ensureOutputParentDirectory(outputPath, error)) {
+    const auto path = prepareCaptureOutputPath(outputPath, error);
+    if (!path) {
         return false;
     }
 
-    std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+    std::ofstream output(*path, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
         error = "Failed to open output path: " + outputPath;
         return false;

@@ -25,4 +25,6 @@ A dedicated PAYG key yielded per-request token usage on the text API in the reco
 
 For standalone readiness, capture, and diagnostics commands, add `-DJISTATS_BUILD_MINIMAX_CLI=ON` when configuring and include `JiStatsMiniMaxCli` in the `--target` list when building. Follow the [Linux cross-build instructions](../../README.md#building-on-linux) or the [Windows build instructions](../../README.md#building-on-windows).
 
+Keep native capture and diagnostics output outside any JiStats source checkout. Both the desktop capture command and the standalone CLI reject paths inside a source tree, including when the executable was built elsewhere.
+
 The option defaults to `OFF`. Enabling it builds `JiStatsMiniMaxCli.exe` alongside the desktop app, and `cmake --install` installs it to the install prefix's `bin/` directory. The desktop MiniMax integration is available in either configuration. `JISTATS_BUILD_TESTS` controls the tests independently.

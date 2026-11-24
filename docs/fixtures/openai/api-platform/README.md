@@ -41,4 +41,4 @@ The first live probe returned `403` from both organization endpoints because the
 
 To validate freshness, use a credential with `api.usage.read`, the correct organization-scoped role, and explicit organization context when needed. See the [provider validation guide](../../../providers/openai-api-platform.md) for what to record.
 
-The capture helper writes raw output under `%LOCALAPPDATA%/JiStats/captures/openai/api-platform` by default. Keep those files local.
+The capture helper writes raw output under `%LOCALAPPDATA%/JiStats/captures/openai/api-platform` by default. Use `-OutputDir` for a different location outside the source checkout. Paths inside the source checkout are rejected.
