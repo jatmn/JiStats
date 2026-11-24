@@ -110,6 +110,7 @@ public:
         const std::string& body = "",
         const std::string& error = "");
     void setMiniMaxValidationReleaseForTesting(std::shared_future<void> release);
+    void waitForMiniMaxValidationForTesting();
     void setOpenAICodexRefreshPollIntervalForTesting(int intervalMs);
     void setLocalProviderRefreshPollIntervalForTesting(int intervalMs);
     void setCurrentTimeForTesting(std::time_t now);

@@ -16,6 +16,7 @@ MiniMax is opt-in and mirrors two subscription surfaces. In **File → Settings 
 - Reopening Settings after save or validation should show the stored profile and a masked secret field. Revalidation should use the stored credential when the user has entered no replacement.
 - Keep missing, saved, validating, validated, failed, and temporarily unavailable states distinct. Wrong-surface and rejected-key results should stay distinguishable from network failures and endpoint unavailability.
 - Subscription validation requires a numeric `base_resp.status_code` of zero in the remains response. A nonzero code fails validation even when the HTTP request succeeds. A missing or malformed code leaves validation unavailable.
+- A validation checks the credential and surface from the submitted request. Saving a replacement or starting another validation for the same plan makes an earlier response obsolete. A validation result for one plan does not change which plan is active.
 - Verify adding, replacing, and revalidating a stored credential, including both successful and failed validation and unavailable responses. The [adapter tests](../../tests/test_minimax_adapter.cpp) and [controller tests](../../tests/test_app_controller.cpp) cover the provider and settings paths. Settings currently has no action for removing a stored credential.
 
 ## PAYG
