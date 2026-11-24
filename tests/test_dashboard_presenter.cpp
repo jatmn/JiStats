@@ -1078,6 +1078,42 @@ TEST_CASE("DashboardPresenter runs offline notice actions asynchronously", "[das
     presenter.shutdown();
 }
 
+TEST_CASE("DashboardPresenter releases completed retry workers while it stays open",
+          "[dashboard_presenter][offline][async]") {
+    std::atomic<int> retries{0};
+    DashboardPresenter presenter;
+    DashboardViewModel model = makeQuotaViewModel();
+    model.runtimeState = RuntimeState::Offline;
+    model.isOnline = false;
+    model.offlineRetryAvailable = true;
+    model.offlineNoticeVisible = true;
+    model.offlineNoticeTitle = "Connection Lost";
+    model.offlineNoticeMessage = "Retry can be requested again after the previous action completes.";
+    presenter.setOfflineRetryActionCallback(
+        [&]() { return DashboardNoticeActionResult{true, "Completed retry " + std::to_string(++retries)}; });
+
+    REQUIRE(presenter.init());
+    presenter.updateViewModel(model);
+    REQUIRE(waitForCondition([&]() { return presenter.isOfflineNoticeVisibleForTesting(); }));
+
+    const auto retry = [&](int expected) {
+        REQUIRE(presenter.clickOfflineRetryForTesting());
+        REQUIRE(waitForCondition(
+            [&]() { return presenter.getStatusTextForTesting() == "Completed retry " + std::to_string(expected); }));
+    };
+    retry(1);
+
+    DWORD handlesBefore = 0;
+    REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &handlesBefore));
+    for (int expected = 2; expected <= 25; ++expected) {
+        retry(expected);
+    }
+    DWORD handlesAfter = 0;
+    REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &handlesAfter));
+    // Allow incidental process handles. Retaining one worker for every action adds at least 24.
+    CHECK(handlesAfter <= handlesBefore + 8);
+}
+
 TEST_CASE("DashboardPresenter carries rebuilt analysis data through the shell view model", "[dashboard_presenter][analysis]") {
     DashboardPresenter presenter;
     DashboardViewModel model = makeQuotaViewModel();

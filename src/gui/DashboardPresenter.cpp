@@ -1109,11 +1109,12 @@ public:
     std::mutex miniMaxActionMutex;
     std::mutex offlineRetryMutex;
     std::mutex offlineDismissMutex;
-    std::vector<std::thread> openAIImportThreads;
-    std::vector<std::thread> htmlExportThreads;
-    std::vector<std::thread> miniMaxActionThreads;
-    std::vector<std::thread> offlineRetryThreads;
-    std::vector<std::thread> offlineDismissThreads;
+    // The UI thread owns these handles until waitForExit has joined the UI thread.
+    std::thread openAIImportThread;
+    std::thread htmlExportThread;
+    std::thread miniMaxActionThread;
+    std::thread offlineRetryThread;
+    std::thread offlineDismissThread;
     bool openAIImportInFlight = false;
     bool htmlExportInFlight = false;
     bool miniMaxActionInFlight = false;
@@ -2619,6 +2620,12 @@ public:
         return wideToUtf8(filePath);
     }
 
+    static void joinActionThread(std::thread& thread) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
     void notifyOpenAIImportRequested() {
         {
             std::lock_guard<std::mutex> lock(openAIImportMutex);
@@ -2658,8 +2665,8 @@ public:
 
         setStatusText(L"OpenAI export import is running...");
         const std::string selectedPath = *inputPath;
-        std::lock_guard<std::mutex> lock(openAIImportMutex);
-        openAIImportThreads.emplace_back([this, callback, selectedPath]() {
+        joinActionThread(openAIImportThread);
+        openAIImportThread = std::thread([this, callback, selectedPath]() {
             DashboardOpenAIImportResult result = callback(selectedPath);
             HWND hwnd = nullptr;
             {
@@ -2677,22 +2684,9 @@ public:
         });
     }
 
-    void joinOpenAIImportThreads() {
-        std::vector<std::thread> threads;
-        {
-            std::lock_guard<std::mutex> lock(openAIImportMutex);
-            threads.swap(openAIImportThreads);
-        }
-
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
-
     void handleOpenAIImportCompletion(DashboardOpenAIImportResult* result) {
         std::unique_ptr<DashboardOpenAIImportResult> ownedResult(result);
+        joinActionThread(openAIImportThread);
         {
             std::lock_guard<std::mutex> lock(openAIImportMutex);
             openAIImportInFlight = false;
@@ -2762,62 +2756,6 @@ public:
         return narrowPath;
     }
 
-    void joinHtmlExportThreads() {
-        std::vector<std::thread> threads;
-        {
-            std::lock_guard<std::mutex> lock(htmlExportMutex);
-            threads.swap(htmlExportThreads);
-        }
-
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
-
-    void joinMiniMaxActionThreads() {
-        std::vector<std::thread> threads;
-        {
-            std::lock_guard<std::mutex> lock(miniMaxActionMutex);
-            threads.swap(miniMaxActionThreads);
-        }
-
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
-
-    void joinOfflineRetryThreads() {
-        std::vector<std::thread> threads;
-        {
-            std::lock_guard<std::mutex> lock(offlineRetryMutex);
-            threads.swap(offlineRetryThreads);
-        }
-
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
-
-    void joinOfflineDismissThreads() {
-        std::vector<std::thread> threads;
-        {
-            std::lock_guard<std::mutex> lock(offlineDismissMutex);
-            threads.swap(offlineDismissThreads);
-        }
-
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
-
     void notifyHtmlExportRequested() {
         {
             std::lock_guard<std::mutex> lock(htmlExportMutex);
@@ -2857,8 +2795,8 @@ public:
 
         setStatusText(L"Exporting HTML report...");
         const std::string selectedPath = *outputPath;
-        std::lock_guard<std::mutex> lock(htmlExportMutex);
-        htmlExportThreads.emplace_back([this, callback, selectedPath]() {
+        joinActionThread(htmlExportThread);
+        htmlExportThread = std::thread([this, callback, selectedPath]() {
             DashboardHtmlExportResult result = callback(selectedPath);
             HWND hwnd = nullptr;
             {
@@ -2878,6 +2816,7 @@ public:
 
     void handleHtmlExportCompletion(DashboardHtmlExportResult* result) {
         std::unique_ptr<DashboardHtmlExportResult> ownedResult(result);
+        joinActionThread(htmlExportThread);
         {
             std::lock_guard<std::mutex> lock(htmlExportMutex);
             htmlExportInFlight = false;
@@ -2923,8 +2862,8 @@ public:
         }
 
         setStatusText(L"Retrying provider connectivity...");
-        std::lock_guard<std::mutex> lock(offlineRetryMutex);
-        offlineRetryThreads.emplace_back([this, callback]() {
+        joinActionThread(offlineRetryThread);
+        offlineRetryThread = std::thread([this, callback]() {
             DashboardNoticeActionResult result = callback();
             HWND hwnd = nullptr;
             {
@@ -2944,6 +2883,7 @@ public:
 
     void handleOfflineRetryCompletion(OfflineRetryCompletionParams* params) {
         std::unique_ptr<OfflineRetryCompletionParams> ownedParams(params);
+        joinActionThread(offlineRetryThread);
         {
             std::lock_guard<std::mutex> lock(offlineRetryMutex);
             offlineRetryInFlight = false;
@@ -2985,8 +2925,8 @@ public:
         }
 
         setStatusText(L"Dismissing offline notice...");
-        std::lock_guard<std::mutex> lock(offlineDismissMutex);
-        offlineDismissThreads.emplace_back([this, callback]() {
+        joinActionThread(offlineDismissThread);
+        offlineDismissThread = std::thread([this, callback]() {
             DashboardNoticeActionResult result = callback();
             HWND hwnd = nullptr;
             {
@@ -3006,6 +2946,7 @@ public:
 
     void handleOfflineDismissCompletion(OfflineDismissCompletionParams* params) {
         std::unique_ptr<OfflineDismissCompletionParams> ownedParams(params);
+        joinActionThread(offlineDismissThread);
         {
             std::lock_guard<std::mutex> lock(offlineDismissMutex);
             offlineDismissInFlight = false;
@@ -3835,8 +3776,8 @@ public:
         setStatusText(inFlightStatus);
 
         const auto submittedRevision = miniMaxAccountEditRevision.load();
-        std::lock_guard<std::mutex> lock(miniMaxActionMutex);
-        miniMaxActionThreads.emplace_back([this, callback, request, submittedRevision]() {
+        joinActionThread(miniMaxActionThread);
+        miniMaxActionThread = std::thread([this, callback, request, submittedRevision]() {
             DashboardMiniMaxCredentialResult result = callback(request);
             HWND hwnd = nullptr;
             {
@@ -3857,6 +3798,7 @@ public:
 
     void handleMiniMaxCredentialCompletion(MiniMaxActionCompletionParams* params) {
         std::unique_ptr<MiniMaxActionCompletionParams> ownedParams(params);
+        joinActionThread(miniMaxActionThread);
         {
             std::lock_guard<std::mutex> lock(miniMaxActionMutex);
             miniMaxActionInFlight = false;
@@ -7228,12 +7170,12 @@ int DashboardPresenter::waitForExit() {
     if (!pImpl->uiThread.joinable() && pImpl->placementWriter.joinable()) {
         pImpl->joinPlacementWriter();
     }
+    Impl::joinActionThread(pImpl->openAIImportThread);
+    Impl::joinActionThread(pImpl->htmlExportThread);
+    Impl::joinActionThread(pImpl->miniMaxActionThread);
+    Impl::joinActionThread(pImpl->offlineRetryThread);
+    Impl::joinActionThread(pImpl->offlineDismissThread);
 #endif
-    pImpl->joinOpenAIImportThreads();
-    pImpl->joinHtmlExportThreads();
-    pImpl->joinMiniMaxActionThreads();
-    pImpl->joinOfflineRetryThreads();
-    pImpl->joinOfflineDismissThreads();
 
     std::lock_guard<std::mutex> lock(pImpl->mutex);
     pImpl->initialized = false;
