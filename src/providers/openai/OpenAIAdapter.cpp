@@ -456,6 +456,14 @@ bool shouldReplaceCodexSnapshot(
         return candidate.eventTime > current.eventTime;
     }
 
+    if (candidate.eventTime > 0) {
+        const int candidateSubsecond = candidate.eventSubsecondNs.value_or(0);
+        const int currentSubsecond = current.eventSubsecondNs.value_or(0);
+        if (candidateSubsecond != currentSubsecond) {
+            return candidateSubsecond > currentSubsecond;
+        }
+    }
+
     return candidate.sourcePath > current.sourcePath;
 }
 
@@ -692,7 +700,7 @@ CodexRateLimitSnapshot OpenAIAdapter::parseCodexRateLimitFixtureFile(const std::
         const JsonValue* rateLimitsObject = nullptr;
         std::string sourceType;
         if (tryExtractCodexRateLimitObject(root, rateLimitsObject, sourceType)) {
-            const std::time_t eventTime = tryExtractCodexEventTimestamp(root);
+            const std::time_t eventTime = tryExtractCodexEventTimestamp(root, &snapshot.eventSubsecondNs);
             tryParseCodexRateLimitSnapshot(*rateLimitsObject, sourceType, filePath, eventTime, snapshot);
             if (snapshot.success) {
                 return snapshot;
@@ -720,7 +728,7 @@ CodexRateLimitSnapshot OpenAIAdapter::parseCodexRateLimitFixtureFile(const std::
         }
 
         CodexRateLimitSnapshot candidate;
-        const std::time_t eventTime = tryExtractCodexEventTimestamp(lineRoot);
+        const std::time_t eventTime = tryExtractCodexEventTimestamp(lineRoot, &candidate.eventSubsecondNs);
         if (!tryParseCodexRateLimitSnapshot(*rateLimitsObject, sourceType, filePath, eventTime, candidate)) {
             snapshot.error = candidate.error;
             continue;

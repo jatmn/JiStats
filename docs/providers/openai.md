@@ -7,7 +7,7 @@ OpenAI subscription tracking is opt-in. Disabling it stops new rollout quota and
 | Source | What JiStats uses it for |
 | --- | --- |
 | Local observation | Activity observed on this computer and persisted using a synthetic local account when no provider identity is available. |
-| Codex rollout JSONL | Codex-specific quota pressure from `token_count` / `rate_limits`, plus 5-minute and 30-minute token throughput from persisted rollout activity. |
+| Codex rollout JSONL | Codex-specific quota pressure from the newest `token_count` / `rate_limits` observation, ordered to subsecond precision when reported, plus 5-minute and 30-minute token throughput from persisted rollout activity. |
 | Codex `state_5.sqlite` | Read-only, sanitized thread metadata for dashboard model attribution after a first-scan baseline. |
 | Extracted ChatGPT export | Historical activity from user-authored messages and a record of the import. |
 | OpenAI API platform | Separate optional organization usage/cost validation with separate credentials and billing. |

@@ -482,6 +482,27 @@ TEST_CASE("OpenAI fetchQuota maps the newest local Codex rollout snapshot into q
     CHECK(quota.rawResponse.empty());
 }
 
+TEST_CASE("OpenAI fetchQuota selects the latest subsecond reading in one Codex rollout", "[openai][quota][codex]") {
+    TempFixtureDirectory codexHomeRoot;
+    ScopedEnvironmentVariable codexHome("CODEX_HOME", codexHomeRoot.path().string());
+    const std::filesystem::path rollout = std::filesystem::path("sessions") / "rollout-same-second.jsonl";
+    const std::string earlier =
+        R"json({"timestamp":"2025-04-18T20:21:36.100Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":6,"window_minutes":300,"resets_at":1745009457},"secondary":null}}})json";
+    const std::string later =
+        R"json({"timestamp":"2025-04-18T20:21:36.900Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":17,"window_minutes":300,"resets_at":1745009457},"secondary":null}}})json";
+
+    for (const auto& contents : {earlier + '\n' + later, later + '\n' + earlier}) {
+        codexHomeRoot.makeFile(rollout, contents);
+        OpenAIAdapter adapter;
+        const QuotaResponse quota = adapter.fetchQuota();
+
+        INFO(quota.error);
+        REQUIRE(quota.success);
+        CHECK(quota.snapshotTime == 1745007696);
+        CHECK(quota.remaining == 83);
+    }
+}
+
 TEST_CASE("OpenAI fetchQuota reports rollout discovery failures without falling back to scaffolds", "[openai][quota][codex]") {
     {
         TempFixtureDirectory userProfileRoot;
