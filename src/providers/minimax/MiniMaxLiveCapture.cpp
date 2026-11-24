@@ -93,10 +93,29 @@ std::filesystem::path resolveCaptureOutputPath(std::filesystem::path path) {
     return {};
 }
 
+std::filesystem::path normalizeCaptureOutputPath(const std::filesystem::path& path) {
+    // Explicit extended paths already use Win32's literal naming rules.
+    if (path.native().compare(0, 4, LR"(\\?\)") == 0) {
+        return path;
+    }
+
+    const DWORD capacity = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    if (capacity == 0) {
+        return {};
+    }
+    std::wstring normalized(capacity, L'\0');
+    const DWORD length = GetFullPathNameW(path.c_str(), capacity, normalized.data(), nullptr);
+    if (length == 0 || length >= capacity) {
+        return {};
+    }
+    normalized.resize(length);
+    return std::filesystem::path(normalized);
+}
+
 std::optional<std::filesystem::path> prepareCaptureOutputPath(const std::string& outputPath, std::string& error) {
     std::error_code ec;
-    const auto absolutePath = std::filesystem::absolute(std::filesystem::path(outputPath), ec);
-    const auto path = ec ? std::filesystem::path{} : resolveCaptureOutputPath(absolutePath.lexically_normal());
+    const auto normalized = normalizeCaptureOutputPath(std::filesystem::path(outputPath));
+    const auto path = normalized.empty() ? std::filesystem::path{} : resolveCaptureOutputPath(normalized);
     if (path.empty()) {
         error = "Failed to resolve output path: " + outputPath;
         return std::nullopt;

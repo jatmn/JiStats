@@ -466,6 +466,21 @@ TEST_CASE("MiniMax capture writers keep output outside source trees", "[minimax]
     CHECK(std::filesystem::is_regular_file(sibling / "diagnostics.json"));
 }
 
+TEST_CASE("MiniMax capture writers use ordinary Win32 filename normalization", "[minimax][live_capture]") {
+    const TempTestDirectory temp("jistats_minimax_capture_names");
+    const auto output = temp.path() / "new-output";
+    MiniMaxLiveCapture capture(makeFakeCredentialStore());
+    std::string error;
+
+    REQUIRE(capture.writeCaptureJson({}, (output / "quota.json.").string(), error));
+    REQUIRE(capture.writeDiagnosticJson({}, (output / "diagnostics.json ").string(), error));
+    CHECK(std::filesystem::is_regular_file(output / "quota.json"));
+    CHECK(std::filesystem::is_regular_file(output / "diagnostics.json"));
+    for (const auto& entry : std::filesystem::directory_iterator(output)) {
+        CHECK((entry.path().filename() == "quota.json" || entry.path().filename() == "diagnostics.json"));
+    }
+}
+
 TEST_CASE("MiniMax live capture surfaces database open failures distinctly during readiness inspection",
           "[minimax][live_capture]") {
     requireSqlite();
