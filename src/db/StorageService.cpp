@@ -319,7 +319,24 @@ struct QuotaRollupAggregate {
     int reconciledSampleCount = 0;
     std::string latestConfidenceTier = "Unknown";
     std::optional<std::pair<std::time_t, std::time_t>> previousWindow;
+    std::optional<std::pair<std::time_t, std::time_t>> lastRecordedWindow;
+    std::string observedBillingWindows;
 };
+
+std::optional<std::vector<std::pair<std::time_t, std::time_t>>>
+parseObservedBillingWindows(const std::string& encoded) {
+    std::istringstream stream(encoded);
+    std::vector<std::pair<std::time_t, std::time_t>> windows;
+    while (stream >> std::ws && !stream.eof()) {
+        std::time_t start = 0;
+        std::time_t end = 0;
+        if (!(stream >> start >> end)) {
+            return std::nullopt;
+        }
+        windows.emplace_back(start, end);
+    }
+    return windows;
+}
 
 std::optional<long long> normalizedQuotaRemainingValue(const PersistedQuotaSnapshot& snapshot) {
     if (snapshot.remainingValue.has_value()) {
@@ -2311,11 +2328,10 @@ std::vector<PersistedUsageRollup> StorageService::getUsageRollups(
     return rollups;
 }
 
-std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
-    int providerId,
-    int accountId,
-    std::time_t snapshotTimeFrom,
-    std::time_t snapshotTimeTo) {
+std::vector<PersistedQuotaSnapshot>
+StorageService::getQuotaSnapshots(int providerId, int accountId, std::time_t snapshotTimeFrom,
+                                  std::time_t snapshotTimeTo,
+                                  std::optional<std::pair<std::time_t, std::time_t>> skipReplayableRollupDays) {
     std::vector<PersistedQuotaSnapshot> snapshots;
     if (!isOpen() ||
         providerId <= 0 ||
@@ -2326,7 +2342,7 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
         return snapshots;
     }
 
-    QueryResult result = execute(
+    std::string sql =
         "SELECT qs.id, qs.provider_id, qs.account_id, qs.plan_id, qs.snapshot_time_utc, "
         "qs.window_start_utc, qs.window_end_utc, qs.used_value, qs.limit_value, qs.remaining_value, "
         "qs.confidence_tier, qs.quota_dimension, qs.is_reconciled, COALESCE(qs.basis_summary, ''), qs.created_at_utc, "
@@ -2334,10 +2350,25 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
         "qs.snapshot_subsecond_ns "
         "FROM quota_snapshots qs "
         "LEFT JOIN plans pl ON pl.id = qs.plan_id AND pl.account_id = qs.account_id "
-        "WHERE qs.provider_id = ? AND qs.account_id = ? AND qs.snapshot_time_utc >= ? AND qs.snapshot_time_utc <= ? "
-        "ORDER BY qs.snapshot_time_utc ASC, qs.snapshot_subsecond_ns ASC, qs.id ASC;",
-        {std::to_string(providerId), std::to_string(accountId), toUtcIsoString(snapshotTimeFrom),
-         toUtcIsoString(snapshotTimeTo)});
+        "WHERE qs.provider_id = ? AND qs.account_id = ? AND qs.snapshot_time_utc >= ? AND qs.snapshot_time_utc <= ?";
+    std::vector<std::string> params{std::to_string(providerId), std::to_string(accountId),
+                                    toUtcIsoString(snapshotTimeFrom), toUtcIsoString(snapshotTimeTo)};
+    if (skipReplayableRollupDays) {
+        // Limit to missing reset evidence without transferring raw samples represented by complete daily rollups.
+        sql += " AND NOT EXISTS (SELECT 1 FROM quota_snapshot_rollups_daily r "
+               "WHERE r.provider_id = qs.provider_id AND r.account_id = qs.account_id "
+               "AND r.plan_bucket_id = COALESCE(qs.plan_id, 0) "
+               "AND r.quota_dimension = CASE "
+               "WHEN pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB "
+               "'openai_subscription_codex_local:*' "
+               "THEN 'percent' ELSE COALESCE(NULLIF(qs.quota_dimension, ''), 'requests') END "
+               "AND r.rollup_period_start_utc = substr(qs.snapshot_time_utc, 1, 10) || 'T00:00:00Z' "
+               "AND r.rollup_period_start_utc BETWEEN ? AND ? AND r.observed_billing_windows IS NOT NULL)";
+        params.push_back(toUtcIsoString(skipReplayableRollupDays->first));
+        params.push_back(toUtcIsoString(skipReplayableRollupDays->second));
+    }
+    sql += " ORDER BY qs.snapshot_time_utc ASC, qs.snapshot_subsecond_ns ASC, qs.id ASC;";
+    QueryResult result = execute(sql, params);
     if (!result.success()) {
         pImpl->lastError = "Failed to query quota snapshots";
         return snapshots;
@@ -2481,6 +2512,16 @@ bool StorageService::rebuildQuotaSnapshotRollups(
             ++aggregate.resetCount;
         }
 
+        // Replay the same eligible observations as raw Analysis. Repeating the same bounds cannot change the state.
+        const auto window = std::make_pair(snapshot.windowStart, snapshot.windowEnd);
+        if (snapshot.limitValue && *snapshot.limitValue > 0 &&
+            (snapshot.quotaDimension != "percent" || window.first > 0 || window.second > 0) &&
+            aggregate.lastRecordedWindow != window) {
+            aggregate.lastRecordedWindow = window;
+            aggregate.observedBillingWindows.append(std::to_string(window.first)).push_back(' ');
+            aggregate.observedBillingWindows.append(std::to_string(window.second)).push_back(' ');
+        }
+
         const auto remainingValue = normalizedQuotaRemainingValue(snapshot);
         if (remainingValue.has_value() &&
             (!aggregate.lowWaterRemainingValue.has_value() ||
@@ -2508,14 +2549,13 @@ bool StorageService::rebuildQuotaSnapshotRollups(
             continue;
         }
 
-        std::string sql =
-            "INSERT INTO quota_snapshot_rollups_daily ("
-            "provider_id, account_id, plan_bucket_id, quota_dimension, rollup_period_start_utc, "
-            "sample_count, latest_snapshot_time_utc, latest_window_start_utc, latest_window_end_utc, "
-            "latest_used_value, latest_limit_value, latest_remaining_value, "
-            "low_water_remaining_value, low_water_limit_value, reset_count, "
-            "reconciled_sample_count, latest_confidence_tier"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ";
+        std::string sql = "INSERT INTO quota_snapshot_rollups_daily ("
+                          "provider_id, account_id, plan_bucket_id, quota_dimension, rollup_period_start_utc, "
+                          "sample_count, latest_snapshot_time_utc, latest_window_start_utc, latest_window_end_utc, "
+                          "latest_used_value, latest_limit_value, latest_remaining_value, "
+                          "low_water_remaining_value, low_water_limit_value, reset_count, "
+                          "reconciled_sample_count, latest_confidence_tier, observed_billing_windows"
+                          ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ";
         sql += aggregate.latestLimitValue.has_value() ? "?" : "NULL";
         sql += ", ";
         sql += aggregate.latestRemainingValue.has_value() ? "?" : "NULL";
@@ -2523,7 +2563,7 @@ bool StorageService::rebuildQuotaSnapshotRollups(
         sql += aggregate.lowWaterRemainingValue.has_value() ? "?" : "NULL";
         sql += ", ";
         sql += aggregate.lowWaterLimitValue.has_value() ? "?" : "NULL";
-        sql += ", ?, ?, ?);";
+        sql += ", ?, ?, ?, ?);";
 
         std::vector<std::string> params = {
             std::to_string(providerId),
@@ -2552,6 +2592,7 @@ bool StorageService::rebuildQuotaSnapshotRollups(
         params.push_back(std::to_string(aggregate.resetCount));
         params.push_back(std::to_string(aggregate.reconciledSampleCount));
         params.push_back(aggregate.latestConfidenceTier);
+        params.push_back(aggregate.observedBillingWindows);
 
         const QueryResult insertResult = execute(sql, params);
         if (!insertResult.success()) {
@@ -2592,7 +2633,8 @@ std::vector<PersistedQuotaSnapshotRollup> StorageService::getQuotaSnapshotRollup
         "r.latest_used_value, r.latest_limit_value, r.latest_remaining_value, r.low_water_remaining_value, "
         "r.low_water_limit_value, r.reset_count, r.reconciled_sample_count, r.latest_confidence_tier, "
         "r.created_at_utc, r.updated_at_utc, "
-        "(pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB 'openai_subscription_codex_local:*') "
+        "(pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB 'openai_subscription_codex_local:*'), "
+        "r.observed_billing_windows "
         "FROM quota_snapshot_rollups_daily r "
         "LEFT JOIN plans pl ON pl.id = r.plan_bucket_id AND pl.account_id = r.account_id "
         "WHERE r.provider_id = ? AND r.account_id = ? AND r.rollup_period_start_utc >= ? "
@@ -2642,6 +2684,9 @@ std::vector<PersistedQuotaSnapshotRollup> StorageService::getQuotaSnapshotRollup
         rollup.latestConfidenceTier = result.getString(row, 17);
         rollup.createdAtUtc = result.getString(row, 18);
         rollup.updatedAtUtc = result.getString(row, 19);
+        if (!result.isNull(row, 21)) {
+            rollup.observedBillingWindows = parseObservedBillingWindows(result.getString(row, 21));
+        }
         rollups.push_back(std::move(rollup));
     }
 

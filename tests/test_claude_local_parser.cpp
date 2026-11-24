@@ -436,6 +436,7 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
     REQUIRE(storage.insertUsageEvents({backfill}));
     REQUIRE(storage
                 .execute("DROP INDEX idx_activity_events_claude_cache_day;"
+                         "ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
                          "DELETE FROM schema_version WHERE version >= 13;"
                          "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
                 .success());
