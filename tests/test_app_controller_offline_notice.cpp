@@ -567,7 +567,7 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     CHECK(localKimi->quotas.empty());
     const auto* localClaude = findProviderStatus(localOnly, "claude_code");
     REQUIRE(localClaude != nullptr);
-    CHECK(localClaude->state == ProviderState::Live);
+    CHECK(localClaude->state == ProviderState::Stale);
     REQUIRE_FALSE(localClaude->quotas.empty());
     CHECK(localClaude->quotas.front().used > 0);
     const auto* localCodex = findProviderStatus(localOnly, "openai");

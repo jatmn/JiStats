@@ -5,6 +5,7 @@
 #include "app_controller_test_support.hpp"
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
+#include <chrono>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -276,6 +277,39 @@ TEST_CASE("Claude adapter provider key and display name", "[claude][adapter]") {
     REQUIRE(adapter.getProviderKey() == "claude_code");
     REQUIRE(adapter.getDisplayName() == "Claude Code");
     REQUIRE(adapter.isEnabled());
+}
+
+TEST_CASE("Claude rereads keep the source date of local activity", "[claude][adapter]") {
+    TempFixtureFile fixture(R"({"lastComputedDate":"2025-01-03","totalMessages":42})");
+    ClaudeCodeAdapter adapter;
+    adapter.setMockStatsCachePath(fixture.path());
+    constexpr std::time_t sourceDate = 1735862400; // 2025-01-03 00:00:00 UTC.
+    using FileClock = std::filesystem::file_time_type::clock;
+
+    std::filesystem::last_write_time(fixture.path(), FileClock::now() - std::chrono::hours(90 * 24));
+    const auto first = adapter.fetchQuota();
+    REQUIRE(first.success);
+    CHECK(first.used == 42);
+    CHECK(first.snapshotTime == sourceDate);
+
+    std::filesystem::last_write_time(fixture.path(), FileClock::now());
+    const auto reread = adapter.fetchQuota();
+    REQUIRE(reread.success);
+    CHECK(reread.used == first.used);
+    CHECK(reread.snapshotTime == sourceDate);
+}
+
+TEST_CASE("Claude keeps the activity snapshot undated without a valid source date", "[claude][adapter]") {
+    const auto content = GENERATE(R"({"totalMessages":42})", R"({"lastComputedDate":"2025-02-30","totalMessages":42})",
+                                  R"({"lastComputedDate":"2199-01-03","totalMessages":42})");
+    TempFixtureFile fixture(content);
+    ClaudeCodeAdapter adapter;
+    adapter.setMockStatsCachePath(fixture.path());
+
+    const auto quota = adapter.fetchQuota();
+    REQUIRE(quota.success);
+    CHECK(quota.used == 42);
+    CHECK(quota.snapshotTime == 0);
 }
 
 TEST_CASE("Claude importLocalActivity persists activity events", "[claude][persistence]") {

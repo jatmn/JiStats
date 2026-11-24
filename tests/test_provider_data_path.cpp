@@ -6,6 +6,7 @@
 
 #include <catch_amalgamated.hpp>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "db/SettingsService.hpp"
 #include "db/StorageService.hpp"
 #include "gui/DashboardPresenter.hpp"
+#include "app_controller_test_support.hpp"
 #include "runtime_test_support.hpp"
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
@@ -174,15 +176,13 @@ TEST_CASE("AppController provider path gives Claude local quotas a readable plan
     TempTestDatabase dbPath;
     seedProviderTrackingPreferences(dbPath.path(), false, false, true, false);
     const std::time_t now = std::time(nullptr);
-    auto claudeProvider = makeCurrentQuotaProvider(
-        "claude_code",
-        "Claude Code",
-        31415,
-        0,
-        now,
-        "interval",
-        "claude_code_local_stats");
-    auto providerManager = makeProviderManager({claudeProvider});
+    const bool hasSourceDate = GENERATE(false, true);
+    const std::time_t sourceDate = hasSourceDate ? now - 86400 : 0;
+    auto claudeProvider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "claude_code", "Claude Code",
+        makeQuotaResponse(sourceDate, 31415, 0, "local_aggregate", "claude_code_local_stats"));
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(claudeProvider);
 
     AppController controller;
     controller.setHeadlessForTesting(true);
@@ -192,13 +192,63 @@ TEST_CASE("AppController provider path gives Claude local quotas a readable plan
 
     const DashboardViewModel viewModel = controller.getDashboardViewModelForTesting();
     REQUIRE(viewModel.providers.size() == 1);
-    REQUIRE(viewModel.providers.front().quotas.size() == 1);
-    CHECK(viewModel.providers.front().providerKey == "claude_code");
-    CHECK(viewModel.providers.front().quotas.front().planName == "Local Activity");
-    CHECK(viewModel.providers.front().quotas.front().providerSurface == "claude_code_local_stats");
-    CHECK(viewModel.providers.front().quotas.front().confidenceTier == "Unknown");
+    const auto& status = viewModel.providers.front();
+    REQUIRE(status.quotas.size() == 1);
+    CHECK(status.providerKey == "claude_code");
+    CHECK(status.state == (hasSourceDate ? ProviderState::Stale : ProviderState::Unknown));
+    CHECK(parseRuntimeTimestamp(status.lastSyncTime) == sourceDate);
+    CHECK(status.quotas.front().planName == "Local Activity");
+    CHECK(status.quotas.front().providerSurface == "claude_code_local_stats");
+    CHECK(status.quotas.front().confidenceTier == "Unknown");
+    CHECK(status.quotas.front().used == 31415);
 
+    const auto connectivity = controller.getConnectivityStateForTesting("claude_code");
+    REQUIRE(connectivity.has_value());
+    CHECK(connectivity->lastCheckedAt >= now);
+
+    controller.refreshRuntimeForTesting();
+    if (hasSourceDate) {
+        claudeProvider->setQuotaResponse(
+            makeQuotaResponse(sourceDate, 42, 0, "local_aggregate", "claude_code_local_stats"));
+        controller.refreshRuntimeForTesting();
+        controller.refreshRuntimeForTesting();
+    }
     controller.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto snapshots = storage.execute("SELECT snapshot_time_utc, used_value FROM quota_snapshots ORDER BY id");
+    REQUIRE(snapshots.success());
+    REQUIRE(snapshots.rowCount() == (hasSourceDate ? 2 : 0));
+    if (!hasSourceDate) {
+        return;
+    }
+    CHECK(parseRuntimeTimestamp(snapshots.getString(0, 0)) == sourceDate);
+    CHECK(parseRuntimeTimestamp(snapshots.getString(1, 0)) == sourceDate);
+    CHECK(snapshots.getInt64(0, 1) == 31415);
+    CHECK(snapshots.getInt64(1, 1) == 42);
+    storage.close();
+
+    std::promise<void> releaseQuota;
+    auto deferredProvider = std::make_shared<ControlledQuotaProviderAdapter>(
+        "claude_code", "Claude Code",
+        makeQuotaResponse(sourceDate, 100, 0, "local_aggregate", "claude_code_local_stats"),
+        releaseQuota.get_future().share());
+    auto restartedProviders = std::make_shared<ProviderManager>();
+    restartedProviders->addProvider(deferredProvider);
+    AppController restarted;
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(restartedProviders);
+    const bool initialized = restarted.init();
+    const auto hydrated = restarted.getDashboardViewModelForTesting();
+    releaseQuota.set_value();
+    restarted.shutdown();
+
+    REQUIRE(initialized);
+    REQUIRE(hydrated.providers.size() == 1);
+    REQUIRE(hydrated.providers.front().quotas.size() == 1);
+    CHECK(hydrated.providers.front().quotas.front().used == 42);
 }
 
 TEST_CASE("ProviderManager handles empty providers gracefully", "[provider_data_path]") {
