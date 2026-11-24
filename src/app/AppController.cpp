@@ -2809,12 +2809,20 @@ void applyRuntimeStateToViewModel(DashboardViewModel& viewModel) {
     viewModel.isOnline = runtimeStateIsOnline(viewModel.runtimeState);
 }
 
+bool isUndatedCodexQuota(const QuotaResponse& quota) {
+    return quota.providerSurface == "openai_subscription_codex_local" && quota.snapshotTime <= 0;
+}
+
 ProviderState determineProviderState(const QuotaResponse& quota, std::time_t now) {
     if (quota.unavailable) {
         return ProviderState::Sample;
     }
     if (!quota.success) {
         return ProviderState::Offline;
+    }
+
+    if (isUndatedCodexQuota(quota)) {
+        return ProviderState::Unknown;
     }
 
     if (quota.snapshotTime > 0 &&
@@ -4402,7 +4410,8 @@ public:
         for (size_t index = 0; index < pairCount; ++index) {
             const auto& provider = providers[index];
             const auto& quota = quotaResponses[index];
-            if (!provider || !shouldExposeQuotaSnapshot(quota)) {
+            // Quota history requires an observation time. Undated Codex values can still be displayed.
+            if (!provider || !shouldExposeQuotaSnapshot(quota) || isUndatedCodexQuota(quota)) {
                 continue;
             }
 

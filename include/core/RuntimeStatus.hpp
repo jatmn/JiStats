@@ -6,13 +6,7 @@
 
 namespace JiStats {
 
-enum class ProviderState {
-    Sample,
-    Offline,
-    Stale,
-    Syncing,
-    Live
-};
+enum class ProviderState { Sample, Offline, Stale, Syncing, Live, Unknown };
 
 enum class RuntimeState {
     Current,

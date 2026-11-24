@@ -3025,6 +3025,59 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
     app.shutdown();
 }
 
+TEST_CASE("AppController classifies Codex quota freshness from the rollout observation time",
+          "[app][runtime][openai][codex][quota_freshness]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true, true);
+    TempTestDirectory codexHome("jistats_codex_freshness");
+    ScopedEnvironmentVariable codexHomeEnv("CODEX_HOME", codexHome.path().string());
+
+    const std::time_t now = std::time(nullptr);
+    const int ageSeconds = GENERATE(-1, 60, 7200);
+    const bool undated = ageSeconds < 0;
+    const std::time_t eventTime = undated ? 0 : now - ageSeconds;
+    writeCodexRolloutFile(codexHome.path() / "sessions" / "rollout-freshness.jsonl", 25.0, eventTime, now + 3600);
+
+    auto adapter = std::make_shared<OpenAIAdapter>();
+    auto providers = std::make_shared<ProviderManager>();
+    providers->addProvider(adapter);
+    AppController app;
+    app.setCurrentTimeForTesting(now);
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providers);
+    REQUIRE(app.init());
+
+    const char* expected = undated ? "Unknown" : (ageSeconds < 3600 ? "Live" : "Stale");
+    for (int read = 0; read < 2; ++read) {
+        const auto quota = adapter->fetchQuota();
+        REQUIRE(quota.success);
+        CHECK(quota.snapshotTime == eventTime);
+        app.refreshRuntimeForTesting();
+        const auto dashboard = app.getDashboardViewModelForTesting();
+        const auto* openai = findProviderStatus(dashboard, "openai");
+        REQUIRE(openai != nullptr);
+        CHECK(providerStateLabel(openai->state) == expected);
+        CHECK(parseRuntimeTimestamp(openai->lastSyncTime) == eventTime);
+        REQUIRE(openai->quotas.size() == 1);
+        CHECK(openai->quotas.front().remaining == 75);
+    }
+    app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto snapshots = storage.execute("SELECT snapshot_time_utc FROM quota_snapshots;");
+    REQUIRE(snapshots.success());
+    if (undated) {
+        CHECK(snapshots.rowCount() == 0);
+    } else {
+        REQUIRE(snapshots.rowCount() > 0);
+        CHECK(parseRuntimeTimestamp(snapshots.getString(0, 0)) == eventTime);
+    }
+}
+
 TEST_CASE("AppController applies taskbar overlay preference toggles without leaving stale taskbar metrics", "[app][runtime]") {
     requireSqlite();
 
