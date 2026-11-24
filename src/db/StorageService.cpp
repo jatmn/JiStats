@@ -2229,23 +2229,26 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
     }
 
     QueryResult result = execute(
-        "SELECT id, provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
-        "used_value, limit_value, remaining_value, confidence_tier, quota_dimension, is_reconciled, "
-        "COALESCE(basis_summary, ''), created_at_utc "
-        "FROM quota_snapshots "
-        "WHERE provider_id = ? AND account_id = ? AND snapshot_time_utc >= ? AND snapshot_time_utc <= ? "
-        "ORDER BY snapshot_time_utc ASC, id ASC;",
-        {
-            std::to_string(providerId),
-            std::to_string(accountId),
-            toUtcIsoString(snapshotTimeFrom),
-            toUtcIsoString(snapshotTimeTo)
-        });
+        "SELECT qs.id, qs.provider_id, qs.account_id, qs.plan_id, qs.snapshot_time_utc, "
+        "qs.window_start_utc, qs.window_end_utc, qs.used_value, qs.limit_value, qs.remaining_value, "
+        "qs.confidence_tier, qs.quota_dimension, qs.is_reconciled, COALESCE(qs.basis_summary, ''), qs.created_at_utc, "
+        "(pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB 'openai_subscription_codex_local:*'), "
+        "qs.snapshot_subsecond_ns "
+        "FROM quota_snapshots qs "
+        "LEFT JOIN plans pl ON pl.id = qs.plan_id AND pl.account_id = qs.account_id "
+        "WHERE qs.provider_id = ? AND qs.account_id = ? AND qs.snapshot_time_utc >= ? AND qs.snapshot_time_utc <= ? "
+        "ORDER BY qs.snapshot_time_utc ASC, qs.snapshot_subsecond_ns ASC, qs.id ASC;",
+        {std::to_string(providerId), std::to_string(accountId), toUtcIsoString(snapshotTimeFrom),
+         toUtcIsoString(snapshotTimeTo)});
     if (!result.success()) {
         pImpl->lastError = "Failed to query quota snapshots";
         return snapshots;
     }
 
+    using CodexWindow = std::tuple<int, std::time_t, std::time_t>;
+    using CodexReading = std::tuple<std::string, long long, std::optional<long long>, std::optional<long long>>;
+    std::map<CodexWindow, CodexReading> previousCodexReadingByWindow;
+    std::time_t codexReadingTime = 0;
     for (size_t row = 0; row < result.rowCount(); ++row) {
         PersistedQuotaSnapshot snapshot;
         snapshot.id = result.getInt64(row, 0);
@@ -2268,12 +2271,29 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
             snapshot.remainingValue = result.getInt64(row, 9);
         }
         snapshot.confidenceTier = result.getString(row, 10);
-        snapshot.quotaDimension = result.getString(row, 11);
+        const bool codexReading = result.getBool(row, 15);
+        snapshot.quotaDimension = codexReading ? "percent" : result.getString(row, 11);
         // Early percentage snapshots used a zero-length window when no start was reported.
         if (snapshot.quotaDimension == "percent" && snapshot.windowStart == snapshot.windowEnd) {
             snapshot.windowStart = 0;
             if (snapshot.windowEnd == snapshot.snapshotTime) {
                 snapshot.windowEnd = 0;
+            }
+        }
+        if (codexReading) {
+            if (snapshot.snapshotTime != codexReadingTime) {
+                previousCodexReadingByWindow.clear();
+                codexReadingTime = snapshot.snapshotTime;
+            }
+            const CodexWindow window{snapshot.planId.value_or(0), snapshot.windowStart, snapshot.windowEnd};
+            const CodexReading reading{result.getString(row, 16), snapshot.usedValue, snapshot.limitValue,
+                                       normalizedQuotaRemainingValue(snapshot)};
+            auto [previous, inserted] = previousCodexReadingByWindow.try_emplace(window, reading);
+            if (!inserted) {
+                if (previous->second == reading) {
+                    continue;
+                }
+                previous->second = reading;
             }
         }
         snapshot.isReconciled = result.getInt(row, 12) != 0;
@@ -2469,20 +2489,19 @@ std::vector<PersistedQuotaSnapshotRollup> StorageService::getQuotaSnapshotRollup
     }
 
     const QueryResult result = execute(
-        "SELECT id, provider_id, account_id, plan_bucket_id, quota_dimension, rollup_period_start_utc, "
-        "sample_count, latest_snapshot_time_utc, latest_window_start_utc, latest_window_end_utc, "
-        "latest_used_value, latest_limit_value, latest_remaining_value, "
-        "low_water_remaining_value, low_water_limit_value, reset_count, "
-        "reconciled_sample_count, latest_confidence_tier, created_at_utc, updated_at_utc "
-        "FROM quota_snapshot_rollups_daily "
-        "WHERE provider_id = ? AND account_id = ? AND rollup_period_start_utc >= ? AND rollup_period_start_utc <= ? "
-        "ORDER BY rollup_period_start_utc ASC, plan_bucket_id ASC, quota_dimension ASC;",
-        {
-            std::to_string(providerId),
-            std::to_string(accountId),
-            toUtcIsoString(periodStartFrom),
-            toUtcIsoString(periodStartTo)
-        });
+        "SELECT r.id, r.provider_id, r.account_id, r.plan_bucket_id, r.quota_dimension, r.rollup_period_start_utc, "
+        "r.sample_count, r.latest_snapshot_time_utc, r.latest_window_start_utc, r.latest_window_end_utc, "
+        "r.latest_used_value, r.latest_limit_value, r.latest_remaining_value, r.low_water_remaining_value, "
+        "r.low_water_limit_value, r.reset_count, r.reconciled_sample_count, r.latest_confidence_tier, "
+        "r.created_at_utc, r.updated_at_utc, "
+        "(pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB 'openai_subscription_codex_local:*') "
+        "FROM quota_snapshot_rollups_daily r "
+        "LEFT JOIN plans pl ON pl.id = r.plan_bucket_id AND pl.account_id = r.account_id "
+        "WHERE r.provider_id = ? AND r.account_id = ? AND r.rollup_period_start_utc >= ? "
+        "AND r.rollup_period_start_utc <= ? "
+        "ORDER BY r.rollup_period_start_utc ASC, r.plan_bucket_id ASC, r.quota_dimension ASC;",
+        {std::to_string(providerId), std::to_string(accountId), toUtcIsoString(periodStartFrom),
+         toUtcIsoString(periodStartTo)});
     if (!result.success()) {
         pImpl->lastError = "Failed to query quota snapshot rollups";
         return rollups;
@@ -2497,7 +2516,7 @@ std::vector<PersistedQuotaSnapshotRollup> StorageService::getQuotaSnapshotRollup
         if (planBucketId > 0) {
             rollup.planId = planBucketId;
         }
-        rollup.quotaDimension = result.getString(row, 4);
+        rollup.quotaDimension = result.getBool(row, 20) ? "percent" : result.getString(row, 4);
         rollup.periodStart = parseUtcOrZero(result.getString(row, 5).c_str());
         rollup.sampleCount = result.getInt(row, 6);
         rollup.latestSnapshotTime = parseUtcOrZero(result.getString(row, 7).c_str());

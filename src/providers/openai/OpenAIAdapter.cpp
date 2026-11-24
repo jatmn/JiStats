@@ -568,6 +568,10 @@ bool tryMapCodexSnapshotToQuotaResponse(
 
     response.success = true;
     response.snapshotTime = snapshot.snapshotTime;
+    if (snapshot.snapshotTime > 0) {
+        // A dated Zulu timestamp without a fraction denotes the start of its second.
+        response.snapshotSubsecondNs = snapshot.eventSubsecondNs.value_or(0);
+    }
     response.windowEnd = bucket->resetsAt;
     response.windowStart = (bucket->resetsAt > windowDurationSeconds)
         ? (bucket->resetsAt - windowDurationSeconds)

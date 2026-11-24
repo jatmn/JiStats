@@ -16,6 +16,7 @@ namespace {
 constexpr int kBaselineVersion = 12;
 constexpr int kClaudeRedactionVersion = 13;
 constexpr int kChatGptDedupVersion = 14;
+constexpr int kQuotaPrecisionVersion = 15;
 }
 
 class SchemaManager::Impl {
@@ -49,7 +50,7 @@ int SchemaManager::getCurrentVersion() const {
 }
 
 int SchemaManager::getLatestVersion() const {
-    int latest = kChatGptDedupVersion;
+    int latest = kQuotaPrecisionVersion;
     try {
         for (const auto& entry : std::filesystem::directory_iterator(pImpl->migrationsPath)) {
             const std::string name = entry.path().filename().string();
@@ -351,16 +352,25 @@ bool SchemaManager::migrateToVersion(int version) {
         return false;
     }
 
-    if (!storage.beginTransaction()) {
+    if (!storage.beginTransaction(StorageService::TransactionMode::Immediate)) {
         pImpl->lastError = "Failed to begin migration transaction";
         return false;
     }
 
-    auto result = storage.execute(migration);
-    if (!result.success()) {
+    // Another opener may have completed this migration while the write lock was pending.
+    const auto current = storage.execute("SELECT MAX(version) FROM schema_version;");
+    if (!current.success() || current.rowCount() != 1) {
         storage.rollbackTransaction();
-        pImpl->lastError = "Migration failed: " + result.error();
+        pImpl->lastError = "Cannot verify the current schema version during migration";
         return false;
+    }
+    if (current.getInt(0, 0) < version) {
+        const auto result = storage.execute(migration);
+        if (!result.success()) {
+            storage.rollbackTransaction();
+            pImpl->lastError = "Migration failed: " + result.error();
+            return false;
+        }
     }
 
     if (!storage.commitTransaction()) {
@@ -394,6 +404,9 @@ std::optional<int> SchemaManager::getRejectedVersion() const {
 std::string SchemaManager::loadMigration(int version) const {
     if (version == kChatGptDedupVersion) {
         return kChatGptDedupSql;
+    }
+    if (version == kQuotaPrecisionVersion) {
+        return kQuotaPrecisionSql;
     }
 
     // Build the version prefix (e.g. "001")

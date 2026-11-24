@@ -2587,7 +2587,9 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         "       COALESCE(qs.limit_value, 0), "
         "       COALESCE(qs.remaining_value, "
         "           CASE WHEN qs.limit_value IS NOT NULL THEN qs.limit_value - qs.used_value ELSE 0 END), "
-        "       qs.confidence_tier, qs.window_end_utc, qs.window_start_utc, qs.account_id "
+        "       qs.confidence_tier, qs.window_end_utc, qs.window_start_utc, qs.account_id, "
+        "       p.provider_key = 'openai' AND (pl.plan_key = 'openai_subscription_codex_local' "
+        "           OR pl.plan_key GLOB 'openai_subscription_codex_local:*') AS codex_sample "
         "FROM latest_provider_snapshots latest "
         "JOIN quota_snapshots qs "
         "  ON qs.provider_id = latest.provider_id "
@@ -2595,7 +2597,9 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         "JOIN providers p ON p.id = qs.provider_id "
         "LEFT JOIN plans pl ON pl.id = qs.plan_id "
         "WHERE p.enabled = 1 "
-        "ORDER BY p.display_name ASC, COALESCE(pl.display_name, '') ASC;");
+        "ORDER BY p.display_name ASC, COALESCE(pl.display_name, '') ASC, "
+        "         CASE WHEN codex_sample THEN qs.snapshot_subsecond_ns END DESC, "
+        "         CASE WHEN codex_sample THEN -qs.id ELSE qs.id END;");
     if (!result.success() || result.rowCount() == 0) {
         return std::nullopt;
     }
@@ -2608,21 +2612,26 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
     // Match the saved window and values before preferring the weekly row.
     using SavedQuotaWindow = std::tuple<int, std::time_t, std::time_t, long long, long long, long long>;
     const auto savedWindow = [&result](size_t row) -> SavedQuotaWindow {
-        return {result.getInt(row, 12),
-                parseRuntimeTimestamp(result.getString(row, 11)),
-                parseRuntimeTimestamp(result.getString(row, 10)),
-                result.getInt64(row, 6),
-                result.getInt64(row, 7),
+        auto start = parseRuntimeTimestamp(result.getString(row, 11));
+        auto end = parseRuntimeTimestamp(result.getString(row, 10));
+        if (start == end) {
+            start = 0;
+            if (end == parseRuntimeTimestamp(result.getString(row, 2))) {
+                end = 0;
+            }
+        }
+        return {result.getInt(row, 12), start, end, result.getInt64(row, 6), result.getInt64(row, 7),
                 result.getInt64(row, 8)};
     };
-    std::map<SavedQuotaWindow, size_t> firstWeeklyRow;
+    std::set<SavedQuotaWindow> weeklyWindows;
     for (size_t row = 0; row < result.rowCount(); ++row) {
         if (result.getString(row, 0) == "openai" &&
             result.getString(row, 3) == "openai_subscription_codex_local:weekly") {
-            firstWeeklyRow.try_emplace(savedWindow(row), row);
+            weeklyWindows.insert(savedWindow(row));
         }
     }
 
+    std::set<std::tuple<std::string, int, std::time_t, std::time_t>> seenCodexWindows;
     std::time_t freshestSnapshotTime = 0;
     for (size_t row = 0; row < result.rowCount(); ++row) {
         const std::string providerKey = result.getString(row, 0);
@@ -2631,13 +2640,15 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         }
 
         const auto planKey = result.getString(row, 3);
-        const bool codexWeekly = providerKey == "openai" && planKey == "openai_subscription_codex_local:weekly";
-        const bool codexInterval = providerKey == "openai" && planKey == "openai_subscription_codex_local:interval";
-        if (codexWeekly || codexInterval) {
+        if (result.getBool(row, 13)) {
             const auto window = savedWindow(row);
-            const auto weekly = firstWeeklyRow.find(window);
-            if (weekly != firstWeeklyRow.end() &&
-                (codexWeekly ? row != weekly->second : std::get<2>(window) - std::get<1>(window) == 7 * 86400)) {
+            const auto start = std::get<1>(window);
+            const auto end = std::get<2>(window);
+            if (planKey == "openai_subscription_codex_local:interval" && end - start == 7 * 86400 &&
+                weeklyWindows.count(window) != 0) {
+                continue;
+            }
+            if (!seenCodexWindows.emplace(planKey, std::get<0>(window), start, end).second) {
                 continue;
             }
         }
@@ -3324,10 +3335,14 @@ std::optional<int> ensureQuotaSnapshotPlanId(
     return static_cast<int>(insert.lastInsertRowId());
 }
 
+enum class QuotaSnapshotKind { Count, Percentage, CodexPercentage };
+
 bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accountId, std::optional<int> planId,
                              std::time_t snapshotTime, std::time_t windowStart, std::time_t windowEnd, long long used,
                              long long limit, long long remaining, const std::string& confidenceTier,
-                             const std::string& basisSummary, bool percentageReading) {
+                             const std::string& basisSummary, QuotaSnapshotKind kind,
+                             const std::optional<int>& snapshotSubsecondNs) {
+    const bool percentageReading = kind != QuotaSnapshotKind::Count;
     if (percentageReading && !planId.has_value()) {
         return false;
     }
@@ -3343,18 +3358,47 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
         }
     }
 
+    const bool codexReading = kind == QuotaSnapshotKind::CodexPercentage;
     std::string sql =
         "INSERT INTO quota_snapshots ("
         "provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc, window_end_utc, "
-        "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled"
-        ") ";
+        "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled, "
+        "snapshot_subsecond_ns";
+    sql += codexReading ? ", id) " : ") ";
     sql += percentageReading ? "SELECT ?, ?, " : "VALUES (?, ?, ";
     sql += planId.has_value() ? "?" : "NULL";
     sql += ", ?, ?, ?, ?, ";
     sql += limit > 0 ? "?" : "NULL";
-    sql += ", ?, ?, ?, ?, ?";
-    if (percentageReading) {
-        // Refreshes may reuse the same provider response until its polling budget expires.
+    sql += ", ?, ?, ?, ?, ?, NULLIF(?, '')";
+    if (codexReading) {
+        // Match exact capture times and balances using the dimension/time index.
+        // On legacy replay, promote the matching run together so its stored copies still count as one.
+        sql += ", replay.id FROM (SELECT 1) LEFT JOIN ("
+               "    WITH candidates AS ("
+               "        SELECT id, snapshot_subsecond_ns, "
+               "               used_value = CAST(? AS INTEGER) AND COALESCE(limit_value, 0) = CAST(? AS INTEGER) "
+               "               AND COALESCE(remaining_value, limit_value - used_value, 0) = CAST(? AS INTEGER) "
+               "                   AS same_balance "
+               "        FROM quota_snapshots "
+               "        WHERE provider_id = ? AND account_id = ? AND plan_id = ? AND snapshot_time_utc = ? "
+               "        AND quota_dimension IN ('percent', 'requests') "
+               "        AND ((window_start_utc = ? AND window_end_utc = ?) OR "
+               "             (quota_dimension = 'requests' AND window_start_utc = ? AND window_end_utc = ?)) "
+               "        AND (snapshot_subsecond_ns IS NULL OR snapshot_subsecond_ns <= CAST(NULLIF(?, '') AS INTEGER))"
+               "    ) "
+               "    SELECT id FROM candidates "
+               "    WHERE snapshot_subsecond_ns = CAST(NULLIF(?, '') AS INTEGER) AND same_balance "
+               "    UNION ALL "
+               "    SELECT id FROM candidates "
+               "    WHERE snapshot_subsecond_ns IS NULL AND same_balance "
+               "      AND NOT EXISTS (SELECT 1 FROM candidates WHERE snapshot_subsecond_ns IS NOT NULL) "
+               "      AND id > COALESCE(("
+               "          SELECT MAX(id) FROM candidates WHERE snapshot_subsecond_ns IS NULL AND NOT same_balance"
+               "      ), 0) "
+               ") replay ON TRUE WHERE TRUE "
+               "ON CONFLICT(id) DO UPDATE SET snapshot_subsecond_ns = excluded.snapshot_subsecond_ns "
+               "WHERE quota_snapshots.snapshot_subsecond_ns IS NULL AND excluded.snapshot_subsecond_ns IS NOT NULL;";
+    } else if (percentageReading) {
         sql += " WHERE NOT EXISTS (SELECT 1 FROM quota_snapshots WHERE provider_id = ? AND account_id = ? "
                "AND plan_id = ? AND snapshot_time_utc = ?);";
     } else {
@@ -3368,23 +3412,46 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
     if (planId.has_value()) {
         params.push_back(std::to_string(*planId));
     }
-    params.push_back(formatTimeUtcIso(snapshotTime));
-    params.push_back(windowStart > 0 ? formatTimeUtcIso(windowStart) : std::string{});
-    params.push_back(windowEnd > 0 ? formatTimeUtcIso(windowEnd) : std::string{});
-    params.push_back(std::to_string(std::max<long long>(0, used)));
+    const auto windowStartUtc = windowStart > 0 ? formatTimeUtcIso(windowStart) : std::string{};
+    const auto windowEndUtc = windowEnd > 0 ? formatTimeUtcIso(windowEnd) : std::string{};
+    const auto snapshotTimeUtc = formatTimeUtcIso(snapshotTime);
+    const auto subsecond = snapshotSubsecondNs ? std::to_string(*snapshotSubsecondNs) : std::string{};
+    const auto usedText = std::to_string(std::max<long long>(0, used));
+    const auto remainingText = std::to_string(std::max<long long>(0, remaining));
+    params.push_back(snapshotTimeUtc);
+    params.push_back(windowStartUtc);
+    params.push_back(windowEndUtc);
+    params.push_back(usedText);
     if (limit > 0) {
         params.push_back(std::to_string(limit));
     }
     params.push_back(confidenceTier.empty() ? "Unknown" : confidenceTier);
     params.push_back(basisSummary);
     params.push_back(percentageReading ? "percent" : "requests");
-    params.push_back(std::to_string(std::max<long long>(0, remaining)));
+    params.push_back(remainingText);
     params.push_back("0");
+    params.push_back(subsecond);
+    if (codexReading) {
+        params.push_back(usedText);
+        params.push_back(std::to_string(std::max<long long>(0, limit)));
+        params.push_back(remainingText);
+    }
     if (percentageReading) {
         params.push_back(std::to_string(providerId));
         params.push_back(std::to_string(accountId));
         params.push_back(std::to_string(*planId));
-        params.push_back(formatTimeUtcIso(snapshotTime));
+        params.push_back(snapshotTimeUtc);
+    }
+    if (codexReading) {
+        // Older Codex rows used the capture time when the rollout omitted its window.
+        const auto legacyEnd = windowEnd > 0 ? windowEnd : snapshotTime;
+        const auto legacyStart = windowStart > 0 ? windowStart : legacyEnd;
+        params.push_back(windowStartUtc);
+        params.push_back(windowEndUtc);
+        params.push_back(formatTimeUtcIso(legacyStart));
+        params.push_back(formatTimeUtcIso(legacyEnd));
+        params.push_back(subsecond);
+        params.push_back(subsecond);
     }
 
     QueryResult insert = storage.execute(sql, params);
@@ -4420,7 +4487,12 @@ public:
 
             const std::string confidenceTier = quotaConfidenceTierForResponse(providerKey, quota);
             const std::string displayName = quotaPlanLabelForResponse(providerKey, quota);
-            const bool percentageReading = providerKey == "grok" || providerKey == "cursor";
+            QuotaSnapshotKind snapshotKind = QuotaSnapshotKind::Count;
+            if (providerKey == "openai" && quota.providerSurface == "openai_subscription_codex_local") {
+                snapshotKind = QuotaSnapshotKind::CodexPercentage;
+            } else if (providerKey == "grok" || providerKey == "cursor") {
+                snapshotKind = QuotaSnapshotKind::Percentage;
+            }
             const std::time_t snapshotTime = quota.snapshotTime > 0 ? quota.snapshotTime : now;
 
             const NormalizedQuotaValues primaryValues = normalizeQuotaValues(quota);
@@ -4437,7 +4509,8 @@ public:
                 reportSourceLabelForSurface(quota.providerSurface.empty() ? providerKey : quota.providerSurface);
             persistQuotaSnapshotRow(storageService, *providerId, *accountId, primaryPlanId, snapshotTime,
                                     quota.windowStart, quota.windowEnd, primaryValues.used, primaryValues.limit,
-                                    primaryValues.remaining, confidenceTier, primaryBasisSummary, percentageReading);
+                                    primaryValues.remaining, confidenceTier, primaryBasisSummary, snapshotKind,
+                                    quota.snapshotSubsecondNs);
 
             if (quota.secondaryLimit > 0 || quota.secondaryUsed > 0 || quota.secondaryRemaining > 0) {
                 QuotaResponse secondaryQuota = quota;
@@ -4471,7 +4544,7 @@ public:
                 persistQuotaSnapshotRow(storageService, *providerId, *accountId, secondaryPlanId, snapshotTime,
                                         secondaryQuota.windowStart, secondaryQuota.windowEnd, secondaryValues.used,
                                         secondaryValues.limit, secondaryValues.remaining, confidenceTier,
-                                        secondaryBasisSummary, percentageReading);
+                                        secondaryBasisSummary, snapshotKind, quota.snapshotSubsecondNs);
             }
         }
 
