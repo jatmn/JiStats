@@ -6055,65 +6055,73 @@ TEST_CASE("AppController manual HTML export uses the current analysis scope", "[
 }
 
 TEST_CASE("AppController exports the effective Analysis account when no live row matches",
-          "[app][analysis][reporting]") {
+          "[app][analysis][reporting][scheduled]") {
     requireSqlite();
     const bool accountWasPruned = GENERATE(false, true);
     CAPTURE(accountWasPruned);
 
     TempTestDatabase dbPath;
     TempTestDirectory exportDir("jistats_historical_account_export");
+    const auto scheduledDir = exportDir.path() / "scheduled";
     const std::time_t now = std::time(nullptr);
     const std::time_t reportDay = now - 86400;
+    const std::string reportTimestamp = toUtcIso(reportDay);
     const std::string historicalAccount = "imported-history:openai_subscription_export_import";
-    seedStartupPreferences(dbPath.path(), false, false, true);
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false, true, 60, scheduledDir.string(), "",
+                           "", "openai", accountWasPruned ? "pruned-history" : historicalAccount, "custom",
+                           reportTimestamp, reportTimestamp);
     seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", reportDay, 777, 10, "unrelated-runtime-model");
     {
         StorageService storage;
         REQUIRE(storage.init(dbPath.path()));
         const auto ids = seedUsageProviderAccount(storage, "openai", historicalAccount, "Archived ChatGPT");
         insertUsageEvent(storage, ids.providerId, ids.accountId, toUtcIso(reportDay), "archived-model", 123, 4);
+        REQUIRE(storage.rebuildUsageRollups(UsageRollupResolution::Daily, ids.providerId, ids.accountId, reportDay,
+                                            reportDay));
+        REQUIRE(storage.execute("DELETE FROM usage_events WHERE account_id = ?;", {std::to_string(ids.accountId)})
+                    .success());
     }
 
     AppController app;
     app.setHeadlessForTesting(true);
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now)}));
+    app.setScheduledExportPollIntervalForTesting(50);
     REQUIRE(app.init());
+    REQUIRE(
+        waitForCondition([&]() { return !app.getDashboardViewModelForTesting().scheduledExportLastRunTime.empty(); },
+                         std::chrono::milliseconds(4000)));
 
     const auto dashboard = app.getDashboardViewModelForTesting();
     REQUIRE(std::none_of(dashboard.providers.begin(), dashboard.providers.end(),
                          [&](const ProviderStatus& status) { return status.accountId == historicalAccount; }));
-    DashboardPreferences preferences = dashboard.preferences;
-    preferences.analysisSelectedProviderId = "openai";
-    preferences.analysisSelectedAccountId = accountWasPruned ? "pruned-history" : historicalAccount;
-    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
-    preferences.analysisCustomRangeStartUtc = reportDay;
-    preferences.analysisCustomRangeEndUtc = reportDay;
-    app.applyDashboardPreferencesForTesting(preferences);
-
-    const auto reportPath = exportDir.path() / "historical-scope.html";
-    REQUIRE(app.exportHtmlReportForTesting(reportPath.string()).success);
-    std::ifstream report(reportPath);
-    REQUIRE(report.is_open());
-    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
-    CHECK(html.find("Archived ChatGPT") != std::string::npos);
-    CHECK(html.find("<div class=\"value\">openai</div>") != std::string::npos);
+    const auto manualPath = exportDir.path() / "historical-scope.html";
+    REQUIRE(app.exportHtmlReportForTesting(manualPath.string()).success);
 
     StorageService storage;
     REQUIRE(storage.init(dbPath.path()));
-    const auto exported = storage.getLatestExportRun("manual_html");
-    REQUIRE(exported.has_value());
-    CHECK(exported->providerFilterCsv == "openai");
-    if (accountWasPruned) {
-        CHECK(exported->accountFilterCsv.empty());
-        CHECK(html.find("<div class=\"value\">All Accounts</div>") != std::string::npos);
-        CHECK(html.find("unrelated-runtime-model") != std::string::npos);
-    } else {
-        CHECK(exported->accountFilterCsv == historicalAccount);
-        CHECK(html.find("<div class=\"value\">" + historicalAccount + "</div>") != std::string::npos);
-        CHECK(html.find("123 tokens") != std::string::npos);
-        CHECK(html.find("unrelated-runtime-model") == std::string::npos);
-        CHECK(html.find("777 tokens") == std::string::npos);
+    for (const auto* kind : {"manual_html", "scheduled_html"}) {
+        CAPTURE(kind);
+        const auto exported = storage.getLatestExportRun(kind);
+        REQUIRE(exported.has_value());
+        REQUIRE(exported->success);
+        CHECK(exported->providerFilterCsv == "openai");
+        std::ifstream report(exported->outputPath);
+        REQUIRE(report.is_open());
+        const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+        CHECK(html.find("Archived ChatGPT") != std::string::npos);
+        CHECK(html.find("<div class=\"value\">openai</div>") != std::string::npos);
+        if (accountWasPruned) {
+            CHECK(exported->accountFilterCsv.empty());
+            CHECK(html.find("<div class=\"value\">All Accounts</div>") != std::string::npos);
+            CHECK(html.find("unrelated-runtime-model") != std::string::npos);
+        } else {
+            CHECK(exported->accountFilterCsv == historicalAccount);
+            CHECK(html.find("<div class=\"value\">" + historicalAccount + "</div>") != std::string::npos);
+            CHECK(html.find("123 tokens") != std::string::npos);
+            CHECK(html.find("unrelated-runtime-model") == std::string::npos);
+            CHECK(html.find("777 tokens") == std::string::npos);
+        }
     }
 }
 
