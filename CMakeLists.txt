@@ -51,15 +51,18 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
-# Embed the baseline and privacy upgrade for portable launches outside the source tree.
+# Embed the baseline and upgrades for portable launches outside the source tree.
 set(JISTATS_BASELINE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/db_migrations/012_baseline_schema.sql")
 set(JISTATS_CLAUDE_REDACTION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/db_migrations/013_redact_claude_source_references.sql")
+set(JISTATS_CHATGPT_DEDUP_FILE "${CMAKE_CURRENT_SOURCE_DIR}/db_migrations/014_deduplicate_chatgpt_activity.sql")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${JISTATS_BASELINE_FILE}"
     "${JISTATS_CLAUDE_REDACTION_FILE}"
+    "${JISTATS_CHATGPT_DEDUP_FILE}"
 )
 file(READ "${JISTATS_BASELINE_FILE}" JISTATS_BASELINE_SQL)
 file(READ "${JISTATS_CLAUDE_REDACTION_FILE}" JISTATS_CLAUDE_REDACTION_SQL)
+file(READ "${JISTATS_CHATGPT_DEDUP_FILE}" JISTATS_CHATGPT_DEDUP_SQL)
 # Keep individual literals within MSVC's size limit.
 string(REPLACE "\n" "\n)jistats_sql\"\n    R\"jistats_sql(" JISTATS_BASELINE_SQL "${JISTATS_BASELINE_SQL}")
 configure_file(src/db/BaselineSchema.hpp.in generated/BaselineSchema.hpp @ONLY)

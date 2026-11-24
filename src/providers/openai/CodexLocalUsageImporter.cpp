@@ -2,6 +2,7 @@
 
 #include "db/StorageService.hpp"
 #include "providers/openai/CodexLocalSqliteReader.hpp"
+#include "providers/openai/ImportTransaction.hpp"
 
 #include <algorithm>
 #include <ctime>
@@ -11,34 +12,6 @@
 
 namespace JiStats {
 namespace {
-
-class ImportTransaction {
-  public:
-    explicit ImportTransaction(StorageService& storage) : storage_(storage) {}
-
-    ~ImportTransaction() {
-        if (active_) {
-            storage_.rollbackTransaction();
-        }
-    }
-
-    bool begin() {
-        active_ = storage_.beginTransaction(StorageService::TransactionMode::Immediate);
-        return active_;
-    }
-
-    bool commit() {
-        if (active_ && !storage_.commitTransaction()) {
-            return false;
-        }
-        active_ = false;
-        return true;
-    }
-
-  private:
-    StorageService& storage_;
-    bool active_ = false;
-};
 
 std::optional<std::string> mapCodexProviderToJiStatsProvider(const std::string& modelProvider) {
     if (modelProvider == "openai") return std::string("openai");
@@ -135,7 +108,7 @@ CodexLocalUsageImportResult CodexLocalUsageImporter::importFromSource(const std:
                                   : readResult.sourceIdentity;
     const auto existingSource = storage_.getCodexLocalSource(readResult.sourcePath, sourceIdentity);
     const bool sourceBaselineEstablished = existingSource.has_value();
-    ImportTransaction transaction(storage_);
+    OpenAIImportDetail::ImportTransaction transaction(storage_);
     if (!storage_.getLastError().empty() || !transaction.begin()) {
         result.error = "Could not start the Codex usage import transaction";
         return result;

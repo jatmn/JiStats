@@ -352,7 +352,7 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
     backfill.isBackfilled = true;
     backfill.rawReference = source.path();
     REQUIRE(storage.insertUsageEvents({backfill}));
-    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version >= 13;").success());
 
     storage.close();
     if (advanceCache) {

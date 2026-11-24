@@ -242,12 +242,12 @@ int installCompactionFailure(sqlite3* db, char**, const sqlite3_api_routines*) {
 
 } // namespace
 
-TEST_CASE("SchemaManager::getLatestVersion includes the bundled privacy migration", "[schema]") {
+TEST_CASE("SchemaManager::getLatestVersion includes the bundled ChatGPT repair", "[schema]") {
     StorageService storage;
     SchemaManager manager(storage);
 
     int latest = manager.getLatestVersion();
-    REQUIRE(latest == 13);
+    REQUIRE(latest == 14);
 }
 
 TEST_CASE("SchemaManager::getStatus reports version info", "[schema]") {
@@ -277,7 +277,7 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(storage.init(tempDb.path()));
 
     SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 13);
+    REQUIRE(manager.getCurrentVersion() == 14);
     REQUIRE_FALSE(manager.needsMigration());
 
     REQUIRE(tableExists(storage, "activity_events"));
@@ -326,9 +326,10 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
 
     auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 2);
+    REQUIRE(versions.rowCount() == 3);
     CHECK(versions.getInt(0, 0) == 12);
     CHECK(versions.getInt(1, 0) == 13);
+    CHECK(versions.getInt(2, 0) == 14);
 
     auto providers = storage.execute("SELECT provider_key FROM providers ORDER BY id;");
     REQUIRE(providers.success());
@@ -367,13 +368,14 @@ TEST_CASE("StorageService preserves database settings on reopen without rewritin
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    CHECK(manager.getCurrentVersion() == 13);
+    CHECK(manager.getCurrentVersion() == 14);
     CHECK_FALSE(manager.needsMigration());
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 2);
+    REQUIRE(versions.rowCount() == 3);
     CHECK(versions.getInt(0, 0) == 12);
     CHECK(versions.getInt(1, 0) == 13);
+    CHECK(versions.getInt(2, 0) == 14);
     CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
     CHECK(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     storage.close();
@@ -387,7 +389,7 @@ TEST_CASE(
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
-    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version >= 13;").success());
     REQUIRE(storage.execute("DELETE FROM providers WHERE provider_key = 'grok';").success());
     REQUIRE(storage.execute("UPDATE providers SET enabled = 0 WHERE provider_key = 'cursor';").success());
     REQUIRE(storage.execute("ALTER TABLE usage_events DROP COLUMN event_subsecond_ns;").success());
@@ -412,7 +414,7 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
-    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version >= 13;").success());
 
     SettingsService settings(storage);
     REQUIRE(settings.setString("ui.last_selected_provider_id", "minimax"));
@@ -443,10 +445,11 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     REQUIRE(storage.init(tempDb.path()));
     REQUIRE(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
-    REQUIRE(versions.rowCount() == 3);
+    REQUIRE(versions.rowCount() == 4);
     CHECK(versions.getInt(0, 0) == 10);
     CHECK(versions.getInt(1, 0) == 12);
     CHECK(versions.getInt(2, 0) == 13);
+    CHECK(versions.getInt(3, 0) == 14);
     const auto kimi = storage.execute("SELECT enabled FROM providers WHERE provider_key = 'kimi';");
     REQUIRE(kimi.rowCount() == 1);
     CHECK(kimi.getBool(0, 0) == hadAnalysisMigration);
@@ -498,7 +501,7 @@ TEST_CASE("StorageService upgrades legacy Claude references without reading the 
     REQUIRE(storage.init(tempDb.path()));
     REQUIRE(storage
                 .execute(R"sql(
-        DELETE FROM schema_version WHERE version = 13;
+        DELETE FROM schema_version WHERE version >= 13;
         INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier) VALUES
             (21, (SELECT id FROM providers WHERE provider_key = 'claude_code'), 'fixture-claude', 'Claude', 'user', 'fixture'),
             (22, (SELECT id FROM providers WHERE provider_key = 'openai'), 'fixture-openai', 'OpenAI', 'user', 'fixture');
@@ -573,7 +576,7 @@ TEST_CASE("StorageService upgrades legacy Claude references without reading the 
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    CHECK(manager.getCurrentVersion() == 13);
+    CHECK(manager.getCurrentVersion() == 14);
     constexpr auto hashedPath = "scope:fnv1a64:1370ad0dcd1472bd";
     const auto activity =
         storage.execute("SELECT id, raw_reference, duration_seconds FROM activity_events ORDER BY id;");
@@ -612,7 +615,7 @@ TEST_CASE("StorageService supports overlapping opens during historical baseline 
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
-    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version >= 13;").success());
     SettingsService settings(storage);
     REQUIRE(settings.setString("ui.last_selected_provider_id", "minimax"));
     removeHistoricalAnalysisSchema(storage);
@@ -661,7 +664,7 @@ TEST_CASE("StorageService supports overlapping WAL opens during the Claude upgra
     const auto journalMode = storage.execute("PRAGMA main.journal_mode = WAL;");
     REQUIRE(journalMode.success());
     REQUIRE(journalMode.getString(0, 0) == "wal");
-    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version = 13;").success());
+    REQUIRE(storage.execute("DELETE FROM schema_version WHERE version >= 13;").success());
     storage.close();
 
     WalCheckpointOverlap gate;
@@ -678,7 +681,8 @@ TEST_CASE("StorageService supports overlapping WAL opens during the Claude upgra
         if (!timeout.success() || timeout.rowCount() != 1 || timeout.getInt(0, 0) != 5000) {
             return std::string("The upgrade did not restore the connection busy timeout");
         }
-        return SchemaManager(connection).getCurrentVersion() == 13 ? std::string{} : "Version 13 was not recorded";
+        return SchemaManager(connection).getCurrentVersion() == 14 ? std::string{}
+                                                                   : "The schema upgrade did not finish";
     };
 
     auto first = std::async(std::launch::async, open, true);
@@ -782,3 +786,60 @@ TEST_CASE("StorageService redirects the default database to LOCALAPPDATA",
     CHECK(std::filesystem::exists(resolvedPath));
 }
 #endif
+
+TEST_CASE("StorageService repairs duplicate ChatGPT messages when opening a version 13 database",
+          "[schema][migration][export_import]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage
+                .execute(R"sql(
+        DELETE FROM schema_version WHERE version > 13;
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
+        VALUES (81, 1, 'imported-history:openai_subscription_export_import', 'ChatGPT export', 'imported_history',
+                'openai_subscription_export_import'),
+               (82, 1, 'separate-activity', 'Other activity', 'user', 'separate-activity');
+    )sql")
+                .success());
+
+    PersistedActivityEvent event;
+    event.providerId = 1;
+    event.accountId = 81;
+    event.activity.providerSurface = "openai_subscription_export_import";
+    event.activity.activityKind = ActivityKind::MessageSend;
+    event.activity.startedAt = event.activity.endedAt = 1712365215;
+    event.activity.sourceType = "imported";
+    event.activity.surfaceKey = "chatgpt_export_conversations";
+    event.activity.confidence = ActivityConfidence::Imported;
+    event.activity.rawReference = "conversation:original/message:one";
+    event.activity.sourceRunId = "first-export";
+    long long originalId = 0;
+    REQUIRE(storage.insertActivityEvent(event, &originalId));
+
+    event.activity.sourceRunId = "renamed-copy";
+    ++event.activity.startedAt;
+    ++event.activity.endedAt;
+    REQUIRE(storage.insertActivityEvent(event, nullptr));
+    event.activity.rawReference = "conversation:original/message:two";
+    REQUIRE(storage.insertActivityEvent(event, nullptr));
+    event.activity.rawReference = "conversation:original/message:one";
+    event.activity.sourceType = "local";
+    REQUIRE(storage.insertActivityEvent(event, nullptr));
+    event.activity.sourceType = "imported";
+    event.accountId = 82;
+    REQUIRE(storage.insertActivityEvent(event, nullptr));
+    event.activity.sourceRunId = "separate-export";
+    REQUIRE(storage.insertActivityEvent(event, nullptr));
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    const auto stored = storage.execute("SELECT id, source_run_id FROM activity_events ORDER BY id;");
+    REQUIRE(stored.success());
+    REQUIRE(stored.rowCount() == 5);
+    CHECK(stored.getInt64(0, 0) == originalId);
+    CHECK(stored.getString(0, 1) == "first-export");
+    CHECK(stored.getString(1, 1) == "renamed-copy");
+    CHECK(stored.getString(4, 1) == "separate-export");
+    CHECK(SchemaManager(storage).getCurrentVersion() == 14);
+}

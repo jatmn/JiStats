@@ -198,3 +198,69 @@ TEST_CASE("OpenAI export import is idempotent for the same artifact run",
     CHECK(secondRun.importRunId == firstRun.importRunId);
     CHECK(secondRun.insertedCount == 0);
 }
+
+TEST_CASE("OpenAI export import adds only new messages from overlapping artifacts",
+          "[openai][export_import][storage]") {
+    requireSqlite();
+
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const auto first = OpenAIExportImport::importHistoricalActivity(storage, kRedactedExportFixtureDir.string());
+    REQUIRE(first.success);
+    REQUIRE(first.insertedCount == 3);
+
+    TempExportDirectory exports;
+    const auto renamedFolder = exports.path() / "renamed-export";
+    std::filesystem::copy(kRedactedExportFixtureDir, renamedFolder, std::filesystem::copy_options::recursive);
+    const auto renamed = OpenAIExportImport::importHistoricalActivity(storage, renamedFolder.string());
+    REQUIRE(renamed.success);
+    CHECK(renamed.importRunId != first.importRunId);
+    CHECK(renamed.insertedCount == 0);
+
+    const auto overlap = exports.makeFile("later-export/conversations.json", R"json([
+        {"id":"conv_redacted_001","title":"Renamed conversation","mapping":{
+            "existing":{"message":{"id":"msg_user_001","author":{"role":"user"},"create_time":1712624400}},
+            "new":{"message":{"id":"msg_user_new","author":{"role":"user"},"create_time":1712624401}}
+        }}
+    ])json");
+    exports.makeFile("later-export/user.json", "{}");
+    const auto later = OpenAIExportImport::importHistoricalActivity(storage, overlap.string());
+    REQUIRE(later.success);
+    REQUIRE(later.parsed.coverageStartAt > first.parsed.coverageEndAt);
+    CHECK(later.insertedCount == 1);
+
+    const int providerId =
+        static_cast<int>(requireSingleId(storage.execute("SELECT id FROM providers WHERE provider_key = 'openai';")));
+    const auto events = storage.getActivityEvents(providerId, requireImportedAccountId(storage, providerId),
+                                                  first.parsed.coverageStartAt, later.parsed.coverageEndAt);
+    REQUIRE(events.size() == 4);
+    CHECK(events.front().activity.sourceRunId == first.importRunId);
+    CHECK(events.back().activity.rawReference == "conversation:conv_redacted_001/message:msg_user_new");
+    CHECK(events.back().activity.sourceRunId == later.importRunId);
+}
+
+TEST_CASE("OpenAI export import retries without partial activity when the sync state write fails",
+          "[openai][export_import][storage]") {
+    requireSqlite();
+
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage
+                .execute("CREATE TEMP TRIGGER fail_export_cursor BEFORE INSERT ON sync_state "
+                         "WHEN NEW.sync_kind = 'openai_export_import_history' "
+                         "BEGIN SELECT RAISE(ABORT, 'test sync state failure'); END;")
+                .success());
+
+    const auto failed = OpenAIExportImport::importHistoricalActivity(storage, kRedactedExportFixtureDir.string());
+    CHECK_FALSE(failed.success);
+    CHECK(failed.insertedCount == 0);
+    CHECK(requireSingleId(storage.execute("SELECT COUNT(*) FROM activity_events;")) == 0);
+
+    REQUIRE(storage.execute("DROP TRIGGER fail_export_cursor;").success());
+    const auto retried = OpenAIExportImport::importHistoricalActivity(storage, kRedactedExportFixtureDir.string());
+    REQUIRE(retried.success);
+    CHECK(retried.insertedCount == 3);
+}
