@@ -2,6 +2,7 @@
 #include "core/LocalPathReference.hpp"
 #include "db/QueryResult.hpp"
 #include "db/SchemaManager.hpp"
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -1679,6 +1680,42 @@ bool StorageService::upsertGapMarker(const PersistedGapMarker& marker, long long
     }
     pImpl->lastError.clear();
     return true;
+#else
+    pImpl->lastError = SQLITE_UNAVAILABLE_ERROR;
+    return false;
+#endif
+}
+
+bool StorageService::persistRecoveryCompletion(const std::vector<PersistedGapMarker>& markers,
+                                               const PersistedRuntimeState& state) {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    if (!isOpen()) {
+        pImpl->lastError = "Database not open";
+        return false;
+    }
+
+    // Keep unrelated writes on this shared connection outside the recovery transaction.
+    sqlite3_mutex* const dbMutex = sqlite3_db_mutex(pImpl->db);
+    sqlite3_mutex_enter(dbMutex);
+    const std::unique_ptr<sqlite3_mutex, decltype(&sqlite3_mutex_leave)> releaseConnection(dbMutex,
+                                                                                           sqlite3_mutex_leave);
+    if (!beginTransaction(TransactionMode::Immediate)) {
+        pImpl->lastError = "Failed to start recovery completion transaction";
+        return false;
+    }
+
+    const bool saved =
+        std::all_of(markers.begin(), markers.end(), [this](const auto& marker) { return upsertGapMarker(marker); }) &&
+        upsertRuntimeState(state);
+    if (saved && commitTransaction()) {
+        return true;
+    }
+    std::string error = saved ? "Failed to commit recovery completion" : pImpl->lastError;
+    if (!rollbackTransaction()) {
+        error += ". Failed to roll back recovery completion";
+    }
+    pImpl->lastError = std::move(error);
+    return false;
 #else
     pImpl->lastError = SQLITE_UNAVAILABLE_ERROR;
     return false;

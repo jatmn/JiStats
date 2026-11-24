@@ -346,6 +346,7 @@ public:
     std::optional<PersistedRuntimeState> getRuntimeState();
 
     bool upsertGapMarker(const PersistedGapMarker& marker, long long* rowId = nullptr);
+    bool persistRecoveryCompletion(const std::vector<PersistedGapMarker>& markers, const PersistedRuntimeState& state);
     std::vector<PersistedGapMarker> getGapMarkers(
         int providerId,
         int accountId,

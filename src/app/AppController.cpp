@@ -6821,7 +6821,8 @@ public:
             return false;
         }
 
-        // Once gap writes start, finish the recovery marker update even if Exit arrives.
+        std::vector<PersistedGapMarker> gapMarkers;
+        gapMarkers.reserve(viewModel.providers.size());
         for (const auto& provider : viewModel.providers) {
             const auto providerId = findProviderIdByKey(storageService, provider.providerKey);
             const auto runtimeAccountId =
@@ -6850,12 +6851,17 @@ public:
                 marker.classification == GapClassification::Reconstructed
                     ? "provider_backfill"
                     : "runtime_recovery";
-            storageService.upsertGapMarker(marker);
+            gapMarkers.push_back(std::move(marker));
         }
 
+        // Once gap finalization starts, finish its transaction even if Exit arrives.
         runtimeState->recoveryMarker.clear();
         runtimeState->lastSuccessfulSyncAt = now;
-        storageService.upsertRuntimeState(*runtimeState);
+        if (!storageService.persistRecoveryCompletion(gapMarkers, *runtimeState)) {
+            JISTATS_LOG_WARN(LogCategory::Reconciliation,
+                             "Failed to finalize catch-up recovery: " + storageService.getLastError());
+            return false;
+        }
         markPersistedMetricSnapshotDirty(false);
         return true;
     }

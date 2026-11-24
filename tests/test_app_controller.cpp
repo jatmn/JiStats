@@ -2809,6 +2809,83 @@ TEST_CASE("AppController runs catch-up recovery and records runtime gap markers 
     app.shutdown();
 }
 
+TEST_CASE("AppController retries a failed recovery completion without leaving partial gap markers",
+          "[app][runtime][recovery][recovery_persistence]") {
+    requireSqlite();
+    const bool rejectGap = GENERATE(true, false);
+    CAPTURE(rejectGap);
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    const auto now = std::time(nullptr);
+    const auto recoveryStart = now - 3 * 3600;
+    const auto retryTime = now + 120;
+    const std::string marker = "catchup:" + std::to_string(recoveryStart);
+    seedRuntimeState(dbPath.path(), recoveryStart, recoveryStart, marker);
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const char* fault = rejectGap ? "CREATE TRIGGER reject_recovery_completion BEFORE INSERT ON gap_markers "
+                                    "BEGIN SELECT RAISE(ABORT, 'gap marker write rejected'); END;"
+                                  : "CREATE TRIGGER reject_recovery_completion BEFORE UPDATE ON runtime_state "
+                                    "WHEN OLD.recovery_marker IS NOT NULL AND NEW.recovery_marker IS NULL "
+                                    "BEGIN SELECT RAISE(ABORT, 'runtime state write rejected'); END;";
+    REQUIRE(storage.execute(fault).success());
+    storage.close();
+
+    {
+        AppController app;
+        app.setHeadlessForTesting(true);
+        app.setDatabasePathForTesting(dbPath.path());
+        app.setCurrentTimeForTesting(now);
+        app.setProviderManagerForTesting(
+            makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now)}));
+        REQUIRE(app.init());
+        CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::CatchingUp);
+        app.shutdown();
+    }
+
+    REQUIRE(storage.init(dbPath.path()));
+    const auto pending = storage.getRuntimeState();
+    REQUIRE(pending.has_value());
+    CHECK(pending->recoveryMarker == marker);
+    CHECK(pending->lastSuccessfulSyncAt == recoveryStart);
+    const auto partial = storage.execute("SELECT id FROM gap_markers;");
+    REQUIRE(partial.success());
+    CHECK(partial.rowCount() == 0);
+    REQUIRE(storage.execute("DROP TRIGGER reject_recovery_completion;").success());
+
+    {
+        AppController app;
+        app.setHeadlessForTesting(true);
+        app.setDatabasePathForTesting(dbPath.path());
+        app.setCurrentTimeForTesting(retryTime);
+        app.setProviderManagerForTesting(
+            makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, retryTime)}));
+        REQUIRE(app.init());
+        REQUIRE(waitForCondition([&]() {
+            const auto state = storage.getRuntimeState();
+            return state.has_value() && state->recoveryMarker.empty();
+        }));
+        app.shutdown();
+    }
+
+    storage.close();
+    REQUIRE(storage.init(dbPath.path()));
+    const auto completed = storage.getRuntimeState();
+    REQUIRE(completed.has_value());
+    CHECK(completed->recoveryMarker.empty());
+    CHECK(completed->lastSuccessfulSyncAt == retryTime);
+
+    const auto providerId = requireProviderId(storage, "openai");
+    const auto accountId = requireAccountId(storage, providerId, "openai.runtime_status");
+    const auto gaps = storage.getGapMarkers(providerId, accountId, recoveryStart, retryTime);
+    REQUIRE(gaps.size() == 1);
+    CHECK(gaps.front().periodStart == recoveryStart);
+    CHECK(gaps.front().periodEnd == retryTime);
+    CHECK(gaps.front().classification == GapClassification::Unknown);
+}
+
 TEST_CASE("AppController leaves recovery coverage unknown for unsupported provider history",
           "[app][runtime][recovery][unsupported_history]") {
     requireSqlite();
