@@ -1109,11 +1109,12 @@ public:
     std::mutex miniMaxActionMutex;
     std::mutex offlineRetryMutex;
     std::mutex offlineDismissMutex;
-    std::vector<std::thread> openAIImportThreads;
-    std::vector<std::thread> htmlExportThreads;
-    std::vector<std::thread> miniMaxActionThreads;
-    std::vector<std::thread> offlineRetryThreads;
-    std::vector<std::thread> offlineDismissThreads;
+    // The UI thread owns these handles until waitForExit has joined the UI thread.
+    std::thread openAIImportThread;
+    std::thread htmlExportThread;
+    std::thread miniMaxActionThread;
+    std::thread offlineRetryThread;
+    std::thread offlineDismissThread;
     bool openAIImportInFlight = false;
     bool htmlExportInFlight = false;
     bool miniMaxActionInFlight = false;
@@ -2636,6 +2637,12 @@ public:
         return wideToUtf8(filePath);
     }
 
+    static void joinActionThread(std::thread& thread) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
     void notifyOpenAIImportRequested() {
         {
             std::lock_guard<std::mutex> lock(openAIImportMutex);
@@ -2675,8 +2682,8 @@ public:
 
         setStatusText(L"OpenAI export import is running...");
         const std::string selectedPath = *inputPath;
-        std::lock_guard<std::mutex> lock(openAIImportMutex);
-        openAIImportThreads.emplace_back([this, callback, selectedPath]() {
+        joinActionThread(openAIImportThread);
+        openAIImportThread = std::thread([this, callback, selectedPath]() {
             DashboardOpenAIImportResult result = callback(selectedPath);
             HWND hwnd = nullptr;
             {
@@ -2694,22 +2701,9 @@ public:
         });
     }
 
-    void joinOpenAIImportThreads() {
-        std::vector<std::thread> threads;
-        {
-            std::lock_guard<std::mutex> lock(openAIImportMutex);
-            threads.swap(openAIImportThreads);
-        }
-
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
-
     void handleOpenAIImportCompletion(DashboardOpenAIImportResult* result) {
         std::unique_ptr<DashboardOpenAIImportResult> ownedResult(result);
+        joinActionThread(openAIImportThread);
         {
             std::lock_guard<std::mutex> lock(openAIImportMutex);
             openAIImportInFlight = false;
@@ -2779,62 +2773,6 @@ public:
         return narrowPath;
     }
 
-    void joinHtmlExportThreads() {
-        std::vector<std::thread> threads;
-        {
-            std::lock_guard<std::mutex> lock(htmlExportMutex);
-            threads.swap(htmlExportThreads);
-        }
-
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
-
-    void joinMiniMaxActionThreads() {
-        std::vector<std::thread> threads;
-        {
-            std::lock_guard<std::mutex> lock(miniMaxActionMutex);
-            threads.swap(miniMaxActionThreads);
-        }
-
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
-
-    void joinOfflineRetryThreads() {
-        std::vector<std::thread> threads;
-        {
-            std::lock_guard<std::mutex> lock(offlineRetryMutex);
-            threads.swap(offlineRetryThreads);
-        }
-
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
-
-    void joinOfflineDismissThreads() {
-        std::vector<std::thread> threads;
-        {
-            std::lock_guard<std::mutex> lock(offlineDismissMutex);
-            threads.swap(offlineDismissThreads);
-        }
-
-        for (auto& thread : threads) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    }
-
     void notifyHtmlExportRequested() {
         {
             std::lock_guard<std::mutex> lock(htmlExportMutex);
@@ -2874,8 +2812,8 @@ public:
 
         setStatusText(L"Exporting HTML report...");
         const std::string selectedPath = *outputPath;
-        std::lock_guard<std::mutex> lock(htmlExportMutex);
-        htmlExportThreads.emplace_back([this, callback, selectedPath]() {
+        joinActionThread(htmlExportThread);
+        htmlExportThread = std::thread([this, callback, selectedPath]() {
             DashboardHtmlExportResult result = callback(selectedPath);
             HWND hwnd = nullptr;
             {
@@ -2895,6 +2833,7 @@ public:
 
     void handleHtmlExportCompletion(DashboardHtmlExportResult* result) {
         std::unique_ptr<DashboardHtmlExportResult> ownedResult(result);
+        joinActionThread(htmlExportThread);
         {
             std::lock_guard<std::mutex> lock(htmlExportMutex);
             htmlExportInFlight = false;
@@ -2940,8 +2879,8 @@ public:
         }
 
         setStatusText(L"Retrying provider connectivity...");
-        std::lock_guard<std::mutex> lock(offlineRetryMutex);
-        offlineRetryThreads.emplace_back([this, callback]() {
+        joinActionThread(offlineRetryThread);
+        offlineRetryThread = std::thread([this, callback]() {
             DashboardNoticeActionResult result = callback();
             HWND hwnd = nullptr;
             {
@@ -2961,6 +2900,7 @@ public:
 
     void handleOfflineRetryCompletion(OfflineRetryCompletionParams* params) {
         std::unique_ptr<OfflineRetryCompletionParams> ownedParams(params);
+        joinActionThread(offlineRetryThread);
         {
             std::lock_guard<std::mutex> lock(offlineRetryMutex);
             offlineRetryInFlight = false;
@@ -3002,8 +2942,8 @@ public:
         }
 
         setStatusText(L"Dismissing offline notice...");
-        std::lock_guard<std::mutex> lock(offlineDismissMutex);
-        offlineDismissThreads.emplace_back([this, callback]() {
+        joinActionThread(offlineDismissThread);
+        offlineDismissThread = std::thread([this, callback]() {
             DashboardNoticeActionResult result = callback();
             HWND hwnd = nullptr;
             {
@@ -3023,6 +2963,7 @@ public:
 
     void handleOfflineDismissCompletion(OfflineDismissCompletionParams* params) {
         std::unique_ptr<OfflineDismissCompletionParams> ownedParams(params);
+        joinActionThread(offlineDismissThread);
         {
             std::lock_guard<std::mutex> lock(offlineDismissMutex);
             offlineDismissInFlight = false;
@@ -3852,8 +3793,8 @@ public:
         setStatusText(inFlightStatus);
 
         const auto submittedRevision = miniMaxAccountEditRevision.load();
-        std::lock_guard<std::mutex> lock(miniMaxActionMutex);
-        miniMaxActionThreads.emplace_back([this, callback, request, submittedRevision]() {
+        joinActionThread(miniMaxActionThread);
+        miniMaxActionThread = std::thread([this, callback, request, submittedRevision]() {
             DashboardMiniMaxCredentialResult result = callback(request);
             HWND hwnd = nullptr;
             {
@@ -3874,6 +3815,7 @@ public:
 
     void handleMiniMaxCredentialCompletion(MiniMaxActionCompletionParams* params) {
         std::unique_ptr<MiniMaxActionCompletionParams> ownedParams(params);
+        joinActionThread(miniMaxActionThread);
         {
             std::lock_guard<std::mutex> lock(miniMaxActionMutex);
             miniMaxActionInFlight = false;
@@ -5001,10 +4943,6 @@ public:
         DashboardShellDialog dialog = DashboardShellDialog::Help;
     };
 
-    struct MiniMaxActionMessageParams {
-        DashboardMiniMaxCredentialRequest request;
-    };
-
     static DashboardShellDialog shellDialogFromWindow(HWND hwnd) {
         const auto value = reinterpret_cast<INT_PTR>(GetPropW(hwnd, kShellDialogKindProperty));
         return static_cast<DashboardShellDialog>(value);
@@ -5371,27 +5309,27 @@ public:
             commitScheduledExportSettingsFromControls();
             DestroyWindow(hwnd);
             return 0;
-        case WM_JISTATS_TEST_MINIMAX_ACTION:
-            {
-                std::unique_ptr<MiniMaxActionMessageParams> params(
-                    reinterpret_cast<MiniMaxActionMessageParams*>(lParam));
-                if (!params) {
-                    return 0;
-                }
-
-                if (miniMaxPlanCombo != nullptr) {
-                    const int selection = params->request.planKey == "token_plan" ? 1 : 0;
-                    SendMessageW(miniMaxPlanCombo, CB_SETCURSEL, selection, 0);
-                }
-                if (miniMaxAccountEdit != nullptr) {
-                    setWindowText(miniMaxAccountEdit, utf8ToWide(params->request.accountDisplayName));
-                }
-                if (miniMaxSecretEdit != nullptr) {
-                    setWindowText(miniMaxSecretEdit, utf8ToWide(params->request.secret));
-                }
-                queueMiniMaxCredentialAction(params->request);
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        case WM_JISTATS_TEST_MINIMAX_ACTION: {
+            const auto* request = reinterpret_cast<const DashboardMiniMaxCredentialRequest*>(lParam);
+            if (request == nullptr) {
+                return FALSE;
             }
-            return 0;
+
+            if (miniMaxPlanCombo != nullptr) {
+                const int selection = request->planKey == "token_plan" ? 1 : 0;
+                SendMessageW(miniMaxPlanCombo, CB_SETCURSEL, selection, 0);
+            }
+            if (miniMaxAccountEdit != nullptr) {
+                setWindowText(miniMaxAccountEdit, utf8ToWide(request->accountDisplayName));
+            }
+            if (miniMaxSecretEdit != nullptr) {
+                setWindowText(miniMaxSecretEdit, utf8ToWide(request->secret));
+            }
+            queueMiniMaxCredentialAction(*request);
+            return TRUE;
+        }
+#endif
         case WM_DESTROY:
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -7292,12 +7230,12 @@ int DashboardPresenter::waitForExit() {
     if (!pImpl->uiThread.joinable() && pImpl->placementWriter.joinable()) {
         pImpl->joinPlacementWriter();
     }
+    Impl::joinActionThread(pImpl->openAIImportThread);
+    Impl::joinActionThread(pImpl->htmlExportThread);
+    Impl::joinActionThread(pImpl->miniMaxActionThread);
+    Impl::joinActionThread(pImpl->offlineRetryThread);
+    Impl::joinActionThread(pImpl->offlineDismissThread);
 #endif
-    pImpl->joinOpenAIImportThreads();
-    pImpl->joinHtmlExportThreads();
-    pImpl->joinMiniMaxActionThreads();
-    pImpl->joinOfflineRetryThreads();
-    pImpl->joinOfflineDismissThreads();
 
     std::lock_guard<std::mutex> lock(pImpl->mutex);
     pImpl->initialized = false;
@@ -7562,34 +7500,13 @@ bool DashboardPresenter::submitMiniMaxCredentialActionForTesting(
     const DashboardMiniMaxCredentialRequest& request) {
 #ifdef _WIN32
     HWND hwnd = nullptr;
-    HWND planCombo = nullptr;
-    HWND accountEdit = nullptr;
-    HWND secretEdit = nullptr;
     {
         std::lock_guard<std::mutex> lock(pImpl->mutex);
         hwnd = pImpl->preferencesWindow;
-        planCombo = pImpl->miniMaxPlanCombo;
-        accountEdit = pImpl->miniMaxAccountEdit;
-        secretEdit = pImpl->miniMaxSecretEdit;
     }
-
-    if (hwnd == nullptr) {
-        return false;
-    }
-
-    if (planCombo != nullptr) {
-        const int selection = request.planKey == "token_plan" ? 1 : 0;
-        SendMessageW(planCombo, CB_SETCURSEL, selection, 0);
-    }
-    if (accountEdit != nullptr) {
-        setWindowText(accountEdit, utf8ToWide(request.accountDisplayName));
-    }
-    if (secretEdit != nullptr) {
-        setWindowText(secretEdit, utf8ToWide(request.secret));
-    }
-
-    pImpl->queueMiniMaxCredentialAction(request);
-    return true;
+    // Synchronous dispatch keeps the borrowed request alive and the worker handle UI-owned.
+    return hwnd != nullptr &&
+           SendMessageW(hwnd, Impl::WM_JISTATS_TEST_MINIMAX_ACTION, 0, reinterpret_cast<LPARAM>(&request)) != FALSE;
 #else
     static_cast<void>(request);
     return false;
