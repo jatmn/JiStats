@@ -389,7 +389,16 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
     REQUIRE(replay.success);
     REQUIRE(replay.events.size() == 1);
     CHECK((replay.events.front().sourceRunId != backfill.sourceRunId) == advanceCache);
+    const auto sequenceBeforeReplay =
+        storage.execute("SELECT seq FROM sqlite_sequence WHERE name = 'activity_events';");
+    REQUIRE(sequenceBeforeReplay.success());
+    REQUIRE(sequenceBeforeReplay.rowCount() == 1);
     REQUIRE(ClaudeCodeLocalParser::importLocalActivity(storage, source.path()));
+    REQUIRE(ClaudeCodeLocalParser::importLocalActivity(storage, source.path()));
+    const auto sequenceAfterReplay = storage.execute("SELECT seq FROM sqlite_sequence WHERE name = 'activity_events';");
+    REQUIRE(sequenceAfterReplay.success());
+    REQUIRE(sequenceAfterReplay.rowCount() == 1);
+    CHECK(sequenceAfterReplay.getInt64(0, 0) == sequenceBeforeReplay.getInt64(0, 0) + (advanceCache ? 1 : 0));
     backfill.sourceRunId = replay.events.front().sourceRunId;
     backfill.rawReference = replay.events.front().rawReference;
     REQUIRE(storage.insertUsageEvents({backfill}));
