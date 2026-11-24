@@ -2641,6 +2641,7 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
 
         const auto planKey = result.getString(row, 3);
         const bool isCodexSample = result.getBool(row, 13);
+        std::time_t codexResetAt = 0;
         if (isCodexSample) {
             const auto window = savedWindow(row);
             const auto start = std::get<1>(window);
@@ -2652,6 +2653,7 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
             if (!seenCodexWindows.emplace(planKey, std::get<0>(window), start, end).second) {
                 continue;
             }
+            codexResetAt = end;
         }
 
         const std::string providerDisplayName = result.getString(row, 1);
@@ -2688,8 +2690,7 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
                                     result.getString(row, 5), used, limit, result.getString(row, 9), remaining);
         if (isCodexSample) {
             quota.providerSurface = "openai_subscription_codex_local";
-            const auto resetTime = parseRuntimeTimestamp(result.getString(row, 10));
-            quota.windowResetAt = resetTime > snapshotTime ? resetTime : 0;
+            quota.windowResetAt = codexResetAt;
         } else if (providerKey == "grok" || providerKey == "cursor") {
             quota.providerSurface = providerKey + "_subscription_api";
             const auto resetTime = parseRuntimeTimestamp(result.getString(row, 10));

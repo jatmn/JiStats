@@ -3542,8 +3542,11 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     ScopedEnvironmentVariable codexHomeEnv("CODEX_HOME", codexHome.path().string());
     std::filesystem::create_directories(codexHome.path() / "sessions");
     const std::time_t now = std::time(nullptr);
-    const bool paired = GENERATE(false, true);
-    const std::time_t primaryReset = now + 5 * 3600;
+    enum class QuotaWindowCase { WeeklyOnly, Paired, LegacyPlaceholder };
+    const auto windowCase =
+        GENERATE(QuotaWindowCase::WeeklyOnly, QuotaWindowCase::Paired, QuotaWindowCase::LegacyPlaceholder);
+    const bool paired = windowCase != QuotaWindowCase::WeeklyOnly;
+    const std::time_t primaryReset = now;
     const std::time_t weeklyReset = now + 86400;
     const std::string primary =
         paired ? R"json({"used_percent":6,"window_minutes":300,"resets_at":)json" + std::to_string(primaryReset) + "}"
@@ -3597,6 +3600,15 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     CHECK(snapshots.getString(snapshots.rowCount() - 1, 0) == "weekly");
     CHECK(snapshots.getInt64(snapshots.rowCount() - 1, 1) == 94);
 
+    if (windowCase == QuotaWindowCase::LegacyPlaceholder) {
+        REQUIRE(storage
+                    .execute("UPDATE quota_snapshots SET window_start_utc = snapshot_time_utc, "
+                             "window_end_utc = snapshot_time_utc "
+                             "WHERE plan_id IN (SELECT id FROM plans WHERE plan_key = "
+                             "'openai_subscription_codex_local:interval');")
+                    .success());
+    }
+
     if (!paired) {
         REQUIRE(
             storage
@@ -3639,10 +3651,11 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     const auto* openai = findProviderStatus(startup, "openai");
     REQUIRE(openai != nullptr);
     REQUIRE(openai->quotas.size() == (paired ? 2 : 1));
+    const auto expectedPrimaryReset = windowCase == QuotaWindowCase::LegacyPlaceholder ? 0 : primaryReset;
     for (const auto& cachedQuota : openai->quotas) {
         CAPTURE(cachedQuota.windowType);
         CHECK(cachedQuota.providerSurface == quota.providerSurface);
-        CHECK(cachedQuota.windowResetAt == (cachedQuota.windowType == "weekly" ? weeklyReset : primaryReset));
+        CHECK(cachedQuota.windowResetAt == (cachedQuota.windowType == "weekly" ? weeklyReset : expectedPrimaryReset));
     }
     const auto startupBars = restarted.getDashboardUsageProgressSummariesForTesting();
     CHECK(std::count_if(startupBars.begin(), startupBars.end(),
