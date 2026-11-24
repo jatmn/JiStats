@@ -6137,6 +6137,114 @@ TEST_CASE("AppController scopes the HTML recovery summary and badges to historic
     CHECK(html.find("reconstructed gap marker") == std::string::npos);
 }
 
+TEST_CASE("AppController labels backfilled usage in the HTML report dates", "[app][reporting][recovery]") {
+    requireSqlite();
+    const bool retainOnlyRollup = GENERATE(false, true);
+    CAPTURE(retainOnlyRollup);
+
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_backfill_report");
+    const std::time_t day = (std::time(nullptr) / 86400 - 2) * 86400;
+    const std::time_t backfillDay = day - 86400;
+    const std::string accountKey = "recovered-claude-account";
+
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        const auto account = seedUsageProviderAccount(storage, "claude_code", accountKey, "Recovered Claude history");
+        insertUsageEvent(storage, account.providerId, account.accountId, toUtcIso(backfillDay + 60), "restored", 123,
+                         4);
+        REQUIRE(storage
+                    .execute("UPDATE usage_events SET is_backfilled = 1 WHERE account_id = ?;",
+                             {std::to_string(account.accountId)})
+                    .success());
+        if (retainOnlyRollup) {
+            REQUIRE(storage.rebuildUsageRollups(UsageRollupResolution::Daily, account.providerId, account.accountId,
+                                                backfillDay, backfillDay));
+            REQUIRE(
+                storage.execute("DELETE FROM usage_events WHERE account_id = ?;", {std::to_string(account.accountId)})
+                    .success());
+        }
+        PersistedGapMarker marker;
+        marker.providerId = account.providerId;
+        marker.accountId = account.accountId;
+        marker.periodStart = backfillDay;
+        marker.periodEnd = day + 3600;
+        marker.classification = GapClassification::Reconstructed;
+        REQUIRE(storage.upsertGapMarker(marker));
+        ++marker.periodStart;
+        marker.classification = GapClassification::Unknown;
+        REQUIRE(storage.upsertGapMarker(marker));
+
+        PersistedRecoveryCheckpoint checkpoint;
+        checkpoint.providerId = account.providerId;
+        checkpoint.accountId = account.accountId;
+        checkpoint.syncKind = "runtime_backfill";
+        checkpoint.outcome = "imported";
+        checkpoint.fetchedEventCount = 1;
+        checkpoint.recoveryStart = backfillDay;
+        checkpoint.recoveryEnd = day + 3600;
+        checkpoint.attemptAt = checkpoint.recoveryEnd;
+        REQUIRE(storage.insertRecoveryCheckpoint(checkpoint));
+
+        REQUIRE(storage
+                    .execute("INSERT INTO quota_snapshots (provider_id, account_id, snapshot_time_utc, "
+                             "window_start_utc, window_end_utc, used_value, confidence_tier) "
+                             "VALUES (?, ?, ?, ?, ?, 0, 'high');",
+                             {std::to_string(account.providerId), std::to_string(account.accountId),
+                              toUtcIso(backfillDay + 30), toUtcIso(backfillDay), toUtcIso(backfillDay + 30)})
+                    .success());
+    }
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({}));
+    REQUIRE(app.init());
+
+    DashboardPreferences preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.analysisSelectedProviderId = "claude_code";
+    preferences.analysisSelectedAccountId = accountKey;
+
+    const auto custom = AnalysisDateRangePreset::Custom;
+    const auto quotaWindow = AnalysisDateRangePreset::CurrentQuotaWindow;
+    struct ReportCase {
+        const char* filename;
+        AnalysisDateRangePreset preset;
+        std::time_t day;
+        bool includesBackfilledUsage;
+    };
+    const ReportCase reports[] = {
+        {"with-usage.html", custom, backfillDay, true},
+        {"without-usage.html", custom, day, false},
+        {"partial-day.html", quotaWindow, backfillDay, false},
+    };
+
+    for (const auto& reportCase : reports) {
+        CAPTURE(reportCase.filename);
+        preferences.analysisDateRangePreset = reportCase.preset;
+        preferences.analysisCustomRangeStartUtc = reportCase.day;
+        preferences.analysisCustomRangeEndUtc = reportCase.day;
+        app.applyDashboardPreferencesForTesting(preferences);
+        const auto path = exportDir.path() / reportCase.filename;
+        REQUIRE(app.exportHtmlReportForTesting(path.string()).success);
+        std::ifstream report(path);
+        REQUIRE(report.is_open());
+        const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+        CHECK(html.find("1 provider recovery checkpoint imported provider history") != std::string::npos);
+        CHECK(html.find("1 reconstructed gap marker; 1 unknown gap marker") != std::string::npos);
+        if (reportCase.includesBackfilledUsage) {
+            CHECK(html.find("badge-unknown\">Contains backfilled data and unknown gaps") != std::string::npos);
+            CHECK(html.find("Contains backfilled data: Yes | Contains unknown gaps: Yes") != std::string::npos);
+            CHECK(html.find("123 tokens") != std::string::npos);
+        } else {
+            CHECK(html.find("badge-unknown\">Contains unknown gaps") != std::string::npos);
+            CHECK(html.find("Contains backfilled data: No | Contains unknown gaps: Yes") != std::string::npos);
+            CHECK(html.find("123 tokens") == std::string::npos);
+        }
+    }
+}
+
 TEST_CASE("AppController exports the effective Analysis account when no live row matches",
           "[app][analysis][reporting][scheduled]") {
     requireSqlite();

@@ -183,6 +183,9 @@ std::string ReportMetadata::freshnessLabel() const {
 }
 
 std::string ReportMetadata::backfillLabel() const {
+    if (containsBackfilledData && containsUnknownGaps) {
+        return "Contains backfilled data and unknown gaps";
+    }
     if (containsBackfilledData) return "Contains backfilled data";
     if (containsUnknownGaps) return "Contains unknown gaps";
     return "No backfill or gaps";
