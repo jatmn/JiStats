@@ -1813,7 +1813,27 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
                 utcDayStart(window.start),
                 utcDayStart(window.end));
             for (const auto& rollup : quotaRollups) {
-                if (!rollup.latestLimitValue.has_value() || *rollup.latestLimitValue <= 0) {
+                const std::string seriesKey = std::to_string(rollup.planId.value_or(0)) + "|" + rollup.quotaDimension;
+                const bool hasTrendPoint = rollup.latestLimitValue && *rollup.latestLimitValue > 0;
+                auto& previousWindow = previousWindowsByKey[seriesKey];
+                int resetCount = 0;
+                if (rollup.observedBillingWindows) {
+                    PersistedQuotaSnapshot observation;
+                    observation.quotaDimension = rollup.quotaDimension;
+                    for (const auto& bounds : *rollup.observedBillingWindows) {
+                        observation.windowStart = bounds.first;
+                        observation.windowEnd = bounds.second;
+                        if (observation.observeBillingWindow(previousWindow)) {
+                            ++resetCount;
+                        }
+                    }
+                } else {
+                    // Legacy rollups reported only within-day counts. They cannot establish continuity.
+                    previousWindow.reset();
+                    resetCount = hasTrendPoint ? rollup.resetCount : 0;
+                }
+                rollupResetCountBySeriesKey[seriesKey] += resetCount;
+                if (!hasTrendPoint) {
                     continue;
                 }
 
@@ -1823,9 +1843,6 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
                     : std::clamp(limitValue - rollup.latestUsedValue, 0LL, limitValue);
                 const double remainingPercentage =
                     (static_cast<double>(remainingValue) / static_cast<double>(limitValue)) * 100.0;
-                const std::string seriesKey =
-                    std::to_string(rollup.planId.value_or(0)) + "|" + rollup.quotaDimension;
-
                 auto& series = quotaSeriesByKey[seriesKey];
                 configureQuotaSeries(
                     series,
@@ -1846,7 +1863,7 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
                 point.remainingPercentage = remainingPercentage;
                 point.remainingValue = remainingValue;
                 point.limitValue = limitValue;
-                point.resetPoint = rollup.resetCount > 0;
+                point.resetPoint = resetCount > 0;
                 point.reconciled = rollup.reconciledSampleCount > 0;
                 point.dailyRollup = true;
                 series.points.push_back(std::move(point));
@@ -1862,12 +1879,13 @@ AnalysisViewModel AnalysisQueryEngine::buildViewModel(const DashboardViewModel& 
                         existing = lowWaterPercentage;
                     }
                 }
-                rollupResetCountBySeriesKey[seriesKey] += rollup.resetCount;
             }
             quotaHistoryUsesRollups = !quotaSeriesByKey.empty();
         }
 
         if (quotaSeriesByKey.empty()) {
+            previousWindowsByKey.clear();
+            rollupResetCountBySeriesKey.clear();
             const auto quotaSnapshots = storage_->getQuotaSnapshots(
                 scopedProviderAccountIds->providerId,
                 scopedProviderAccountIds->accountId,

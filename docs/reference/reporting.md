@@ -8,6 +8,8 @@ Open the dedicated Analysis workspace from the dashboard. The provider, account,
 
 [AnalysisPresenter](../../src/gui/AnalysisPresenter.cpp) owns the display. [AnalysisQueryEngine](../../src/reporting/AnalysisQueryEngine.cpp) resolves the persisted scope used for Analysis and HTML reporting. Providers and accounts remain selectable while they have retained daily usage rollups. Activity shows the retained daily total and identifies records without hourly detail.
 
+Quota rollups preserve observed window changes across UTC days within the selected range. Older rollups keep their saved within-day counts. Rebuilding them from raw snapshots restores the boundary evidence when the underlying data is available.
+
 ## Exports
 
 HTML is the primary v1.0 export format. Reports are snapshots for sharing, archiving, or offline review. Use the dashboard and Analysis for current data and interactive review.

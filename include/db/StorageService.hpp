@@ -241,6 +241,7 @@ struct PersistedQuotaSnapshotRollup {
     std::optional<long long> lowWaterRemainingValue;
     std::optional<long long> lowWaterLimitValue;
     int resetCount = 0;
+    std::optional<std::vector<std::pair<std::time_t, std::time_t>>> observedBillingWindows;
     int reconciledSampleCount = 0;
     std::string latestConfidenceTier;
     std::string createdAtUtc;
