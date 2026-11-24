@@ -1,6 +1,6 @@
 # OpenAI and Codex
 
-OpenAI subscription tracking is opt-in. Disabling it stops new rollout quota and throughput collection and preserves persisted history. The setting rehydrates before startup refresh. Enabling schedules a refresh during the running session. Manual ChatGPT export import and local Codex SQLite model attribution are separate paths. Keep late in-flight results from overriding a newly disabled state. Use the [provider-path tests](../../tests/test_provider_data_path.cpp) and [controller tests](../../tests/test_app_controller.cpp) when changing activation or startup behavior.
+OpenAI subscription tracking is opt-in. Disabling it stops new rollout quota and throughput collection and preserves persisted history. The setting rehydrates before startup refresh. When tracking is off at startup, JiStats leaves the rollout directory untouched. Enabling schedules a refresh and wakes the rollout watcher during the running session. Manual ChatGPT export import and local Codex SQLite model attribution are separate paths. Keep late in-flight results from overriding a newly disabled state. Use the [provider-path tests](../../tests/test_provider_data_path.cpp) and [controller tests](../../tests/test_app_controller.cpp) when changing activation or startup behavior.
 
 ## Sources and boundaries
 

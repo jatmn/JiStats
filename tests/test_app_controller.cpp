@@ -2973,7 +2973,6 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
     requireSqlite();
 
     TempTestDatabase dbPath;
-    seedAllProviderTrackingEnabled(dbPath.path());
     TempTestDirectory userProfileRoot("jistats_codex_refresh");
     const auto rolloutPath =
         userProfileRoot.path() / ".codex" / "sessions" / "2026" / "04" / "19" / "rollout-live.jsonl";
@@ -3002,25 +3001,31 @@ TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout sn
     app.setOpenAICodexRefreshPollIntervalForTesting(25);
 
     REQUIRE(app.init());
-    const int initialQuotaFetchCount = openaiProvider->getQuotaFetchCount();
+    REQUIRE_FALSE(app.getDashboardViewModelForTesting().preferences.openaiSubscriptionTrackingEnabled);
+    CHECK(openaiProvider->getQuotaFetchCount() == 0);
 
-    const ProviderStatus* initialOpenAI =
-        findProviderStatus(app.getDashboardViewModelForTesting(), "openai");
-    REQUIRE(initialOpenAI != nullptr);
+    auto preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.openaiSubscriptionTrackingEnabled = true;
+    app.applyDashboardPreferencesForTesting(preferences);
 
-    writeCodexRolloutFile(rolloutPath, 40.0, now + 60, now + (5 * 3600));
-    std::error_code updateTimestampError;
-    std::filesystem::last_write_time(
-        rolloutPath,
-        std::filesystem::file_time_type::clock::now() + std::chrono::seconds(2),
-        updateTimestampError);
-    REQUIRE_FALSE(updateTimestampError);
-    openaiProvider->setQuotaResponse(
-        makeQuotaResponse(now + 60, 40, 100, "interval", "openai_subscription_codex_local"));
-
-    REQUIRE(waitForCondition([&openaiProvider, initialQuotaFetchCount]() {
-        return openaiProvider->getQuotaFetchCount() > initialQuotaFetchCount;
-    }, std::chrono::milliseconds(1500)));
+    auto hasQuota = [&app](long long used) {
+        const auto model = app.getDashboardViewModelForTesting();
+        const auto* provider = findProviderStatus(model, "openai");
+        return provider && !provider->quotas.empty() && provider->quotas.front().used == used;
+    };
+    REQUIRE(hasQuota(25));
+    const auto refreshQuota = [&](const std::filesystem::path& changedPath, long long used, int offsetSeconds) {
+        openaiProvider->setQuotaResponse(
+            makeQuotaResponse(now + offsetSeconds, used, 100, "interval", "openai_subscription_codex_local"));
+        writeCodexRolloutFile(changedPath, static_cast<double>(used), now + offsetSeconds, now + (5 * 3600));
+        std::error_code error;
+        std::filesystem::last_write_time(
+            changedPath, std::filesystem::file_time_type::clock::now() + std::chrono::seconds(offsetSeconds), error);
+        REQUIRE_FALSE(error);
+        REQUIRE(waitForCondition([&]() { return hasQuota(used); }, std::chrono::milliseconds(1500)));
+    };
+    refreshQuota(rolloutPath, 40, 60);
+    refreshQuota(rolloutPath.parent_path().parent_path() / "20" / "rollout-new.jsonl", 65, 120);
 
     app.shutdown();
 }

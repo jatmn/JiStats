@@ -3960,6 +3960,7 @@ public:
     ExportSchedule appliedExportSchedule;
     std::condition_variable refreshWatcherCv;
     std::atomic<unsigned> subscriptionWatchMask{0};
+    bool openAICodexWatcherEnabled = false; // Protected by refreshWatcherMutex.
     std::condition_variable interactionWorkCv;
     std::optional<DashboardPreferences> pendingInteractionPreferences;
     std::optional<DashboardPreferences> activeInteractionPreferences;
@@ -4627,10 +4628,13 @@ public:
         }
         const unsigned subscriptionMask = (preferences.grokSubscriptionTrackingEnabled ? 1u : 0u) |
                                           (preferences.cursorSubscriptionTrackingEnabled ? 2u : 0u);
+        const bool watchCodexRollouts = preferences.openaiSubscriptionTrackingEnabled && resolveOpenAIRuntimeAdapter();
         bool changed;
         {
             std::lock_guard<std::mutex> lock(refreshWatcherMutex);
-            changed = subscriptionWatchMask.exchange(subscriptionMask) != subscriptionMask;
+            changed = subscriptionWatchMask.exchange(subscriptionMask) != subscriptionMask ||
+                      openAICodexWatcherEnabled != watchCodexRollouts;
+            openAICodexWatcherEnabled = watchCodexRollouts;
         }
         if (changed) {
             refreshWatcherCv.notify_all();
@@ -4914,11 +4918,6 @@ public:
         });
     }
 
-    bool shouldRunOpenAICodexRefreshWatcher() const {
-        const auto provider = resolveOpenAIRuntimeAdapter();
-        return provider && provider->isEnabled();
-    }
-
     bool shouldRunMiniMaxRefreshWatcher() const {
         const auto provider = resolveMiniMaxRuntimeAdapter();
         if (!provider || !provider->isEnabled()) {
@@ -5013,11 +5012,15 @@ public:
 
     void startOpenAICodexRefreshWatcher() {
         joinOpenAICodexRefreshThread();
-        lastObservedCodexRolloutSample = sampleLatestCodexRolloutFileForRefreshWatcher();
+        lastObservedCodexRolloutSample.reset();
         openAICodexWatcherUnchangedPasses = 0;
         openAICodexRefreshThread = std::thread([this]() {
             while (!shouldStopMiniMaxValidation()) {
-                const bool watcherActive = shouldRunOpenAICodexRefreshWatcher();
+                bool watcherActive;
+                {
+                    std::lock_guard<std::mutex> lock(refreshWatcherMutex);
+                    watcherActive = openAICodexWatcherEnabled;
+                }
                 if (watcherActive) {
                     if (detectOpenAICodexRolloutUpdate()) {
                         openAICodexWatcherUnchangedPasses = 0;
@@ -5026,18 +5029,18 @@ public:
                         ++openAICodexWatcherUnchangedPasses;
                     }
                 } else {
+                    lastObservedCodexRolloutSample.reset();
                     openAICodexWatcherUnchangedPasses = 0;
                 }
 
-                if (waitForRefreshWatcherInterval(
-                        adaptiveWatcherIntervalOrDormant(
-                            watcherActive,
-                            openAICodexRefreshPollInterval,
-                            std::chrono::duration_cast<std::chrono::milliseconds>(
-                                kOpenAICodexRefreshMaxBackoffInterval),
-                            openAICodexWatcherUnchangedPasses))) {
-                    break;
-                }
+                const auto interval = adaptiveWatcherIntervalOrDormant(
+                    watcherActive, openAICodexRefreshPollInterval,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(kOpenAICodexRefreshMaxBackoffInterval),
+                    openAICodexWatcherUnchangedPasses);
+                std::unique_lock<std::mutex> lock(refreshWatcherMutex);
+                refreshWatcherCv.wait_for(lock, interval, [this, watcherActive]() {
+                    return shuttingDown.load() || openAICodexWatcherEnabled != watcherActive;
+                });
             }
         });
     }
