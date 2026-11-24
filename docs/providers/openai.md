@@ -18,6 +18,8 @@ The [throughput query](../../src/reporting/AnalysisQueryEngine.cpp) uses recorde
 
 Quota refresh checks rollout file sizes and modification times, reusing the parsed quota observations from unchanged files in the running adapter. It rereads changed rollouts, including older sessions that receive a new observation, and drops cache entries for removed files. The cache is memory-only.
 
+At startup, the dashboard restores the Codex source and each recorded reset from saved quota snapshots while the live refresh runs.
+
 ### Codex SQLite privacy boundary
 
 Select **Enable Codex model attribution** in **File → Settings → OpenAI** to let JiStats read the local Codex state database. This setting defaults to off and is independent of subscription tracking. When enabled, the [app controller](../../src/app/AppController.cpp) checks for `state_5.sqlite` under `CODEX_HOME`, then `.codex` under the user profile or home directory, at startup and during Analysis data refreshes.
