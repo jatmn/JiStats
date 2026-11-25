@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 namespace JiStats {
@@ -26,7 +27,7 @@ bool tryGetIntegralNumber(const JsonValue& value, long long& out) {
         return false;
     }
     if (integerPart < static_cast<double>(std::numeric_limits<long long>::min()) ||
-        integerPart > static_cast<double>(std::numeric_limits<long long>::max())) {
+        integerPart >= -static_cast<double>(std::numeric_limits<long long>::min())) {
         return false;
     }
     out = static_cast<long long>(integerPart);
@@ -35,9 +36,11 @@ bool tryGetIntegralNumber(const JsonValue& value, long long& out) {
 
 bool tryGetNonNegativeIntegralField(const JsonValue& object, const char* fieldName, long long& out) {
     const JsonValue* value = object.getMember(fieldName);
-    if (!value || !tryGetIntegralNumber(*value, out) || out < 0) {
+    long long number = 0;
+    if (!value || !tryGetIntegralNumber(*value, number) || number < 0) {
         return false;
     }
+    out = number;
     return true;
 }
 
@@ -79,14 +82,23 @@ std::string tryGetEnvironmentVariable(const char* name) {
     return resolvedValue;
 }
 
-std::time_t parseDateToUnixTime(const std::string& dateStr) {
+enum class CacheDateZone { Local, Utc };
+
+std::time_t parseDateToUnixTime(const std::string& dateStr, CacheDateZone zone) {
     std::tm tm = {};
     std::istringstream ss(dateStr);
     ss >> std::get_time(&tm, "%Y-%m-%d");
     if (ss.fail()) {
         return 0;
     }
-    return std::mktime(&tm);
+    if (zone == CacheDateZone::Local) {
+        return std::mktime(&tm);
+    }
+#ifdef _WIN32
+    return _mkgmtime(&tm);
+#else
+    return timegm(&tm);
+#endif
 }
 
 std::string readFileContents(const std::string& filePath) {
@@ -143,7 +155,10 @@ ClaudeCodeLocalParseResult ClaudeCodeLocalParser::parseStatsCache(const std::str
     tryGetNonNegativeIntegralField(root, "totalSessions", result.totalSessions);
 
     // totalMessages
-    tryGetNonNegativeIntegralField(root, "totalMessages", result.totalMessages);
+    long long totalMessages = 0;
+    if (tryGetNonNegativeIntegralField(root, "totalMessages", totalMessages)) {
+        result.totalMessages = totalMessages;
+    }
 
     // firstSessionDate
     tryGetStringField(root, "firstSessionDate", result.firstSessionDate);
@@ -199,10 +214,14 @@ ClaudeCodeLocalParseResult ClaudeCodeLocalParser::parseStatsCache(const std::str
             }
             ClaudeCodeModelAggregate agg;
             agg.modelKey = modelKey;
-            tryGetNonNegativeIntegralField(modelValue, "inputTokens", agg.inputTokens);
-            tryGetNonNegativeIntegralField(modelValue, "outputTokens", agg.outputTokens);
-            tryGetNonNegativeIntegralField(modelValue, "cache_read_input_tokens", agg.cacheReadInputTokens);
-            tryGetNonNegativeIntegralField(modelValue, "cache_creation_input_tokens", agg.cacheCreationInputTokens);
+            const bool hasInputTokens = tryGetNonNegativeIntegralField(modelValue, "inputTokens", agg.inputTokens);
+            const bool hasOutputTokens = tryGetNonNegativeIntegralField(modelValue, "outputTokens", agg.outputTokens);
+            const bool hasCacheReadTokens =
+                tryGetNonNegativeIntegralField(modelValue, "cache_read_input_tokens", agg.cacheReadInputTokens);
+            const bool hasCacheCreationTokens =
+                tryGetNonNegativeIntegralField(modelValue, "cache_creation_input_tokens", agg.cacheCreationInputTokens);
+            result.hasModelTokenCounts = result.hasModelTokenCounts || hasInputTokens || hasOutputTokens ||
+                                         hasCacheReadTokens || hasCacheCreationTokens;
             double costUsd = 0.0;
             if (tryGetNumberField(modelValue, "cost_usd", costUsd)) {
                 agg.costUsd = costUsd;
@@ -262,7 +281,7 @@ std::vector<UsageEvent> ClaudeCodeLocalParser::toUsageEvents(const ClaudeCodeLoc
     const std::string reference = localPathReference(result.statsCachePath);
 
     for (const auto& day : result.dailyModelTokens) {
-        const std::time_t dayTime = parseDateToUnixTime(day.date);
+        const std::time_t dayTime = parseDateToUnixTime(day.date, CacheDateZone::Utc);
         if (dayTime <= 0) {
             continue;
         }
@@ -284,7 +303,7 @@ std::vector<UsageEvent> ClaudeCodeLocalParser::toUsageEvents(const ClaudeCodeLoc
 
     // If no daily model tokens, fall back to aggregate modelUsage without specific dates
     if (includeLifetimeFallback && events.empty() && !result.modelUsage.empty()) {
-        const std::time_t aggregateTime = parseDateToUnixTime(result.lastComputedDate);
+        const std::time_t aggregateTime = parseDateToUnixTime(result.lastComputedDate, CacheDateZone::Local);
         for (const auto& model : result.modelUsage) {
             UsageEvent event;
             event.eventTime = aggregateTime > 0 ? aggregateTime : result.parsedAt;
@@ -314,7 +333,7 @@ std::vector<ActivityEvent> ClaudeCodeLocalParser::toActivityEvents(const ClaudeC
     const std::string reference = localPathReference(result.statsCachePath);
 
     for (const auto& day : result.dailyActivity) {
-        const std::time_t dayTime = parseDateToUnixTime(day.date);
+        const std::time_t dayTime = parseDateToUnixTime(day.date, CacheDateZone::Local);
         if (dayTime <= 0) {
             continue;
         }

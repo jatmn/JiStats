@@ -11,6 +11,7 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <sstream>
@@ -19,6 +20,9 @@
 #include <vector>
 
 #include <winsock2.h>
+#include <windows.h>
+#include <aclapi.h>
+#include <sddl.h>
 #include <ws2tcpip.h>
 
 #include "core/HttpClient.hpp"
@@ -58,6 +62,42 @@ public:
 private:
     TempTestDirectory directory_{"jistats_kimi_fixture"};
 };
+
+void setFixtureDacl(const std::filesystem::path& path, SECURITY_INFORMATION attributes, const wchar_t* sddl,
+                    bool propagate = false) {
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    REQUIRE(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, nullptr));
+    const std::unique_ptr<void, decltype(&LocalFree)> security(descriptor, LocalFree);
+    if (propagate || attributes == UNPROTECTED_DACL_SECURITY_INFORMATION) {
+        BOOL present = FALSE;
+        BOOL defaulted = FALSE;
+        PACL dacl = nullptr;
+        REQUIRE(GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted));
+        REQUIRE(present);
+        auto objectName = path.native();
+        REQUIRE(SetNamedSecurityInfoW(objectName.data(), SE_FILE_OBJECT, attributes | DACL_SECURITY_INFORMATION,
+                                      nullptr, nullptr, dacl, nullptr) == ERROR_SUCCESS);
+    } else {
+        REQUIRE(SetFileSecurityW(path.c_str(), attributes | DACL_SECURITY_INFORMATION, descriptor));
+    }
+}
+
+std::vector<unsigned char> credentialDacl(const std::filesystem::path& path, bool requireUnprotected = false) {
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    REQUIRE(GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl,
+                                  nullptr, &descriptor) == ERROR_SUCCESS);
+    const std::unique_ptr<void, decltype(&LocalFree)> security(descriptor, LocalFree);
+    REQUIRE(dacl != nullptr);
+    if (requireUnprotected) {
+        SECURITY_DESCRIPTOR_CONTROL control = 0;
+        DWORD revision = 0;
+        REQUIRE(GetSecurityDescriptorControl(descriptor, &control, &revision));
+        REQUIRE((control & SE_DACL_PROTECTED) == 0);
+    }
+    const auto* bytes = reinterpret_cast<const unsigned char*>(dacl);
+    return {bytes, bytes + dacl->AclSize};
+}
 
 class ScopedEnvironmentVariable {
 public:
@@ -310,6 +350,26 @@ std::string sampleKimiUsagesResponse() {
     }
   ]
 })json";
+}
+
+constexpr char expiredKimiCredentials[] = R"json({
+  "access_token": "expired-access-token",
+  "refresh_token": "refresh-token",
+  "scope": "openid profile",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "expires_at": 1.0
+})json";
+
+std::vector<ExpectedHttpExchange> kimiRefreshSequence() {
+    return {{"POST", "/api/oauth/token", 200, R"json({
+  "access_token": "fresh-access-token",
+  "refresh_token": "fresh-refresh-token",
+  "expires_in": 900,
+  "scope": "openid profile",
+  "token_type": "Bearer"
+})json"},
+            {"GET", "/coding/v1/usages", 200, sampleKimiUsagesResponse()}};
 }
 
 } // namespace
@@ -662,6 +722,76 @@ TEST_CASE("Kimi importLocalActivity persists approved local runtime snapshots", 
     CHECK(result.getString(0, 2) == "kimi_local_runtime");
 }
 
+TEST_CASE("Kimi task imports preserve one activity across lifecycle updates", "[kimi][persistence]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    TempFixtureDirectory fixture;
+    const auto runtimePath = "sessions/session-one/tasks/task-one/runtime.json";
+    const auto starting = R"json({
+        "status": "starting",
+        "started_at": "2026-04-20T10:01:00Z",
+        "updated_at": "2026-04-20T10:01:00Z"
+    })json";
+    const auto running = R"json({
+        "status": "running",
+        "started_at": "2026-04-20T10:01:00Z",
+        "updated_at": "2026-04-20T10:01:10Z"
+    })json";
+    const auto completed = R"json({
+        "status": "completed",
+        "started_at": "2026-04-20T10:01:00Z",
+        "updated_at": "2026-04-20T10:02:30Z",
+        "finished_at": "2026-04-20T10:02:30Z"
+    })json";
+    const auto awaitingApproval = R"json({
+        "status": "awaiting_approval",
+        "started_at": "2026-04-20T10:01:00Z",
+        "updated_at": "2026-04-20T10:03:00Z"
+    })json";
+    const auto loadActivity = [&] {
+        return storage.execute(
+            "SELECT id, surface_key, ended_at_utc, duration_seconds, raw_reference FROM activity_events;");
+    };
+
+    fixture.makeFile(runtimePath, starting);
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+    const auto first = loadActivity();
+    REQUIRE(first.success());
+    REQUIRE(first.rowCount() == 1);
+    CHECK(first.getString(0, 1) == "starting");
+
+    fixture.makeFile(runtimePath, running);
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+    const auto initial = loadActivity();
+    REQUIRE(initial.success());
+    REQUIRE(initial.rowCount() == 1);
+    CHECK(initial.getInt64(0, 0) == first.getInt64(0, 0));
+    CHECK(initial.getString(0, 1) == "running");
+    CHECK(initial.getInt64(0, 3) == 10);
+
+    fixture.makeFile(runtimePath, completed);
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+    fixture.makeFile(runtimePath, running);
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+
+    fixture.makeFile(runtimePath, awaitingApproval);
+    REQUIRE(KimiAdapter::importLocalActivity(storage, fixture.path().string()));
+
+    const auto final = loadActivity();
+    REQUIRE(final.success());
+    REQUIRE(final.rowCount() == 1);
+    CHECK(final.getInt64(0, 0) == initial.getInt64(0, 0));
+    CHECK(final.getString(0, 1) == "completed");
+    CHECK(final.getString(0, 2) == "2026-04-20T10:02:30Z");
+    CHECK(final.getInt64(0, 3) == 90);
+    CHECK(final.getString(0, 4) == "kimi_local_runtime:session-one/task-one");
+}
+
 TEST_CASE("Kimi adapter parses provider usages API response", "[kimi]") {
     const std::time_t before = std::time(nullptr);
     const std::string apiResponse = R"json({
@@ -812,17 +942,12 @@ default_model = "kimi-code/kimi-for-coding"
 }
 
 TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting quota", "[kimi]") {
+    enum class Rotation { Normal, Locked, NarrowDacl, DeleteDenied };
+    const Rotation rotation =
+        GENERATE(Rotation::Normal, Rotation::Locked, Rotation::NarrowDacl, Rotation::DeleteDenied);
+    CAPTURE(static_cast<int>(rotation));
     ScopedWinsock winsock;
-    LocalHttpSequenceServer server({
-        {"POST", "/api/oauth/token", 200, R"json({
-  "access_token": "fresh-access-token",
-  "refresh_token": "fresh-refresh-token",
-  "expires_in": 900,
-  "scope": "openid profile",
-  "token_type": "Bearer"
-})json"},
-        {"GET", "/coding/v1/usages", 200, sampleKimiUsagesResponse()}
-    });
+    LocalHttpSequenceServer server(kimiRefreshSequence());
     ScopedEnvironmentVariable oauthUrl(
         "JISTATS_KIMI_OAUTH_TOKEN_URL",
         server.baseUrl() + "/api/oauth/token");
@@ -832,35 +957,96 @@ TEST_CASE("Kimi adapter refreshes expired OAuth credentials before requesting qu
 
     TempFixtureDirectory fixture;
     fixture.makeFile("config.toml", "default_model = \"kimi-code/kimi-for-coding\"\n");
-    fixture.makeFile("credentials/kimi-code.json", R"json({
-  "access_token": "expired-access-token",
-  "refresh_token": "refresh-token",
-  "scope": "openid profile",
-  "token_type": "Bearer",
-  "expires_in": 900,
-  "expires_at": 1.0
-})json");
+    const auto credentialsPath = fixture.makeFile("credentials/kimi-code.json", expiredKimiCredentials);
+    const auto directory = credentialsPath.parent_path();
+    const auto restoreDacl = [&directory](void* descriptor) {
+        SetFileSecurityW(directory.c_str(), DACL_SECURITY_INFORMATION, descriptor);
+        LocalFree(descriptor);
+    };
+    std::unique_ptr<void, decltype(restoreDacl)> originalDirectoryDacl(nullptr, restoreDacl);
+    if (rotation == Rotation::DeleteDenied || rotation == Rotation::NarrowDacl) {
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        REQUIRE(GetNamedSecurityInfoW(directory.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr,
+                                      nullptr, nullptr, &descriptor) == ERROR_SUCCESS);
+        originalDirectoryDacl.reset(descriptor);
+    }
+
+    std::vector<unsigned char> originalDacl;
+    if (rotation == Rotation::NarrowDacl) {
+        setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;FA;;;OW)");
+        setFixtureDacl(credentialsPath, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:(A;;FA;;;OW)");
+        originalDacl = credentialDacl(credentialsPath, true);
+        // Change the directory ACL without propagating it to the existing credential.
+        setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;FA;;;OW)(A;OIIO;FR;;;WD)");
+        REQUIRE(credentialDacl(credentialsPath, true) == originalDacl);
+    } else if (rotation == Rotation::DeleteDenied) {
+        // The owner can write files, but cannot delete an existing file by reopening it by path.
+        setFixtureDacl(credentialsPath, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;0x1e01ff;;;OW)");
+        setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;0x1e01bf;;;OW)");
+    }
+
+    std::unique_ptr<void, decltype(&CloseHandle)> lockedFile(nullptr, CloseHandle);
+    if (rotation == Rotation::Locked) {
+        const HANDLE file = CreateFileW(credentialsPath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        REQUIRE(file != INVALID_HANDLE_VALUE);
+        lockedFile.reset(file);
+    }
 
     KimiAdapter adapter(fixture.path().string());
     const QuotaResponse quota = adapter.fetchQuota();
 
     REQUIRE(server.failure().empty());
+    CHECK(std::distance(std::filesystem::directory_iterator(directory), std::filesystem::directory_iterator()) == 1);
+    std::ifstream input(credentialsPath, std::ios::binary);
+    REQUIRE(input.is_open());
+    const std::string savedCredentials(std::istreambuf_iterator<char>(input), {});
+    if (rotation != Rotation::Normal) {
+        CHECK(server.handledRequestCount() == 1);
+        CHECK_FALSE(quota.success);
+        CHECK(quota.error == "Failed to persist refreshed Kimi OAuth credentials");
+        CHECK(savedCredentials == expiredKimiCredentials);
+        if (rotation == Rotation::NarrowDacl) {
+            CHECK(credentialDacl(credentialsPath, true) == originalDacl);
+        }
+        return;
+    }
+
     REQUIRE(server.handledRequestCount() == 2);
     REQUIRE(quota.success);
     CHECK(quota.used == 40);
     CHECK(quota.limit == 100);
     CHECK(quota.secondaryUsed == 23);
 
-    std::string refreshedCredentials;
-    REQUIRE(std::ifstream(fixture.path() / "credentials" / "kimi-code.json").good());
-    {
-        std::ifstream input(fixture.path() / "credentials" / "kimi-code.json", std::ios::binary);
-        std::ostringstream buffer;
-        buffer << input.rdbuf();
-        refreshedCredentials = buffer.str();
-    }
-    CHECK(refreshedCredentials.find("fresh-access-token") != std::string::npos);
-    CHECK(refreshedCredentials.find("fresh-refresh-token") != std::string::npos);
+    CHECK(savedCredentials.find("fresh-access-token") != std::string::npos);
+    CHECK(savedCredentials.find("fresh-refresh-token") != std::string::npos);
+}
+
+TEST_CASE("Kimi rotated credentials inherit later parent access revocations", "[kimi]") {
+    ScopedWinsock winsock;
+    LocalHttpSequenceServer server(kimiRefreshSequence());
+    ScopedEnvironmentVariable oauthUrl("JISTATS_KIMI_OAUTH_TOKEN_URL", server.baseUrl() + "/api/oauth/token");
+    ScopedEnvironmentVariable usagesUrl("JISTATS_KIMI_USAGES_URL", server.baseUrl() + "/coding/v1/usages");
+
+    TempFixtureDirectory fixture;
+    const auto directory = fixture.makeFile("credentials/profile-marker", "").parent_path();
+    setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;OICI;FA;;;OW)(A;OIIO;FR;;;WD)", true);
+    const auto reference = fixture.makeFile("credentials/inheritance-reference", "");
+    const auto credentialsPath = fixture.makeFile("credentials/kimi-code.json", expiredKimiCredentials);
+    const auto initialDacl = credentialDacl(credentialsPath, true);
+    REQUIRE(credentialDacl(reference, true) == initialDacl);
+
+    KimiAdapter adapter(fixture.path().string());
+    const QuotaResponse quota = adapter.fetchQuota();
+    REQUIRE(server.failure().empty());
+    REQUIRE(quota.success);
+    REQUIRE(server.handledRequestCount() == 2);
+    REQUIRE(credentialDacl(credentialsPath, true) == initialDacl);
+
+    setFixtureDacl(directory, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;OICI;FA;;;OW)", true);
+    const auto restrictedDacl = credentialDacl(reference, true);
+    REQUIRE(restrictedDacl != initialDacl);
+    CHECK(credentialDacl(credentialsPath, true) == restrictedDacl);
 }
 
 TEST_CASE("Kimi adapter refreshes OAuth credentials after a 401 usages response and retries quota", "[kimi]") {

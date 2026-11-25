@@ -223,3 +223,41 @@ TEST_CASE("StorageService skips duplicate usage events during recovery/backfill 
     CHECK(persisted.front().rawReference == event.rawReference);
     CHECK(persisted.front().isBackfilled);
 }
+
+TEST_CASE("StorageService returns the stable ID when a Kimi task is updated", "[storage][activity][kimi]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+
+    const int providerId =
+        static_cast<int>(requireSingleId(storage.execute("SELECT id FROM providers WHERE provider_key = 'kimi';")));
+    const auto account =
+        storage.execute("INSERT INTO accounts (provider_id, account_key, display_name, scope_type, scope_identifier) "
+                        "VALUES (?, 'kimi-activity-test', 'Kimi', 'local_observation', 'kimi_local_runtime');",
+                        {std::to_string(providerId)});
+    REQUIRE(account.success());
+
+    auto event = makePersistedActivityEvent(providerId, static_cast<int>(account.lastInsertRowId()));
+    event.activity.providerKey = "kimi";
+    event.activity.providerSurface = "kimi_local_runtime";
+    event.activity.rawReference = "kimi_local_runtime:session-one/task-one";
+    event.activity.surfaceKey = "starting";
+    long long id = 0;
+    REQUIRE(storage.insertActivityEvent(event, &id));
+    REQUIRE(id > 0);
+
+    auto otherTask = event;
+    otherTask.activity.rawReference = "kimi_local_runtime:session-one/task-two";
+    REQUIRE(storage.insertActivityEvent(otherTask));
+    event.activity.surfaceKey = "running";
+    ++event.activity.endedAt;
+    ++event.activity.durationSeconds;
+    long long updatedId = 0;
+    REQUIRE(storage.insertActivityEvent(event, &updatedId));
+    CHECK(updatedId == id);
+    const auto updated = storage.execute("SELECT surface_key FROM activity_events WHERE id = ?;", {std::to_string(id)});
+    REQUIRE(updated.success());
+    REQUIRE(updated.rowCount() == 1);
+    CHECK(updated.getString(0, 0) == "running");
+}

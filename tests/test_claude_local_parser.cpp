@@ -2,8 +2,10 @@
 #include "providers/claude/ClaudeCodeLocalParser.hpp"
 #include "providers/claude/ClaudeCodeAdapter.hpp"
 #include "db/StorageService.hpp"
+#include "app_controller_test_support.hpp"
 #include "sqlite_test_support.hpp"
 #include "temp_test_directory.hpp"
+#include <chrono>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -203,7 +205,53 @@ TEST_CASE("Claude adapter fetchQuota returns local aggregate", "[claude][adapter
     REQUIRE(quota.windowType == "local_aggregate");
     REQUIRE(quota.limit == 0);
     REQUIRE(quota.remaining == 0);
-    REQUIRE(quota.used > 0);
+    REQUIRE(quota.used == 16275);
+}
+
+TEST_CASE("Claude adapter requires a recorded local aggregate counter", "[claude][adapter]") {
+    ClaudeCodeAdapter adapter;
+
+    SECTION("No valid counter leaves the aggregate unavailable") {
+        const auto stats = GENERATE(
+            "{}", R"({"totalSessions":1,"modelUsage":{"fixture-model":{"cost_usd":0.01}}})",
+            R"({"totalMessages":-3,"modelUsage":{"fixture-model":{"inputTokens":-2}}})",
+            R"({"totalMessages":9223372036854775808})",
+            R"({"modelUsage":{"a":{"inputTokens":4611686018427387904,"outputTokens":4611686018427387904}}})",
+            R"({"modelUsage":{"a":{"inputTokens":4611686018427387904},"b":{"inputTokens":4611686018427387904}}})");
+        const TempFixtureFile fixture(stats);
+        adapter.setMockStatsCachePath(fixture.path());
+
+        const auto quota = adapter.fetchQuota();
+        CHECK_FALSE(quota.success);
+        CHECK(quota.unavailable);
+        CHECK(quota.snapshotTime == 0);
+        CHECK_FALSE(quota.error.empty());
+    }
+
+    SECTION("An explicit zero is a measured aggregate") {
+        const auto stats = GENERATE(R"({"totalMessages":0})", R"({"modelUsage":{"fixture-model":{"inputTokens":0}}})");
+        const TempFixtureFile fixture(stats);
+        adapter.setMockStatsCachePath(fixture.path());
+
+        const auto quota = adapter.fetchQuota();
+        REQUIRE(quota.success);
+        CHECK_FALSE(quota.unavailable);
+        CHECK(quota.providerSurface == "claude_code_local_stats");
+        CHECK(quota.used == 0);
+    }
+
+    SECTION("A recorded message count remains usable when the token sum is out of range") {
+        const auto messages = GENERATE(0, 17);
+        const TempFixtureFile fixture(
+            "{\"totalMessages\":" + std::to_string(messages) +
+            R"(,"modelUsage":{"a":{"inputTokens":4611686018427387904,"outputTokens":4611686018427387904}}})");
+        adapter.setMockStatsCachePath(fixture.path());
+
+        const auto quota = adapter.fetchQuota();
+        REQUIRE(quota.success);
+        CHECK_FALSE(quota.unavailable);
+        CHECK(quota.used == messages);
+    }
 }
 
 TEST_CASE("Claude adapter fetchUsage returns usage events", "[claude][adapter]") {
@@ -215,33 +263,32 @@ TEST_CASE("Claude adapter fetchUsage returns usage events", "[claude][adapter]")
     REQUIRE(!usage.events.empty());
 }
 
-TEST_CASE("Claude adapter fetchUsage filters to the requested time window", "[claude][adapter]") {
+TEST_CASE("Claude adapter uses UTC dates for bounded daily usage", "[claude][adapter]") {
+    const int localHour = GENERATE(0, 9);
+    CAPTURE(localHour);
+    struct ResetTimeZone {
+        ~ResetTimeZone() {
+            _tzset();
+        }
+    } resetTimeZone;
+    const TestSupport::ScopedEnvironmentVariable timeZone("TZ", localHour == 0 ? "UTC0" : "JST-9");
+    _tzset();
+
     ClaudeCodeAdapter adapter;
     adapter.setMockStatsCachePath("docs/fixtures/claude/stats-cache.redacted.json");
 
-    std::tm tm{};
-    tm.tm_year = 2025 - 1900;
-    tm.tm_mon = 0;
-    tm.tm_mday = 3;
-    tm.tm_hour = 0;
-    tm.tm_min = 0;
-    tm.tm_sec = 0;
-#ifdef _WIN32
-    const std::time_t dayStart = _mkgmtime(&tm);
-#else
-    const std::time_t dayStart = timegm(&tm);
-#endif
-    REQUIRE(dayStart > 0);
+    constexpr std::time_t dayStart = 1735862400; // 2025-01-03 00:00:00 UTC
+    std::tm localTime{};
+    REQUIRE(localtime_s(&localTime, &dayStart) == 0);
+    REQUIRE(localTime.tm_hour == localHour);
 
     const std::time_t dayEnd = dayStart + 86400 - 1;
-    auto usage = adapter.fetchUsage(dayStart, dayEnd);
+    const auto usage = adapter.fetchUsage(dayStart, dayEnd);
     REQUIRE(usage.success);
     REQUIRE(usage.events.size() == 1);
     CHECK(usage.events.front().modelKey == "claude-sonnet-4-20250514");
-    for (const auto& event : usage.events) {
-        CHECK(event.eventTime >= dayStart);
-        CHECK(event.eventTime <= dayEnd);
-    }
+    CHECK(usage.events.front().eventTime == dayStart);
+    CHECK(usage.events.front().totalTokens == 4100);
 }
 
 TEST_CASE("Claude adapter validateCredentials succeeds for existing fixture", "[claude][adapter]") {
@@ -276,6 +323,39 @@ TEST_CASE("Claude adapter provider key and display name", "[claude][adapter]") {
     REQUIRE(adapter.getProviderKey() == "claude_code");
     REQUIRE(adapter.getDisplayName() == "Claude Code");
     REQUIRE(adapter.isEnabled());
+}
+
+TEST_CASE("Claude rereads keep the source date of local activity", "[claude][adapter]") {
+    TempFixtureFile fixture(R"({"lastComputedDate":"2025-01-03","totalMessages":42})");
+    ClaudeCodeAdapter adapter;
+    adapter.setMockStatsCachePath(fixture.path());
+    constexpr std::time_t sourceDate = 1735862400; // 2025-01-03 00:00:00 UTC.
+    using FileClock = std::filesystem::file_time_type::clock;
+
+    std::filesystem::last_write_time(fixture.path(), FileClock::now() - std::chrono::hours(90 * 24));
+    const auto first = adapter.fetchQuota();
+    REQUIRE(first.success);
+    CHECK(first.used == 42);
+    CHECK(first.snapshotTime == sourceDate);
+
+    std::filesystem::last_write_time(fixture.path(), FileClock::now());
+    const auto reread = adapter.fetchQuota();
+    REQUIRE(reread.success);
+    CHECK(reread.used == first.used);
+    CHECK(reread.snapshotTime == sourceDate);
+}
+
+TEST_CASE("Claude keeps the activity snapshot undated without a valid source date", "[claude][adapter]") {
+    const auto content = GENERATE(R"({"totalMessages":42})", R"({"lastComputedDate":"2025-02-30","totalMessages":42})",
+                                  R"({"lastComputedDate":"2199-01-03","totalMessages":42})");
+    TempFixtureFile fixture(content);
+    ClaudeCodeAdapter adapter;
+    adapter.setMockStatsCachePath(fixture.path());
+
+    const auto quota = adapter.fetchQuota();
+    REQUIRE(quota.success);
+    CHECK(quota.used == 42);
+    CHECK(quota.snapshotTime == 0);
 }
 
 TEST_CASE("Claude importLocalActivity persists activity events", "[claude][persistence]") {
@@ -322,7 +402,9 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
 
     ClaudeCodeAdapter adapter;
     adapter.setMockStatsCachePath(source.path());
-    const auto usage = adapter.fetchUsage(activity.startedAt - 1, activity.startedAt + 1);
+    constexpr std::time_t usageDayStart = 1735776000; // 2025-01-02 00:00:00 UTC
+    constexpr std::time_t usageDayEnd = usageDayStart + 86400 - 1;
+    const auto usage = adapter.fetchUsage(usageDayStart, usageDayEnd);
     REQUIRE(usage.success);
     REQUIRE(usage.events.size() == 1);
     CHECK(usage.events.front().totalTokens == 42);
@@ -353,8 +435,12 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
     backfill.rawReference = source.path();
     REQUIRE(storage.insertUsageEvents({backfill}));
     REQUIRE(storage
-                .execute("DELETE FROM schema_version WHERE version >= 13;"
-                         "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
+                .execute("DROP INDEX idx_activity_events_claude_cache_day;"
+                         "ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
+                         "DELETE FROM schema_version WHERE version >= 13;"
+                         "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;"
+                         "ALTER TABLE credential_profiles DROP COLUMN last_validation_error;"
+                         "ALTER TABLE credential_profiles DROP COLUMN validation_state;")
                 .success());
 
     storage.close();
@@ -362,7 +448,10 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
         std::ofstream updated(source.path());
         updated << R"json({
             "lastComputedDate": "2025-01-03",
-            "dailyActivity": [{"date": "2025-01-02", "messageCount": 3}],
+            "dailyActivity": [
+                {"date": "2025-01-02", "messageCount": 3},
+                {"date": "2025-01-03", "messageCount": 4}
+            ],
             "dailyModelTokens": [{"date": "2025-01-02", "tokensByModel": {"fixture-model": 42}}]
         })json";
         REQUIRE(updated.good());
@@ -381,27 +470,40 @@ TEST_CASE("Claude stats-cache references are redacted and preserve historical re
     CHECK(migratedUsage.front().sourceRunId == backfill.sourceRunId);
     CHECK(migratedUsage.front().totalTokens == 42);
 
-    const auto replay = adapter.fetchUsage(activity.startedAt - 1, activity.startedAt + 1);
+    const auto replay = adapter.fetchUsage(usageDayStart, usageDayEnd);
     REQUIRE(replay.success);
     REQUIRE(replay.events.size() == 1);
     CHECK((replay.events.front().sourceRunId != backfill.sourceRunId) == advanceCache);
+    const auto sequenceBeforeReplay =
+        storage.execute("SELECT seq FROM sqlite_sequence WHERE name = 'activity_events';");
+    REQUIRE(sequenceBeforeReplay.success());
+    REQUIRE(sequenceBeforeReplay.rowCount() == 1);
     REQUIRE(ClaudeCodeLocalParser::importLocalActivity(storage, source.path()));
+    REQUIRE(ClaudeCodeLocalParser::importLocalActivity(storage, source.path()));
+    const auto sequenceAfterReplay = storage.execute("SELECT seq FROM sqlite_sequence WHERE name = 'activity_events';");
+    REQUIRE(sequenceAfterReplay.success());
+    REQUIRE(sequenceAfterReplay.rowCount() == 1);
+    CHECK(sequenceAfterReplay.getInt64(0, 0) == sequenceBeforeReplay.getInt64(0, 0) + (advanceCache ? 1 : 0));
     backfill.sourceRunId = replay.events.front().sourceRunId;
     backfill.rawReference = replay.events.front().rawReference;
     REQUIRE(storage.insertUsageEvents({backfill}));
 
     storage.close();
     REQUIRE(storage.init(tempDb.path()));
-    const auto activityRows = storage.execute("SELECT raw_reference FROM activity_events;");
+    const auto activityRows =
+        storage.execute("SELECT id, raw_reference, started_at_utc FROM activity_events ORDER BY started_at_utc;");
     REQUIRE(activityRows.success());
-    const size_t expectedRows = advanceCache ? 2 : 1;
-    REQUIRE(activityRows.rowCount() == expectedRows);
+    REQUIRE(activityRows.rowCount() == (advanceCache ? 2 : 1));
     for (size_t row = 0; row < activityRows.rowCount(); ++row) {
-        CHECK(activityRows.getString(row, 0) == reference);
+        CHECK(activityRows.getString(row, 1) == reference);
+    }
+    CHECK(activityRows.getInt64(0, 0) == binding.getInt64(0, 3));
+    if (advanceCache) {
+        CHECK(activityRows.getString(0, 2) != activityRows.getString(1, 2));
     }
     const auto usageRows =
         storage.getUsageEvents(backfill.providerId, backfill.accountId, backfill.eventTime - 1, backfill.eventTime + 1);
-    REQUIRE(usageRows.size() == expectedRows);
+    REQUIRE(usageRows.size() == (advanceCache ? 2 : 1));
     for (const auto& row : usageRows) {
         CHECK(row.rawReference == reference);
         CHECK(row.totalTokens == 42);

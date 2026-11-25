@@ -17,6 +17,11 @@ constexpr int kBaselineVersion = 12;
 constexpr int kClaudeRedactionVersion = 13;
 constexpr int kChatGptDedupVersion = 14;
 constexpr int kQuotaPrecisionVersion = 15;
+constexpr int kClaudeActivityDedupVersion = 16;
+constexpr int kKimiTaskDedupVersion = 17;
+constexpr int kQuotaWindowObservationsVersion = 18;
+constexpr int kCredentialValidationVersion = 19;
+constexpr int kCursorQuotaHistoryVersion = 20;
 }
 
 class SchemaManager::Impl {
@@ -50,7 +55,7 @@ int SchemaManager::getCurrentVersion() const {
 }
 
 int SchemaManager::getLatestVersion() const {
-    int latest = kQuotaPrecisionVersion;
+    int latest = kCursorQuotaHistoryVersion;
     try {
         for (const auto& entry : std::filesystem::directory_iterator(pImpl->migrationsPath)) {
             const std::string name = entry.path().filename().string();
@@ -407,6 +412,21 @@ std::string SchemaManager::loadMigration(int version) const {
     }
     if (version == kQuotaPrecisionVersion) {
         return kQuotaPrecisionSql;
+    }
+    if (version == kClaudeActivityDedupVersion) {
+        return kClaudeActivityDedupSql;
+    }
+    if (version == kKimiTaskDedupVersion) {
+        return kKimiTaskDedupSql;
+    }
+    if (version == kQuotaWindowObservationsVersion) {
+        return kQuotaWindowObservationsSql;
+    }
+    if (version == kCredentialValidationVersion) {
+        return kCredentialValidationSql;
+    }
+    if (version == kCursorQuotaHistoryVersion) {
+        return kCursorQuotaHistorySql;
     }
 
     // Build the version prefix (e.g. "001")

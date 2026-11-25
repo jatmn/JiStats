@@ -286,6 +286,8 @@ TEST_CASE("StorageService upserts and queries credential profiles when SQLite is
     profile.secretRef = "JiStats/minimax/subscription/coding_plan/acct-minimax-credentials";
     profile.credentialType = "subscription_key";
     profile.lastValidatedAt = 1713900000;
+    profile.validationState = "invalid";
+    profile.lastValidationError = "MiniMax subscription key rejected";
 
     long long rowId = 0;
     REQUIRE(storage.upsertCredentialProfile(profile, &rowId));
@@ -299,11 +301,15 @@ TEST_CASE("StorageService upserts and queries credential profiles when SQLite is
     CHECK(stored->secretRef == profile.secretRef);
     CHECK(stored->credentialType == "subscription_key");
     CHECK(stored->lastValidatedAt == 1713900000);
+    CHECK(stored->validationState == "invalid");
+    CHECK(stored->lastValidationError == "MiniMax subscription key rejected");
     CHECK_FALSE(stored->createdAtUtc.empty());
     CHECK_FALSE(stored->updatedAtUtc.empty());
 
     profile.secretRef = "JiStats/minimax/subscription/token_plan/acct-minimax-credentials";
     profile.lastValidatedAt = 1713900300;
+    profile.validationState = "unreachable";
+    profile.lastValidationError = "MiniMax validation endpoint is temporarily unavailable";
     REQUIRE(storage.upsertCredentialProfile(profile, &rowId));
 
     stored = storage.getCredentialProfile(ids.accountId, "MiniMax Coding Plan");
@@ -315,6 +321,8 @@ TEST_CASE("StorageService upserts and queries credential profiles when SQLite is
     auto profiles = storage.getCredentialProfiles(ids.accountId);
     REQUIRE(profiles.size() == 1);
     CHECK(profiles.front().profileName == "MiniMax Coding Plan");
+    CHECK(profiles.front().validationState == "unreachable");
+    CHECK(profiles.front().lastValidationError == "MiniMax validation endpoint is temporarily unavailable");
 }
 
 TEST_CASE("StorageService rejects invalid mirror-state inputs before insert", "[storage][mirror]") {

@@ -124,10 +124,14 @@ bool cursorDefaultEndpoint() {
 
 std::optional<long long> readPercent(const JsonValue* object, const char* member) {
     const auto* value = field(object, member);
-    if (!value || !value->isNumber() || !std::isfinite(value->getNumber())) {
+    if (!value || !value->isNumber()) {
         return std::nullopt;
     }
-    return std::llround(std::clamp(value->getNumber(), 0.0, 100.0));
+    const double percent = value->getNumber();
+    if (!std::isfinite(percent) || percent < 0.0) {
+        return std::nullopt;
+    }
+    return std::llround(std::min(percent, 100.0));
 }
 
 std::time_t readEpochMilliseconds(const JsonValue* object, const char* member) {

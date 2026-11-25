@@ -27,6 +27,7 @@
 
 #include "app/AppController.hpp"
 #include "app/TrayController.hpp"
+#include "core/HttpClient.hpp"
 #include "core/Logger.hpp"
 #include "db/SettingsService.hpp"
 #include "db/StorageService.hpp"
@@ -701,16 +702,22 @@ std::vector<std::filesystem::path> listHtmlReports(const std::filesystem::path& 
 }
 
 class FakeWindowsCredentialBackend final : public IWindowsCredentialBackend {
-public:
-    bool writeGenericCredential(
-        const WindowsCredentialWriteRequest& request,
-        std::string& error) override {
+  public:
+    enum class WriteFailure { None, Reject, AfterWrite };
+
+    bool writeGenericCredential(const WindowsCredentialWriteRequest& request, std::string& error) override {
         if (request.targetName.empty() || request.secret.empty()) {
             error = "Credential target name and secret are required";
             return false;
         }
 
-        secrets_[request.targetName] = request.secret;
+        if (writeFailure != WriteFailure::Reject) {
+            secrets_[request.targetName] = request.secret;
+        }
+        if (writeFailure != WriteFailure::None) {
+            error = "Synthetic credential store write failure";
+            return false;
+        }
         error.clear();
         return true;
     }
@@ -767,7 +774,9 @@ public:
         return it->second;
     }
 
-private:
+    WriteFailure writeFailure = WriteFailure::None;
+
+  private:
     std::map<std::string, std::string> secrets_;
 };
 
@@ -1167,8 +1176,11 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     REQUIRE(storage.init(dbPath.path()));
     REQUIRE(storage.execute("PRAGMA main.journal_mode = WAL;").getString(0, 0) == "wal");
     REQUIRE(storage
-                .execute("DELETE FROM schema_version WHERE version >= 13;"
-                         "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
+                .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
+                         "DELETE FROM schema_version WHERE version >= 13;"
+                         "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;"
+                         "ALTER TABLE credential_profiles DROP COLUMN last_validation_error;"
+                         "ALTER TABLE credential_profiles DROP COLUMN validation_state;")
                 .success());
     storage.close();
 
@@ -1199,7 +1211,7 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     CHECK(stage == std::future_status::timeout);
     CHECK_FALSE(app.getDashboardViewModelForTesting().startupPending);
     REQUIRE(storage.init(dbPath.path()));
-    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 15);
+    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 20);
 #else
     requireSqlite();
 #endif
@@ -2320,7 +2332,10 @@ TEST_CASE("AppController shows the accepted MiniMax account name after saving a 
     app.shutdown();
 }
 
-TEST_CASE("AppController surfaces MiniMax validation failures through the settings shell", "[app][shell][minimax]") {
+TEST_CASE("AppController restores the last completed MiniMax validation after restart", "[app][shell][minimax]") {
+    requireSqlite();
+    const std::string expectedState = GENERATE("invalid", "unreachable", "valid");
+    CAPTURE(expectedState);
     TempTestDatabase dbPath;
     auto backend = makeFakeCredentialBackend();
     auto store = std::make_shared<WindowsCredentialStore>(backend);
@@ -2337,7 +2352,16 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
-    app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+    std::string expectedStoredError;
+    if (expectedState == "invalid") {
+        app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+        expectedStoredError = "MiniMax subscription key rejected";
+    } else if (expectedState == "unreachable") {
+        app.setMiniMaxValidationResponseForTesting(false, 0, "", "Synthetic private transport detail");
+        expectedStoredError = "Could not reach MiniMax to validate this credential";
+    } else {
+        app.setMiniMaxValidationResponseForTesting(true, 200, R"({"base_resp":{"status_code":0}})", "");
+    }
     REQUIRE(app.init());
     REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
     REQUIRE(waitForCondition([&app]() {
@@ -2361,21 +2385,281 @@ TEST_CASE("AppController surfaces MiniMax validation failures through the settin
     validate.action = DashboardMiniMaxCredentialAction::Validate;
     validate.planKey = "token_plan";
     REQUIRE(app.submitMiniMaxCredentialActionForTesting(validate));
-    REQUIRE(waitForCondition([&app]() {
-        return app.getMiniMaxValidationStateForTesting("token_plan") ==
-            std::optional<std::string>("invalid");
-    }, std::chrono::milliseconds(4000)));
+    REQUIRE(waitForCondition(
+        [&app, &expectedState]() {
+            return app.getMiniMaxValidationStateForTesting("token_plan") == std::optional<std::string>(expectedState);
+        },
+        std::chrono::milliseconds(4000)));
 
     app.refreshRuntimeForTesting();
 
     const DashboardViewModel viewModel = app.getDashboardViewModelForTesting();
     const auto summary = findMiniMaxSummary(viewModel, "token_plan");
     REQUIRE(summary.has_value());
-    CHECK(summary->validationState == "invalid");
-    CHECK(summary->lastValidationError == "MiniMax subscription key rejected");
+    CHECK(summary->validationState == expectedState);
+    if (expectedState == "invalid") {
+        CHECK(summary->lastValidationError == "MiniMax subscription key rejected");
+    }
     CHECK(summary->lastValidatedAtLabel.find("UTC") != std::string::npos);
-
     app.shutdown();
+
+    AppController restarted;
+    restarted.setDisableTaskbarForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    restarted.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(restarted.init());
+    const auto restored = findMiniMaxSummary(restarted.getDashboardViewModelForTesting(), "token_plan");
+    REQUIRE(restored.has_value());
+    CHECK(restored->hasPersistedProfile);
+    CHECK(restored->validationState == expectedState);
+    CHECK(restored->lastValidationError == expectedStoredError);
+    CHECK(restored->lastValidatedAtLabel == summary->lastValidatedAtLabel);
+
+    if (expectedState == "invalid") {
+        REQUIRE(restarted.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
+        REQUIRE(waitForCondition([&restarted]() {
+            return restarted.isDashboardShellDialogOpenForTesting(DashboardShellDialog::Preferences);
+        }));
+        save.secret = "sk-tp-replacement";
+        REQUIRE(restarted.submitMiniMaxCredentialActionForTesting(save));
+        REQUIRE(waitForCondition([&restarted]() {
+            return restarted.getDashboardStatusTextForTesting() == "Stored MiniMax Token Plan credential.";
+        }));
+    }
+    restarted.shutdown();
+
+    if (expectedState == "invalid") {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        const auto record = storage.execute("SELECT validation_state, last_validation_error, "
+                                            "last_validated_at_utc IS NULL FROM credential_profiles;");
+        REQUIRE(record.success());
+        REQUIRE(record.rowCount() == 1);
+        CHECK(record.getString(0, 0) == "unknown");
+        CHECK(record.getString(0, 1).empty());
+        CHECK(record.getBool(0, 2));
+    }
+}
+
+TEST_CASE("AppController restores validation only for the MiniMax key that was checked", "[app][shell][minimax]") {
+    requireSqlite();
+    const auto action = GENERATE(DashboardMiniMaxCredentialAction::Save, DashboardMiniMaxCredentialAction::Validate);
+    const std::string failure = GENERATE("clear", "metadata", "shared rollback", "reject key", "key changed");
+    CAPTURE(static_cast<int>(action), failure);
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false);
+    seedMiniMaxCredentialMetadata(dbPath.path(), "token_plan", "Original Token Plan");
+    StorageService seed;
+    REQUIRE(seed.init(dbPath.path()));
+    REQUIRE(seed.execute("UPDATE credential_profiles SET validation_state = 'invalid', "
+                         "last_validation_error = 'MiniMax subscription key rejected';")
+                .success());
+    // The rename trigger affects only the final save. Clearing validation leaves the account name alone.
+    REQUIRE(seed.execute(failure == "clear" ? R"sql(
+        CREATE TRIGGER reject_profile_invalidation BEFORE UPDATE ON credential_profiles
+        BEGIN SELECT RAISE(ABORT, 'Fixture rejects credential invalidation'); END;
+    )sql"
+                                            : R"sql(
+        CREATE TRIGGER reject_profile_rename BEFORE UPDATE OF display_name ON accounts
+        WHEN NEW.display_name = 'Renamed Token Plan'
+        BEGIN SELECT RAISE(ABORT, 'Fixture rejects credential metadata update'); END;
+    )sql")
+                .success());
+    seed.close();
+
+    const std::string target = "JiStats/minimax/subscription/token_plan/token_plan.default";
+    auto backend = makeFakeCredentialBackend();
+    auto store = std::make_shared<WindowsCredentialStore>(backend);
+    REQUIRE(store->writeGenericCredential({target, "sk-tp-original", "MiniMax Token Plan", ""}));
+    if (failure == "reject key") {
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::Reject;
+    } else if (failure == "key changed") {
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::AfterWrite;
+    }
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setRuntimeWorkersEnabledForTesting(failure != "shared rollback");
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    app.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(app.init());
+    const auto original = findMiniMaxSummary(app.getDashboardViewModelForTesting(), "token_plan");
+    REQUIRE(original.has_value());
+    REQUIRE(original->validationState == "invalid");
+    REQUIRE_FALSE(original->lastValidatedAtLabel.empty());
+
+    DashboardMiniMaxCredentialRequest request;
+    request.action = action;
+    request.planKey = "token_plan";
+    request.accountDisplayName = "Renamed Token Plan";
+    request.secret = "sk-tp-new-unchecked";
+    if (failure == "shared rollback") {
+        bool cleared = false;
+        app.setAfterMiniMaxValidationClearForTesting([&cleared]() { cleared = true; });
+        CHECK(app.submitMiniMaxCredentialActionWithStorageRollbackForTesting(request) == std::optional<bool>(false));
+        CHECK(cleared);
+        app.setAfterMiniMaxValidationClearForTesting({});
+    } else {
+        CHECK_FALSE(app.submitMiniMaxCredentialActionForTesting(request));
+    }
+    const bool originalKeyRemains = failure == "clear" || failure == "reject key";
+    CHECK(backend->peek(target) ==
+          std::optional<std::string>(originalKeyRemains ? "sk-tp-original" : "sk-tp-new-unchecked"));
+    app.shutdown();
+
+    AppController restarted;
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    restarted.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(restarted.init());
+    const auto restored = findMiniMaxSummary(restarted.getDashboardViewModelForTesting(), "token_plan");
+    REQUIRE(restored.has_value());
+    CHECK(restored->hasPersistedProfile);
+    CHECK(restored->accountDisplayName == "Original Token Plan");
+    CHECK(restored->validationState == (originalKeyRemains ? "invalid" : "unknown"));
+    CHECK(restored->lastValidatedAtLabel == (originalKeyRemains ? original->lastValidatedAtLabel : ""));
+    CHECK(restored->lastValidationError == (originalKeyRemains ? original->lastValidationError : ""));
+    restarted.shutdown();
+}
+
+TEST_CASE("AppController coordinates MiniMax credential changes across instances", "[app][minimax]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false);
+    const auto now = std::time(nullptr);
+    seedRuntimeState(dbPath.path(), now, now);
+    seedMiniMaxCredentialMetadata(dbPath.path(), "token_plan", "Original Token Plan");
+
+    StorageService check;
+    REQUIRE(check.init(dbPath.path()));
+    REQUIRE(SettingsService(check).setString("retention.last_run_utc", toUtcIso(now)));
+    REQUIRE(check.execute("UPDATE credential_profiles SET validation_state = 'valid';").success());
+    check.close();
+
+    const std::string target = "JiStats/minimax/subscription/token_plan/token_plan.default";
+    auto backend = makeFakeCredentialBackend();
+    auto store = std::make_shared<WindowsCredentialStore>(backend);
+    REQUIRE(store->writeGenericCredential({target, "sk-tp-original", "MiniMax Token Plan", ""}));
+
+    AppController first;
+    AppController peer;
+    for (auto* controller : {&first, &peer}) {
+        controller->setHeadlessForTesting(true);
+        controller->setDatabasePathForTesting(dbPath.path());
+        controller->setProviderManagerForTesting(std::make_shared<ProviderManager>());
+        controller->setMiniMaxCredentialStoreForTesting(store);
+        REQUIRE(controller->init());
+    }
+
+    DashboardMiniMaxCredentialRequest replacement;
+    replacement.action = DashboardMiniMaxCredentialAction::Save;
+    replacement.planKey = "token_plan";
+    replacement.secret = "sk-tp-peer";
+
+    SECTION("A peer cannot replace the key after the clear and before a rejected write") {
+        auto rejected = replacement;
+        rejected.secret = "sk-tp-rejected";
+        std::promise<void> cleared;
+        std::promise<void> release;
+        auto clearedResult = cleared.get_future();
+        auto released = release.get_future();
+        first.setAfterMiniMaxValidationClearForTesting([&]() {
+            cleared.set_value();
+            released.wait();
+        });
+        auto firstResult =
+            std::async(std::launch::async, [&]() { return first.submitMiniMaxCredentialActionForTesting(rejected); });
+
+        const bool firstCleared = clearedResult.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        const bool peerSavedWhileCleared = firstCleared && peer.submitMiniMaxCredentialActionForTesting(replacement);
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::Reject;
+        release.set_value();
+        CHECK_FALSE(firstResult.get());
+        REQUIRE(firstCleared);
+        CHECK_FALSE(peerSavedWhileCleared);
+        CHECK(backend->peek(target) == std::optional<std::string>("sk-tp-original"));
+        REQUIRE(check.init(dbPath.path()));
+        const auto restored = check.execute("SELECT validation_state FROM credential_profiles;");
+        REQUIRE(restored.success());
+        CHECK(restored.getString(0, 0) == "valid");
+        check.close();
+
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::None;
+        REQUIRE(peer.submitMiniMaxCredentialActionForTesting(replacement));
+    }
+
+    SECTION("A late validation cannot publish after a peer replaces the key") {
+        std::promise<void> release;
+        first.setMiniMaxValidationReleaseForTesting(release.get_future().share());
+        first.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+
+        DashboardMiniMaxCredentialRequest validate;
+        validate.action = DashboardMiniMaxCredentialAction::Validate;
+        validate.planKey = "token_plan";
+        REQUIRE(first.submitMiniMaxCredentialActionForTesting(validate));
+        const bool peerSaved = peer.submitMiniMaxCredentialActionForTesting(replacement);
+        release.set_value();
+        first.waitForMiniMaxValidationForTesting();
+        REQUIRE(peerSaved);
+    }
+
+    SECTION("A busy profile shows why the validation needs to be retried") {
+        std::promise<void> releaseValidation;
+        first.setMiniMaxValidationReleaseForTesting(releaseValidation.get_future().share());
+        first.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+        DashboardMiniMaxCredentialRequest validate;
+        validate.action = DashboardMiniMaxCredentialAction::Validate;
+        validate.planKey = "token_plan";
+        REQUIRE(first.submitMiniMaxCredentialActionForTesting(validate));
+
+        std::promise<void> peerCleared;
+        std::promise<void> releasePeer;
+        auto cleared = peerCleared.get_future();
+        auto released = releasePeer.get_future();
+        peer.setAfterMiniMaxValidationClearForTesting([&]() {
+            peerCleared.set_value();
+            released.wait();
+        });
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::Reject;
+        auto peerResult =
+            std::async(std::launch::async, [&]() { return peer.submitMiniMaxCredentialActionForTesting(replacement); });
+
+        const bool peerHeldLock = cleared.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        releaseValidation.set_value();
+        first.waitForMiniMaxValidationForTesting();
+        const auto retry = findMiniMaxSummary(first.getDashboardViewModelForTesting(), "token_plan");
+        releasePeer.set_value();
+        CHECK_FALSE(peerResult.get());
+        REQUIRE(peerHeldLock);
+        REQUIRE(retry.has_value());
+        CHECK(retry->validationState == "unreachable");
+        CHECK(retry->lastValidatedAtLabel.empty());
+        CHECK(retry->lastValidationError == "Profile busy. Retry validation.");
+
+        REQUIRE(check.init(dbPath.path()));
+        const auto stored = check.execute("SELECT validation_state FROM credential_profiles;");
+        REQUIRE(stored.success());
+        CHECK(stored.getString(0, 0) == "valid");
+        check.close();
+        peer.setAfterMiniMaxValidationClearForTesting({});
+        backend->writeFailure = FakeWindowsCredentialBackend::WriteFailure::None;
+        REQUIRE(peer.submitMiniMaxCredentialActionForTesting(replacement));
+    }
+
+    first.shutdown();
+    peer.shutdown();
+    CHECK(backend->peek(target) == std::optional<std::string>("sk-tp-peer"));
+    REQUIRE(check.init(dbPath.path()));
+    const auto stored = check.execute(
+        "SELECT validation_state, last_validated_at_utc IS NULL, last_validation_error FROM credential_profiles;");
+    REQUIRE(stored.success());
+    REQUIRE(stored.rowCount() == 1);
+    CHECK(stored.getString(0, 0) == "unknown");
+    CHECK(stored.getBool(0, 1));
+    CHECK(stored.getString(0, 2).empty());
 }
 
 TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the masked secret field", "[app][shell][minimax]") {
@@ -2397,7 +2681,7 @@ TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the
     app.setDatabasePathForTesting(dbPath.path());
     app.setProviderManagerForTesting(providerManager);
     app.setMiniMaxCredentialStoreForTesting(store);
-    app.setMiniMaxValidationResponseForTesting(true, 200, "{}", "");
+    app.setMiniMaxValidationResponseForTesting(true, 200, R"({"base_resp":{"status_code":0},"model_remains":[]})", "");
     app.setMiniMaxValidationReleaseForTesting(releaseValidation.get_future().share());
     REQUIRE(app.init());
     REQUIRE(app.dispatchDashboardShellCommandForTesting(DashboardShellCommand::FileSettings));
@@ -2432,6 +2716,133 @@ TEST_CASE("AppController keeps MiniMax validation asynchronous and preserves the
     CHECK(app.getMiniMaxSecretFieldTextForTesting() == "sk-cp-async");
 
     app.shutdown();
+}
+
+TEST_CASE("AppController binds MiniMax validation to the submitted credential", "[app][minimax]") {
+    requireSqlite();
+    const bool replaceSamePlan = GENERATE(false, true);
+    const std::string replacementPlan = replaceSamePlan ? "coding_plan" : "token_plan";
+    TempTestDatabase dbPath;
+    auto backend = makeFakeCredentialBackend();
+    auto adapter = std::make_shared<MiniMaxAdapter>();
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(adapter);
+
+    std::string submittedUrl;
+    std::string submittedToken;
+    adapter->setMockValidationTransport([&](const std::string& url, const std::string& token) {
+        submittedUrl = url;
+        submittedToken = token;
+        return HttpResponse{false, 403, "", "forbidden"};
+    });
+    AppController app;
+    std::promise<void> releaseValidation;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setMiniMaxCredentialStoreForTesting(std::make_shared<WindowsCredentialStore>(backend));
+    app.setMiniMaxValidationReleaseForTesting(releaseValidation.get_future().share());
+    REQUIRE(app.init());
+
+    DashboardMiniMaxCredentialRequest validate;
+    validate.action = DashboardMiniMaxCredentialAction::Validate;
+    validate.planKey = "coding_plan";
+    validate.accountDisplayName = "Original Coding Plan";
+    validate.secret = "synthetic-old";
+    REQUIRE(app.submitMiniMaxCredentialActionForTesting(validate));
+
+    DashboardMiniMaxCredentialRequest save;
+    save.action = DashboardMiniMaxCredentialAction::Save;
+    save.planKey = replacementPlan;
+    save.accountDisplayName = "New credential";
+    save.secret = "synthetic-new";
+    REQUIRE(app.submitMiniMaxCredentialActionForTesting(save));
+
+    releaseValidation.set_value();
+    app.waitForMiniMaxValidationForTesting();
+    CHECK(submittedUrl == "https://api.minimax.io/v1/api/openplatform/coding_plan/remains");
+    CHECK(submittedToken == "synthetic-old");
+    const auto viewModel = app.getDashboardViewModelForTesting();
+    const auto original = findMiniMaxSummary(viewModel, "coding_plan");
+    const auto replacement = findMiniMaxSummary(viewModel, replacementPlan);
+    REQUIRE(original.has_value());
+    REQUIRE(replacement.has_value());
+    CHECK(original->validationState == (replaceSamePlan ? "pending" : "invalid"));
+    CHECK(replacement->validationState == "pending");
+    CHECK(replacement->lastValidationError.empty());
+    CHECK(replacement->lastValidatedAtLabel.empty());
+    CHECK(replacement->accountDisplayName == "New credential");
+    CHECK(adapter->getSubscriptionCredentialProfile().planKey == replacementPlan);
+    CHECK(backend->peek(replacement->secretRef) == std::optional<std::string>("synthetic-new"));
+    app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto profiles = storage.execute("SELECT a.display_name, c.last_validated_at_utc FROM credential_profiles c "
+                                          "JOIN accounts a ON a.id = c.account_id WHERE c.secret_ref = ?;",
+                                          {replacement->secretRef});
+    REQUIRE(profiles.success());
+    REQUIRE(profiles.rowCount() == 1);
+    CHECK(profiles.getString(0, 0) == "New credential");
+    CHECK(profiles.getString(0, 1).empty());
+}
+
+TEST_CASE("AppController restores separate MiniMax results after reverse completion", "[app][minimax]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    auto store = std::make_shared<WindowsCredentialStore>(makeFakeCredentialBackend());
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(std::make_shared<MiniMaxAdapter>());
+
+    AppController app;
+    std::promise<void> releaseCodingPlan;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setMiniMaxCredentialStoreForTesting(store);
+    app.setMiniMaxValidationResponseForTesting(false, 403, "", "forbidden");
+    app.setMiniMaxValidationReleaseForTesting(releaseCodingPlan.get_future().share());
+    REQUIRE(app.init());
+
+    DashboardMiniMaxCredentialRequest coding;
+    coding.action = DashboardMiniMaxCredentialAction::Validate;
+    coding.planKey = "coding_plan";
+    coding.secret = "synthetic-coding";
+    REQUIRE(app.submitMiniMaxCredentialActionForTesting(coding));
+
+    app.setMiniMaxValidationResponseForTesting(true, 200, R"({"base_resp":{"status_code":0}})", "");
+    app.setMiniMaxValidationReleaseForTesting({});
+    auto token = coding;
+    token.planKey = "token_plan";
+    token.secret = "synthetic-token";
+    REQUIRE(app.submitMiniMaxCredentialActionForTesting(token));
+    REQUIRE(waitForCondition([&app]() {
+        return app.getMiniMaxValidationStateForTesting("token_plan") == std::optional<std::string>("valid");
+    }));
+    CHECK(app.getMiniMaxValidationStateForTesting("coding_plan") == std::optional<std::string>("pending"));
+    releaseCodingPlan.set_value();
+    app.waitForMiniMaxValidationForTesting();
+    CHECK(app.getMiniMaxValidationStateForTesting("coding_plan") == std::optional<std::string>("invalid"));
+    app.shutdown();
+
+    AppController restarted;
+    restarted.setHeadlessForTesting(true);
+    restarted.setDatabasePathForTesting(dbPath.path());
+    restarted.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    restarted.setMiniMaxCredentialStoreForTesting(store);
+    REQUIRE(restarted.init());
+    const auto dashboard = restarted.getDashboardViewModelForTesting();
+    const auto restoredCoding = findMiniMaxSummary(dashboard, "coding_plan");
+    const auto restoredToken = findMiniMaxSummary(dashboard, "token_plan");
+    REQUIRE(restoredCoding.has_value());
+    REQUIRE(restoredToken.has_value());
+    CHECK(restoredCoding->validationState == "invalid");
+    CHECK(restoredCoding->lastValidationError == "MiniMax subscription key rejected");
+    CHECK(restoredToken->validationState == "valid");
+    CHECK(restoredToken->lastValidationError.empty());
+    CHECK_FALSE(restoredCoding->lastValidatedAtLabel.empty());
+    CHECK_FALSE(restoredToken->lastValidatedAtLabel.empty());
+    restarted.shutdown();
 }
 
 TEST_CASE("AppController reports missing MiniMax secrets from hydrated metadata in the settings shell", "[app][shell][minimax]") {
@@ -2807,6 +3218,83 @@ TEST_CASE("AppController runs catch-up recovery and records runtime gap markers 
         recoveredViewModel.recoveryStatusDetail.find("Provider returned no recovery history") != std::string::npos);
 
     app.shutdown();
+}
+
+TEST_CASE("AppController retries a failed recovery completion without leaving partial gap markers",
+          "[app][runtime][recovery][recovery_persistence]") {
+    requireSqlite();
+    const bool rejectGap = GENERATE(true, false);
+    CAPTURE(rejectGap);
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    const auto now = std::time(nullptr);
+    const auto recoveryStart = now - 3 * 3600;
+    const auto retryTime = now + 120;
+    const std::string marker = "catchup:" + std::to_string(recoveryStart);
+    seedRuntimeState(dbPath.path(), recoveryStart, recoveryStart, marker);
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const char* fault = rejectGap ? "CREATE TRIGGER reject_recovery_completion BEFORE INSERT ON gap_markers "
+                                    "BEGIN SELECT RAISE(ABORT, 'gap marker write rejected'); END;"
+                                  : "CREATE TRIGGER reject_recovery_completion BEFORE UPDATE ON runtime_state "
+                                    "WHEN OLD.recovery_marker IS NOT NULL AND NEW.recovery_marker IS NULL "
+                                    "BEGIN SELECT RAISE(ABORT, 'runtime state write rejected'); END;";
+    REQUIRE(storage.execute(fault).success());
+    storage.close();
+
+    {
+        AppController app;
+        app.setHeadlessForTesting(true);
+        app.setDatabasePathForTesting(dbPath.path());
+        app.setCurrentTimeForTesting(now);
+        app.setProviderManagerForTesting(
+            makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now)}));
+        REQUIRE(app.init());
+        CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::CatchingUp);
+        app.shutdown();
+    }
+
+    REQUIRE(storage.init(dbPath.path()));
+    const auto pending = storage.getRuntimeState();
+    REQUIRE(pending.has_value());
+    CHECK(pending->recoveryMarker == marker);
+    CHECK(pending->lastSuccessfulSyncAt == recoveryStart);
+    const auto partial = storage.execute("SELECT id FROM gap_markers;");
+    REQUIRE(partial.success());
+    CHECK(partial.rowCount() == 0);
+    REQUIRE(storage.execute("DROP TRIGGER reject_recovery_completion;").success());
+
+    {
+        AppController app;
+        app.setHeadlessForTesting(true);
+        app.setDatabasePathForTesting(dbPath.path());
+        app.setCurrentTimeForTesting(retryTime);
+        app.setProviderManagerForTesting(
+            makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, retryTime)}));
+        REQUIRE(app.init());
+        REQUIRE(waitForCondition([&]() {
+            const auto state = storage.getRuntimeState();
+            return state.has_value() && state->recoveryMarker.empty();
+        }));
+        app.shutdown();
+    }
+
+    storage.close();
+    REQUIRE(storage.init(dbPath.path()));
+    const auto completed = storage.getRuntimeState();
+    REQUIRE(completed.has_value());
+    CHECK(completed->recoveryMarker.empty());
+    CHECK(completed->lastSuccessfulSyncAt == retryTime);
+
+    const auto providerId = requireProviderId(storage, "openai");
+    const auto accountId = requireAccountId(storage, providerId, "openai.runtime_status");
+    const auto gaps = storage.getGapMarkers(providerId, accountId, recoveryStart, retryTime);
+    REQUIRE(gaps.size() == 1);
+    CHECK(gaps.front().periodStart == recoveryStart);
+    CHECK(gaps.front().periodEnd == retryTime);
+    CHECK(gaps.front().classification == GapClassification::Unknown);
 }
 
 TEST_CASE("AppController leaves recovery coverage unknown for unsupported provider history",
@@ -3356,6 +3844,75 @@ TEST_CASE("AppController handles long-gap mixed provider recovery outcomes witho
     }
 }
 
+TEST_CASE("AppController catch-up preserves usage rollups outside complete raw history",
+          "[app][runtime][recovery][retention]") {
+    requireSqlite();
+
+    constexpr std::time_t hour = 3600;
+    constexpr std::time_t day = 24 * hour;
+    const std::time_t cutoffOffset = GENERATE(0, 12 * 3600, 12 * 3600 + 30 * 60);
+    const bool clockRolledBack = GENERATE(false, true);
+    CAPTURE(cutoffOffset, clockRolledBack);
+    const std::time_t wallClock = std::time(nullptr);
+    const std::time_t retentionDay = wallClock - wallClock % day + day;
+    const std::time_t retentionRun = retentionDay + cutoffOffset;
+    const std::time_t now = retentionRun - (clockRolledBack ? 2 * day : 0);
+    const std::time_t cutoffDay = retentionDay - 90 * day;
+    const std::time_t cutoff = cutoffDay + cutoffOffset;
+    const std::time_t cutoffHour = cutoff - cutoff % hour;
+    const std::time_t retainedDay = retentionDay - 100 * day;
+    const std::time_t recentDay = retentionDay - 3 * day;
+
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, true);
+    seedRuntimeState(dbPath.path(), retainedDay, retainedDay);
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    REQUIRE(SettingsService(storage).setString("retention.last_run_utc", toUtcIso(retentionRun)));
+
+    const int providerId = requireProviderId(storage, "openai");
+    const int accountId = ensureRuntimeAccountId(storage, "openai", "OpenAI");
+    const auto seed = [&](std::time_t eventTime, int tokens) {
+        insertUsageEvent(storage, providerId, accountId, toUtcIso(eventTime), "gpt-5", tokens, 0);
+    };
+    seed(retainedDay + 300, 700);
+    seed(cutoff - 300, 50);
+    seed(cutoff, 11);
+    seed(recentDay + 300, 3);
+    REQUIRE(storage.rebuildUsageRollups(UsageRollupResolution::Daily, providerId, accountId, retainedDay, now));
+    REQUIRE(storage.rebuildUsageRollups(UsageRollupResolution::Hourly, providerId, accountId, retainedDay, now));
+    REQUIRE(storage.deleteUsageEventsOlderThan(cutoff));
+    CHECK(storage.getUsageEvents(providerId, accountId, retainedDay, cutoff - 1).empty());
+    seed(cutoff + 300, 23);
+    seed(recentDay + 600, 7);
+    storage.close();
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setCurrentTimeForTesting(now);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, now)}));
+    REQUIRE(app.init());
+    REQUIRE(waitForCondition([&]() {
+        const auto runtime = app.getPersistedRuntimeStateForTesting();
+        return runtime && runtime->recoveryMarker.empty();
+    }));
+    app.shutdown();
+
+    REQUIRE(storage.init(dbPath.path()));
+    const auto bucketTokens = [&](UsageRollupResolution resolution, std::time_t bucketStart) {
+        const auto rollups = storage.getUsageRollups(resolution, providerId, accountId, bucketStart, bucketStart);
+        CHECK(rollups.size() == 1);
+        return rollups.empty() ? 0LL : rollups.front().totalTokens;
+    };
+    CHECK(bucketTokens(UsageRollupResolution::Daily, retainedDay) == 700);
+    CHECK(bucketTokens(UsageRollupResolution::Daily, cutoffDay) == (cutoff == cutoffDay ? 34 : 61));
+    CHECK(bucketTokens(UsageRollupResolution::Hourly, cutoffHour) == (cutoff == cutoffHour ? 34 : 61));
+    CHECK(bucketTokens(UsageRollupResolution::Daily, recentDay) == 10);
+    CHECK(bucketTokens(UsageRollupResolution::Hourly, recentDay) == 10);
+}
+
 TEST_CASE("AppController refreshes OpenAI Codex quotas when the local rollout snapshot changes",
           "[app][runtime][openai][codex]") {
     requireSqlite();
@@ -3542,16 +4099,20 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     ScopedEnvironmentVariable codexHomeEnv("CODEX_HOME", codexHome.path().string());
     std::filesystem::create_directories(codexHome.path() / "sessions");
     const std::time_t now = std::time(nullptr);
-    const bool paired = GENERATE(false, true);
-    const std::time_t reset = now + 86400;
+    enum class QuotaWindowCase { WeeklyOnly, Paired, LegacyPlaceholder };
+    const auto windowCase =
+        GENERATE(QuotaWindowCase::WeeklyOnly, QuotaWindowCase::Paired, QuotaWindowCase::LegacyPlaceholder);
+    const bool paired = windowCase != QuotaWindowCase::WeeklyOnly;
+    const std::time_t primaryReset = now;
+    const std::time_t weeklyReset = now + 86400;
     const std::string primary =
-        paired ? R"json({"used_percent":6,"window_minutes":300,"resets_at":)json" + std::to_string(reset) + "}"
+        paired ? R"json({"used_percent":6,"window_minutes":300,"resets_at":)json" + std::to_string(primaryReset) + "}"
                : "null";
     std::ofstream rollout(codexHome.path() / "sessions" / "rollout-windows.jsonl");
     REQUIRE(rollout.is_open());
     rollout << R"json({"type":"event_msg","timestamp":")json" << toUtcIso(now)
             << R"json(","payload":{"type":"token_count","rate_limits":{"primary":)json" << primary
-            << R"json(,"secondary":{"used_percent":6,"window_minutes":10080,"resets_at":)json" << reset << "}}}}";
+            << R"json(,"secondary":{"used_percent":6,"window_minutes":10080,"resets_at":)json" << weeklyReset << "}}}}";
     rollout.close();
     REQUIRE(rollout.good());
 
@@ -3596,6 +4157,15 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     CHECK(snapshots.getString(snapshots.rowCount() - 1, 0) == "weekly");
     CHECK(snapshots.getInt64(snapshots.rowCount() - 1, 1) == 94);
 
+    if (windowCase == QuotaWindowCase::LegacyPlaceholder) {
+        REQUIRE(storage
+                    .execute("UPDATE quota_snapshots SET window_start_utc = snapshot_time_utc, "
+                             "window_end_utc = snapshot_time_utc "
+                             "WHERE plan_id IN (SELECT id FROM plans WHERE plan_key = "
+                             "'openai_subscription_codex_local:interval');")
+                    .success());
+    }
+
     if (!paired) {
         REQUIRE(
             storage
@@ -3638,6 +4208,12 @@ TEST_CASE("AppController displays and saves one Codex allowance per observed win
     const auto* openai = findProviderStatus(startup, "openai");
     REQUIRE(openai != nullptr);
     REQUIRE(openai->quotas.size() == (paired ? 2 : 1));
+    const auto expectedPrimaryReset = windowCase == QuotaWindowCase::LegacyPlaceholder ? 0 : primaryReset;
+    for (const auto& cachedQuota : openai->quotas) {
+        CAPTURE(cachedQuota.windowType);
+        CHECK(cachedQuota.providerSurface == quota.providerSurface);
+        CHECK(cachedQuota.windowResetAt == (cachedQuota.windowType == "weekly" ? weeklyReset : expectedPrimaryReset));
+    }
     const auto startupBars = restarted.getDashboardUsageProgressSummariesForTesting();
     CHECK(std::count_if(startupBars.begin(), startupBars.end(),
                         [](const DashboardSummaryItem& item) { return item.badge == "7-day: 94% remaining"; }) == 1);
@@ -3897,6 +4473,102 @@ TEST_CASE("AppController preserves the latest same-second Codex balance across r
     CHECK(openai->quotas.front().remaining == expectedLatest);
     releasePublication.set_value();
     restarted.shutdown();
+}
+
+TEST_CASE("Cursor quota history keeps one allowance across a database upgrade",
+          "[app][runtime][quota_history][cursor]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    const std::time_t now = std::time(nullptr);
+    const std::time_t legacyTime = now - 86400;
+    const std::time_t reset = now + 86400;
+    seedStartupPreferences(dbPath.path(), false, false);
+    seedPersistedQuotaSnapshot(dbPath.path(), "cursor", "cursor.runtime_status", "Cursor",
+                               "cursor_subscription_api:monthly", "Subscription", "monthly", legacyTime, 22, 100, 78);
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        REQUIRE(SettingsService(storage).setBool("runtime.cursor_subscription_tracking_enabled", true));
+        REQUIRE(storage
+                    .execute("UPDATE quota_snapshots SET quota_dimension = 'percent', window_start_utc = '', "
+                             "window_end_utc = ?;",
+                             {formatTimeUtcIsoForTest(reset)})
+                    .success());
+        REQUIRE(
+            storage
+                .execute("INSERT INTO quota_snapshots (provider_id, account_id, plan_id, snapshot_time_utc, "
+                         "window_start_utc, "
+                         "window_end_utc, used_value, limit_value, remaining_value, confidence_tier, quota_dimension) "
+                         "SELECT provider_id, account_id, plan_id, ?, ?, window_end_utc, 40, 100, 60, confidence_tier, "
+                         "quota_dimension FROM quota_snapshots;",
+                         {formatTimeUtcIsoForTest(legacyTime - 1), formatTimeUtcIsoForTest(reset - 30 * 86400)})
+                .success());
+        const int providerId = requireProviderId(storage, "cursor");
+        const int accountId = requireAccountId(storage, providerId, "cursor.runtime_status");
+        REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, legacyTime - 1, legacyTime));
+        REQUIRE(storage.execute("DELETE FROM schema_version WHERE version > 19;").success());
+    }
+
+    auto fresh = SubscriptionQuotaAdapter::parseQuotaResponse(
+        SubscriptionProvider::Cursor, HttpResponse{true, 200, R"({"planUsage":{"totalPercentUsed":30}})", {}}, now);
+    REQUIRE(fresh.success);
+    std::promise<void> releaseQuota;
+    auto provider = std::make_shared<ControlledQuotaProviderAdapter>("cursor", "Cursor", std::move(fresh),
+                                                                     releaseQuota.get_future().share());
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(provider);
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    REQUIRE(app.init());
+    const auto cached = app.getDashboardViewModelForTesting();
+    const int completedFetches = provider->getCompletedQuotaFetchCount();
+    releaseQuota.set_value();
+    CHECK(completedFetches == 0);
+    const auto* cursor = findProviderStatus(cached, "cursor");
+    REQUIRE(cursor != nullptr);
+    REQUIRE(cursor->quotas.size() == 1);
+    CHECK(cursor->quotas.front().windowType == "subscription");
+    CHECK(cursor->quotas.front().remaining == 78);
+    CHECK(cursor->quotas.front().windowResetAt == reset);
+    REQUIRE(waitForCondition(
+        [&app]() {
+            const auto model = app.getDashboardViewModelForTesting();
+            const auto* live = findProviderStatus(model, "cursor");
+            return live && !live->quotas.empty() && live->quotas.front().remaining == 70;
+        },
+        std::chrono::seconds(5)));
+    const auto dashboard = app.getDashboardViewModelForTesting();
+    app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    auto scope = dashboard.preferences;
+    scope.analysisSelectedProviderId = "cursor";
+    scope.analysisSelectedAccountId = "cursor.runtime_status";
+    AnalysisQueryEngine engine(storage);
+    scope.analysisCustomRangeStartUtc = now - 30 * 86400;
+    scope.analysisCustomRangeEndUtc = now;
+    for (const auto preset : {AnalysisDateRangePreset::Last7Days, AnalysisDateRangePreset::Custom}) {
+        CAPTURE(static_cast<int>(preset));
+        scope.analysisDateRangePreset = preset;
+        const auto history = engine.buildViewModel(dashboard, scope, now);
+        REQUIRE(history.quotaTrendSeries.size() == 2);
+        const auto neutral = std::find_if(history.quotaTrendSeries.begin(), history.quotaTrendSeries.end(),
+                                          [](const auto& series) { return series.windowLabel == "subscription"; });
+        REQUIRE(neutral != history.quotaTrendSeries.end());
+        REQUIRE(neutral->points.size() == 2);
+        CHECK(neutral->points[0].snapshotTime == legacyTime);
+        CHECK(neutral->points[0].remainingValue == 78);
+        CHECK(neutral->points[1].snapshotTime == now);
+        CHECK(neutral->points[1].remainingValue == 70);
+        const auto monthly = std::find_if(history.quotaTrendSeries.begin(), history.quotaTrendSeries.end(),
+                                          [](const auto& series) { return series.windowLabel == "30d"; });
+        REQUIRE(monthly != history.quotaTrendSeries.end());
+        REQUIRE(monthly->points.size() == 1);
+        CHECK(monthly->points.front().remainingValue == 60);
+    }
 }
 
 TEST_CASE("AppController keeps Cursor Auto ahead of API in cached quota", "[app][runtime][quota_history]") {
@@ -4515,8 +5187,10 @@ TEST_CASE("AppController imports Kimi local runtime snapshots into persisted run
 TEST_CASE("AppController shows an enabled Kimi account without OAuth quota credentials", "[app][runtime][kimi]") {
     requireSqlite();
 
+    const bool withLiveProvider = GENERATE(false, true);
+    CAPTURE(withLiveProvider);
     TempTestDatabase dbPath;
-    seedStartupPreferences(dbPath.path(), false, false, false, false, false, true);
+    seedStartupPreferences(dbPath.path(), false, false, withLiveProvider, false, false, true);
     TempTestDirectory homeRoot("jistats_kimi_idle_home");
     TempTestDirectory emptyUserRoot("jistats_kimi_idle_empty_user");
     writeInstalledButIdleKimiFixture(homeRoot.path());
@@ -4531,6 +5205,9 @@ TEST_CASE("AppController shows an enabled Kimi account without OAuth quota crede
     app.setTaskbarTestModeForTesting(true);
     auto providerManager = std::make_shared<ProviderManager>();
     providerManager->addProvider(std::make_shared<KimiAdapter>(homeRoot.path().string()));
+    if (withLiveProvider) {
+        providerManager->addProvider(makeCurrentQuotaProvider("openai", "OpenAI", 25, 100, std::time(nullptr)));
+    }
     app.setProviderManagerForTesting(providerManager);
     REQUIRE(app.init());
 
@@ -4542,13 +5219,32 @@ TEST_CASE("AppController shows an enabled Kimi account without OAuth quota crede
     CHECK(kimi->isEnabled);
     CHECK(kimi->accountId == "kimi.runtime_status");
     CHECK(kimi->state == ProviderState::Sample);
+    CHECK_FALSE(kimi->contributesToRuntimeState);
     CHECK(kimi->quotas.empty());
     CHECK_FALSE(kimi->lastKnownQuota.has_value());
     CHECK(findTaskbarMetric(app.getTaskbarMetricsForTesting(), "kimi") == nullptr);
-    CHECK(viewModel.runtimeState != RuntimeState::Offline);
-    CHECK(viewModel.runtimeState == RuntimeState::Unknown);
-    CHECK_FALSE(viewModel.isOnline);
+    if (withLiveProvider) {
+        const auto* openai = findProviderStatus(viewModel, "openai");
+        REQUIRE(openai != nullptr);
+        CHECK(openai->state == ProviderState::Live);
+    }
+    CHECK(viewModel.runtimeState == (withLiveProvider ? RuntimeState::Current : RuntimeState::Unknown));
+    CHECK(viewModel.isOnline == withLiveProvider);
     CHECK_FALSE(viewModel.offlineNoticeVisible);
+
+    TempTestDirectory exportDir("jistats_kimi_idle_report");
+    const auto outputPath = exportDir.path() / "freshness.html";
+    REQUIRE(app.exportHtmlReportForTesting(outputPath.string()).success);
+    std::ifstream report(outputPath);
+    REQUIRE(report.is_open());
+    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+    const auto freshnessStart = html.find("Data Freshness</div>");
+    REQUIRE(freshnessStart != std::string::npos);
+    const auto freshnessEnd = html.find("</span>", freshnessStart);
+    REQUIRE(freshnessEnd != std::string::npos);
+    const auto badge = html.substr(freshnessStart, freshnessEnd - freshnessStart);
+    CAPTURE(badge);
+    CHECK(badge.find(withLiveProvider ? "badge-fresh\">Current" : "badge-unknown\">Unknown") != std::string::npos);
 
     app.shutdown();
 }
@@ -5220,6 +5916,118 @@ TEST_CASE("AppController counts providers from hourly rollups after raw usage re
     CHECK(lastFiveHours->detail == "2 requests, 450 tokens across 2 providers");
 
     app.shutdown();
+}
+
+TEST_CASE("AppController excludes Codex SQLite model deltas from general usage", "[app][runtime][rollups][codex]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_codex_usage_export");
+    seedAllProviderTrackingEnabled(dbPath.path());
+    const std::time_t now = utcDayStartForTest(std::time(nullptr) - 12 * 3600) + 12 * 3600 + 15 * 60;
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto codex =
+        seedUsageProviderAccount(storage, "openai", "openai.codex_local_sqlite", "Codex Model Attribution");
+    const auto billable = seedUsageProviderAccount(storage, "minimax", "billable", "Billable Account");
+
+    // The recent event uses the raw path and the older event falls in an hour without a rollup.
+    for (const auto eventTime : {now - 60, now - 2 * 3600}) {
+        PersistedUsageEvent delta;
+        delta.providerId = codex.providerId;
+        delta.accountId = codex.accountId;
+        delta.eventTime = eventTime;
+        delta.sourceType = "codex_local_sqlite";
+        delta.modelKey = "codex-test-model";
+        delta.requestType = "codex_thread_delta";
+        delta.totalTokens = 321;
+        delta.rawReference = "codex-state:example:" + std::to_string(eventTime);
+        REQUIRE(storage.insertUsageEvents({delta}));
+        insertUsageEvent(storage, billable.providerId, billable.accountId, toUtcIso(eventTime), "billable-test-model",
+                         125, 5);
+    }
+    storage.close();
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setCurrentTimeForTesting(now);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(std::make_shared<ProviderManager>());
+    REQUIRE(app.init());
+
+    const auto summaries = app.getDashboardUsageProgressSummariesForTesting();
+    const auto lastFiveMinutes = findUsageSummary(summaries, "Last 5 Minutes");
+    const auto lastFiveHours = findUsageSummary(summaries, "Last 5 Hours");
+    REQUIRE(lastFiveMinutes.has_value());
+    REQUIRE(lastFiveHours.has_value());
+    CHECK(lastFiveMinutes->detail == "1 request, 125 tokens");
+    CHECK(lastFiveHours->detail == "2 requests, 250 tokens");
+
+    const auto path = exportDir.path() / "codex-usage.html";
+    REQUIRE(app.exportHtmlReportForTesting(path.string()).success);
+    std::ifstream report(path);
+    REQUIRE(report.is_open());
+    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+    CHECK(html.find("billable-test-model</td><td>2</td><td>250</td>") != std::string::npos);
+    CHECK(html.find("codex-test-model") == std::string::npos);
+}
+
+TEST_CASE("Saved Codex attribution accounts do not widen scheduled HTML exports",
+          "[app][analysis][reporting][scheduled][codex]") {
+    requireSqlite();
+    const bool rawAttributionPruned = GENERATE(false, true);
+    CAPTURE(rawAttributionPruned);
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_codex_scope_export");
+    const std::time_t now = std::time(nullptr);
+    const std::time_t reportDay = now - 86400;
+    const std::string timestamp = toUtcIso(reportDay);
+    const std::string codexAccount = "openai.codex_local_sqlite";
+    seedStartupPreferences(dbPath.path(), false, false, true, false, false, false, true, 60, exportDir.path().string(),
+                           "", "", "openai", codexAccount, "custom", timestamp, timestamp);
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", reportDay, 777, 10, "unrelated-runtime-model");
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto codex = seedUsageProviderAccount(storage, "openai", codexAccount, "OpenAI Codex Local");
+    PersistedUsageEvent delta;
+    delta.providerId = codex.providerId;
+    delta.accountId = codex.accountId;
+    delta.eventTime = reportDay;
+    delta.sourceType = "codex_local_sqlite";
+    delta.requestType = "codex_thread_delta";
+    delta.modelKey = "codex-test-model";
+    delta.totalTokens = 321;
+    REQUIRE(storage
+                .execute("UPDATE accounts SET scope_type = 'local_codex_sqlite' WHERE id = ?;",
+                         {std::to_string(codex.accountId)})
+                .success());
+    if (!rawAttributionPruned) {
+        REQUIRE(storage.insertUsageEvents({delta}));
+    }
+    storage.close();
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({}));
+    app.setScheduledExportPollIntervalForTesting(50);
+    REQUIRE(app.init());
+    REQUIRE(
+        waitForCondition([&]() { return !app.getDashboardViewModelForTesting().scheduledExportLastRunTime.empty(); },
+                         std::chrono::milliseconds(4000)));
+
+    REQUIRE(storage.init(dbPath.path()));
+    const auto exported = storage.getLatestExportRun("scheduled_html");
+    REQUIRE(exported.has_value());
+    REQUIRE(exported->success);
+    CHECK(exported->providerFilterCsv == "openai");
+    CHECK(exported->accountFilterCsv == codexAccount);
+    std::ifstream report(exported->outputPath);
+    REQUIRE(report.is_open());
+    const std::string html((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+    CHECK(html.find("unrelated-runtime-model") == std::string::npos);
+    CHECK(html.find("codex-test-model") == std::string::npos);
 }
 
 TEST_CASE("AppController keeps taskbar overlay on subscription quota when Codex local usage exists", "[app][runtime][taskbar][codex]") {
@@ -6357,6 +7165,48 @@ TEST_CASE("AppController manual HTML export uses the current analysis scope", "[
     }
 
     app.shutdown();
+}
+
+TEST_CASE("AppController rejects manual HTML export and defers scheduled export for future Analysis dates",
+          "[app][analysis][reporting][scheduled]") {
+    requireSqlite();
+
+    TempTestDatabase dbPath;
+    TempTestDirectory exportDir("jistats_future_analysis_export");
+    seedStartupPreferences(dbPath.path(), false, false, true, true, false, false);
+    const std::time_t now = std::time(nullptr);
+    seedRuntimeUsageEvent(dbPath.path(), "openai", "OpenAI", now, 777, 10, "current-model");
+
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setCurrentTimeForTesting(now);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(makeProviderManager({}));
+    REQUIRE(app.init());
+
+    auto preferences = app.getDashboardViewModelForTesting().preferences;
+    preferences.analysisDateRangePreset = AnalysisDateRangePreset::Custom;
+    preferences.analysisCustomRangeStartUtc = now + 2 * 86400;
+    preferences.analysisCustomRangeEndUtc = now + 4 * 86400;
+    preferences.scheduledExportEnabled = true;
+    preferences.scheduledExportIntervalMinutes = 60;
+    preferences.scheduledExportPath = exportDir.path().string();
+    app.applyDashboardPreferencesForTesting(preferences);
+
+    const auto manualPath = exportDir.path() / "future.html";
+    const auto result = app.exportHtmlReportForTesting(manualPath.string());
+    CHECK_FALSE(result.success);
+    CHECK(result.message.find("future") != std::string::npos);
+    CHECK(std::filesystem::is_empty(exportDir.path()));
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    const auto manualRun = storage.getLatestExportRun("manual_html");
+    REQUIRE(manualRun.has_value());
+    CHECK_FALSE(manualRun->success);
+    CHECK(manualRun->rangeStart > now);
+    CHECK_FALSE(storage.getLatestExportRun("scheduled_html").has_value());
+    CHECK(app.getDashboardViewModelForTesting().scheduledExportLastRunTime.empty());
 }
 
 TEST_CASE("AppController scopes the HTML recovery summary and badges to historical evidence",

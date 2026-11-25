@@ -567,7 +567,7 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
     CHECK(localKimi->quotas.empty());
     const auto* localClaude = findProviderStatus(localOnly, "claude_code");
     REQUIRE(localClaude != nullptr);
-    CHECK(localClaude->state == ProviderState::Live);
+    CHECK(localClaude->state == ProviderState::Stale);
     REQUIRE_FALSE(localClaude->quotas.empty());
     CHECK(localClaude->quotas.front().used > 0);
     const auto* localCodex = findProviderStatus(localOnly, "openai");
@@ -602,12 +602,75 @@ TEST_CASE("AppController preserves saved offline dismissal through inconclusive 
 
     kimi->setQuotaResponse(makeQuotaResponse(now, 4, 10, "interval", "kimi_subscription_api"));
     app.refreshRuntimeForTesting();
-    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Current);
+    const auto recoveredDashboard = app.getDashboardViewModelForTesting();
+    const auto* recoveredKimi = findProviderStatus(recoveredDashboard, "kimi");
+    REQUIRE(recoveredKimi != nullptr);
+    CHECK(recoveredKimi->state == ProviderState::Live);
+    CHECK(recoveredDashboard.runtimeState == RuntimeState::Stale);
     const auto recovered = app.getConnectivityStateForTesting("kimi");
     REQUIRE(recovered.has_value());
     CHECK(recovered->noticeDismissedAt == 0);
 
     kimi->setQuotaResponse(offline);
+    app.refreshRuntimeForTesting();
+    CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
+    CHECK(app.isDashboardOfflineNoticeVisibleForTesting());
+    app.shutdown();
+}
+
+TEST_CASE("AppController ends a Claude outage after a usable undated cache read",
+          "[app][runtime][offline_notice][claude]") {
+    requireSqlite();
+
+    TempTestDirectory profile("jistats_claude_offline");
+    ScopedEnvironmentVariable claudeConfig("CLAUDE_CONFIG_DIR", profile.path().string());
+    const auto cachePath = profile.path() / "fixture.json";
+    const auto writeCache = [&cachePath](const char* contents) {
+        std::ofstream cache(cachePath);
+        cache << contents;
+        cache.close();
+        REQUIRE(cache.good());
+    };
+    writeCache("{");
+    TempTestDatabase dbPath;
+    seedStartupPreferences(dbPath.path(), false, false, false, false, true);
+    auto adapter = std::make_shared<ClaudeCodeAdapter>();
+    adapter->setMockStatsCachePath(cachePath.string());
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(adapter);
+    ScopedTrayTestHandler handler([](TrayController::TestOperation, TrayStatus, const std::string&,
+                                     std::string&) -> std::optional<bool> { return true; });
+
+    const auto now = std::time(nullptr);
+    AppController app;
+    app.setCurrentTimeForTesting(now);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    app.setDisableTaskbarForTesting(true);
+    REQUIRE(app.init());
+    REQUIRE(waitForCondition([&app]() { return app.isDashboardOfflineNoticeVisibleForTesting(); }));
+    REQUIRE(app.clickDashboardOfflineDismissForTesting());
+    REQUIRE(waitForCondition([&app]() { return !app.isDashboardOfflineNoticeVisibleForTesting(); }));
+    app.refreshRuntimeForTesting();
+    const auto dismissed = app.getConnectivityStateForTesting("claude_code");
+    REQUIRE(dismissed.has_value());
+    REQUIRE(dismissed->noticeDismissedAt > 0);
+
+    writeCache(R"({"totalMessages":42})");
+    app.refreshRuntimeForTesting();
+    const auto dashboard = app.getDashboardViewModelForTesting();
+    const auto* claude = findProviderStatus(dashboard, "claude_code");
+    REQUIRE(claude != nullptr);
+    CHECK(claude->state == ProviderState::Unknown);
+    CHECK(claude->lastSyncTime.empty());
+    REQUIRE(claude->quotas.size() == 1);
+    CHECK(claude->quotas.front().used == 42);
+    const auto recovered = app.getConnectivityStateForTesting("claude_code");
+    REQUIRE(recovered.has_value());
+    CHECK(recovered->status == "online");
+    CHECK(recovered->noticeDismissedAt == 0);
+
+    writeCache("{");
     app.refreshRuntimeForTesting();
     CHECK(app.getDashboardViewModelForTesting().runtimeState == RuntimeState::Offline);
     CHECK(app.isDashboardOfflineNoticeVisibleForTesting());

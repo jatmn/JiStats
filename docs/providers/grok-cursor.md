@@ -1,6 +1,6 @@
 # Grok and Cursor subscriptions
 
-Open **File → Settings → Grok / Cursor** and enable either integration. The dashboard shows the allowance and reset time when the account reports them. JiStats keeps quota snapshots in its local database for Analysis.
+Open **File → Settings → Grok / Cursor** and enable either integration. The dashboard shows the allowance and reset time when the account reports them. JiStats keeps quota snapshots in its local database for Analysis. JiStats treats negative usage percentages from either provider as unavailable.
 
 ## Grok
 
@@ -8,10 +8,12 @@ Sign in with `grok login` in the Grok CLI. JiStats reads the standard local sign
 
 If Provider Details asks you to run `grok login` again, renew the sign-in in the Grok CLI. JiStats reads the updated credential on its next scheduled quota check. For a fixed `GROK_AUTH` override, update the variable and restart JiStats. The CLI owns credential renewal.
 
+Grok can report zero usage explicitly or omit the percentage for a complete weekly or monthly period.
+
 ## Cursor
 
 Set the Windows user environment variable `CURSOR_API_KEY` to a Cursor user API key before starting JiStats. JiStats also accepts an existing access token supplied through `CURSOR_AUTH_TOKEN`. The quota reader connects to the default Cursor endpoint. It uses the returned included-use percentage, or the individual Auto and API percentages when that is all the account returns. [Cursor CLI authentication](https://cursor.com/docs/cli/reference/authentication) · [Cursor usage and limits](https://cursor.com/help/models-and-usage/usage-limits)
 
-The included-use percentage is shown even if Cursor omits cycle dates. A weekly or monthly label requires both dates in order.
+The included-use percentage is shown even if Cursor omits cycle dates. A weekly or monthly label requires both dates in order. Upgrading moves saved readings with incomplete dates to the same subscription history as new readings and keeps any reported reset time.
 
 These integrations fetch subscription allowance only. Some account types do not provide a percentage. If both connections represent the same shared subscription, compare the individual readings without adding them together. [Shared subscription limits](https://docs.x.ai/x-subscription/usage-limits)

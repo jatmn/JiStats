@@ -6,9 +6,13 @@
 #include "observation/ObservationPersistenceBridge.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -16,6 +20,13 @@
 #include <optional>
 #include <sstream>
 #include <utility>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <aclapi.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace JiStats {
 
@@ -439,20 +450,170 @@ bool hasQuotaApiCredentials(const KimiOAuthCredentials& credentials) {
     return hasUsableAccessToken(credentials) || !credentials.refreshToken.empty();
 }
 
+#ifdef _WIN32
+constexpr auto kCredentialSecurity =
+    OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+
+bool stagedCredentialAccessMatches(HANDLE file, PSID owner, PSID group, PACL dacl,
+                                   SECURITY_DESCRIPTOR_CONTROL expectedControl) {
+    PSID stagedOwner = nullptr;
+    PSID stagedGroup = nullptr;
+    PACL stagedDacl = nullptr;
+    PSECURITY_DESCRIPTOR stagedDescriptor = nullptr;
+    const DWORD result = GetSecurityInfo(file, SE_FILE_OBJECT, kCredentialSecurity, &stagedOwner, &stagedGroup,
+                                         &stagedDacl, nullptr, &stagedDescriptor);
+    const std::unique_ptr<void, decltype(&LocalFree)> stagedSecurity(stagedDescriptor, LocalFree);
+    SECURITY_DESCRIPTOR_CONTROL stagedControl = 0;
+    DWORD revision = 0;
+    constexpr auto inheritance = SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED;
+    if (result != ERROR_SUCCESS || !stagedOwner || !stagedGroup || !stagedDacl || !EqualSid(owner, stagedOwner) ||
+        !EqualSid(group, stagedGroup) || !GetSecurityDescriptorControl(stagedDescriptor, &stagedControl, &revision) ||
+        (expectedControl & inheritance) != (stagedControl & inheritance)) {
+        return false;
+    }
+
+    ACL_SIZE_INFORMATION expectedSize{}, stagedSize{};
+    return GetAclInformation(dacl, &expectedSize, sizeof(expectedSize), AclSizeInformation) &&
+           GetAclInformation(stagedDacl, &stagedSize, sizeof(stagedSize), AclSizeInformation) &&
+           dacl->AclRevision == stagedDacl->AclRevision && expectedSize.AceCount == stagedSize.AceCount &&
+           expectedSize.AclBytesInUse == stagedSize.AclBytesInUse &&
+           std::memcmp(reinterpret_cast<const unsigned char*>(dacl) + sizeof(ACL),
+                       reinterpret_cast<const unsigned char*>(stagedDacl) + sizeof(ACL),
+                       expectedSize.AclBytesInUse - sizeof(ACL)) == 0;
+}
+#endif
+
+bool replaceCredentialFile(const std::filesystem::path& path, const std::string& contents) {
+#ifdef _WIN32
+    if (contents.size() > MAXDWORD) {
+        return false;
+    }
+
+    const DWORD originalAttributes = GetFileAttributesW(path.c_str());
+    if (originalAttributes == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+    const bool encrypted = (originalAttributes & FILE_ATTRIBUTE_ENCRYPTED) != 0;
+
+    PSID owner = nullptr;
+    PSID group = nullptr;
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR original = nullptr;
+    const DWORD securityResult = GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, kCredentialSecurity, &owner,
+                                                       &group, &dacl, nullptr, &original);
+    const std::unique_ptr<void, decltype(&LocalFree)> originalSecurity(original, LocalFree);
+    SECURITY_DESCRIPTOR_CONTROL originalControl = 0;
+    DWORD revision = 0;
+    if (securityResult != ERROR_SUCCESS || !owner || !group || !dacl ||
+        !GetSecurityDescriptorControl(original, &originalControl, &revision)) {
+        return false;
+    }
+
+    PACL creationDacl = dacl;
+    std::vector<unsigned char> explicitEntries;
+    if (!(originalControl & SE_DACL_PROTECTED)) {
+        // Regenerate inherited entries from the parent without turning them into permanent grants.
+        const auto* originalAcl = reinterpret_cast<const unsigned char*>(dacl);
+        explicitEntries.assign(originalAcl, originalAcl + dacl->AclSize);
+        creationDacl = reinterpret_cast<PACL>(explicitEntries.data());
+        for (DWORD count = dacl->AceCount; count > 0; --count) {
+            void* ace = nullptr;
+            if (!GetAce(dacl, count - 1, &ace) || ((static_cast<const ACE_HEADER*>(ace)->AceFlags & INHERITED_ACE) &&
+                                                   !DeleteAce(creationDacl, count - 1))) {
+                return false;
+            }
+        }
+    }
+
+    SECURITY_DESCRIPTOR creationSecurity{};
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE};
+    // Let NTFS build its default descriptor when the original DACL is entirely inherited.
+    const bool entirelyInherited =
+        !(originalControl & SE_DACL_PROTECTED) && dacl->AceCount != 0 && creationDacl->AceCount == 0;
+    if (!entirelyInherited) {
+        if (!InitializeSecurityDescriptor(&creationSecurity, SECURITY_DESCRIPTOR_REVISION) ||
+            !SetSecurityDescriptorOwner(&creationSecurity, owner, FALSE) ||
+            !SetSecurityDescriptorGroup(&creationSecurity, group, FALSE) ||
+            !SetSecurityDescriptorDacl(&creationSecurity, TRUE, creationDacl, FALSE) ||
+            !SetSecurityDescriptorControl(&creationSecurity, SE_DACL_PROTECTED, originalControl & SE_DACL_PROTECTED)) {
+            return false;
+        }
+        attributes.lpSecurityDescriptor = &creationSecurity;
+    }
+
+    FILE_RENAME_INFO rename{};
+    rename.ReplaceIfExists = TRUE;
+    rename.FileNameLength = static_cast<DWORD>(path.native().size() * sizeof(wchar_t));
+    constexpr auto nameOffset = offsetof(FILE_RENAME_INFO, FileName);
+    const auto nameSize = rename.FileNameLength + sizeof(wchar_t);
+    std::vector<unsigned char> renameRequest(nameOffset + nameSize);
+    std::memcpy(renameRequest.data(), &rename, nameOffset);
+    std::memcpy(renameRequest.data() + nameOffset, path.c_str(), nameSize);
+
+    static std::atomic<unsigned long> sequence{0};
+    std::filesystem::path staged;
+    HANDLE file;
+    do {
+        staged = path;
+        staged += L".tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(++sequence);
+        file = CreateFileW(staged.c_str(), GENERIC_WRITE | FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE, 0, &attributes,
+                           CREATE_NEW, encrypted ? FILE_ATTRIBUTE_ENCRYPTED : FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) {
+            return false;
+        }
+    } while (file == INVALID_HANDLE_VALUE);
+
+    DWORD written = 0;
+    const DWORD size = static_cast<DWORD>(contents.size());
+    BY_HANDLE_FILE_INFORMATION stagedInfo{};
+    const bool encryptionPreserved = !encrypted || (GetFileInformationByHandle(file, &stagedInfo) &&
+                                                    (stagedInfo.dwFileAttributes & FILE_ATTRIBUTE_ENCRYPTED) != 0);
+    const bool saved =
+        encryptionPreserved && stagedCredentialAccessMatches(file, owner, group, dacl, originalControl) &&
+        WriteFile(file, contents.data(), size, &written, nullptr) && written == size && FlushFileBuffers(file) &&
+        SetFileInformationByHandle(file, FileRenameInfo, renameRequest.data(),
+                                   static_cast<DWORD>(renameRequest.size()));
+    if (!saved) {
+        FILE_DISPOSITION_INFO removeStaged{TRUE};
+        SetFileInformationByHandle(file, FileDispositionInfo, &removeStaged, sizeof(removeStaged));
+    }
+    CloseHandle(file);
+    return saved;
+#else
+    std::string staged = path.string() + ".tmp-XXXXXX";
+    const int descriptor = mkstemp(staged.data());
+    if (descriptor == -1) {
+        return false;
+    }
+
+    std::FILE* file = fdopen(descriptor, "wb");
+    if (file) {
+        const bool flushed = std::fwrite(contents.data(), 1, contents.size(), file) == contents.size() &&
+                             std::fflush(file) == 0 && fsync(descriptor) == 0;
+        const bool closed = std::fclose(file) == 0;
+        if (flushed && closed && std::rename(staged.c_str(), path.c_str()) == 0) {
+            return true;
+        }
+    } else {
+        close(descriptor);
+    }
+    unlink(staged.c_str());
+    return false;
+#endif
+}
+
 bool saveOAuthCredentials(const std::filesystem::path& rootPath, const KimiOAuthCredentials& credentials) {
     if (credentials.accessToken.empty() || credentials.tokenType.empty()) {
         return false;
     }
 
-    const std::filesystem::path credPath = rootPath / "credentials" / "kimi-code.json";
     std::error_code ec;
-    std::filesystem::create_directories(credPath.parent_path(), ec);
-
-    std::ofstream output(credPath, std::ios::binary | std::ios::trunc);
-    if (!output.is_open()) {
+    const auto credPath = std::filesystem::canonical(rootPath / "credentials" / "kimi-code.json", ec);
+    if (ec) {
         return false;
     }
 
+    std::ostringstream output;
     output << "{\n";
     output << "  \"access_token\": \"" << jsonEscape(credentials.accessToken) << "\",\n";
     output << "  \"refresh_token\": \"" << jsonEscape(credentials.refreshToken) << "\",\n";
@@ -461,7 +622,7 @@ bool saveOAuthCredentials(const std::filesystem::path& rootPath, const KimiOAuth
     output << "  \"expires_in\": " << std::fixed << std::setprecision(0) << credentials.expiresIn << ",\n";
     output << "  \"expires_at\": " << std::fixed << std::setprecision(6) << credentials.expiresAt << "\n";
     output << "}\n";
-    return output.good();
+    return output.good() && replaceCredentialFile(credPath, output.str());
 }
 
 std::string urlEncode(const std::string& value) {

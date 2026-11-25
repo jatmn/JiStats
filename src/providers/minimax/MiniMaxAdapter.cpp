@@ -3,10 +3,13 @@
 #include "core/JsonParser.hpp"
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <ctime>
 #include <sstream>
 #include <iomanip>
+#include <mutex>
 #include <optional>
+#include <tuple>
 
 namespace JiStats {
 
@@ -17,6 +20,8 @@ public:
     bool enabled = true;
     MiniMaxSubscriptionCredentialProfile subscriptionProfile;
     std::shared_ptr<WindowsCredentialStore> credentialStore = std::make_shared<WindowsCredentialStore>();
+    std::mutex credentialMutex;
+    std::uint64_t validationRevision = 0;
     std::string lastResolvedEndpoint;
     
     // HTTP client for API calls
@@ -27,7 +32,7 @@ public:
     std::string mockUsageResponse;
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
-    std::optional<HttpResponse> mockValidationResponse;
+    ValidationTransport mockValidationTransport;
 #endif
     
     // MiniMax API base URL
@@ -68,48 +73,110 @@ public:
         return true;
     }
 
-    bool parseQuotaPayload(const std::string& body, QuotaResponse& response) const {
+    bool parseQuotaPayload(const std::string& body, bool tokenPlan, QuotaResponse& response) const {
         response.rawResponse = body;
+        response.success = false;
 
         JsonValue json;
         if (!JsonParser::parse(body, json)) {
-            response.success = false;
             response.error = "Failed to parse JSON response";
             return false;
         }
 
         const JsonValue* modelRemains = json.getMember("model_remains");
         if (!modelRemains || !modelRemains->isArray() || modelRemains->getArray().empty()) {
-            response.success = false;
             response.error = "No model_remains in response";
             return false;
         }
 
-        const JsonValue& firstModel = modelRemains->getArray()[0];
-        if (!firstModel.isObject()) {
-            response.success = false;
-            response.error = "Invalid model_remains entry";
-            return false;
+        struct Interval {
+            long long startMs = 0;
+            long long endMs = 0;
+            long long remaining = 0;
+            long long limit = 0;
+        };
+
+        const auto readWindow = [this](const JsonValue& row, Interval& interval, std::string& error) {
+            if (!row.isObject()) {
+                error = "Invalid model_remains entry";
+                return false;
+            }
+            return tryGetRequiredNumber(row, "start_time", interval.startMs, error) &&
+                   tryGetRequiredNumber(row, "end_time", interval.endMs, error);
+        };
+        const auto readCounts = [this](const JsonValue& row, Interval& interval, std::string& error) {
+            return tryGetRequiredNumber(row, "current_interval_usage_count", interval.remaining, error) &&
+                   tryGetRequiredNumber(row, "current_interval_total_count", interval.limit, error);
+        };
+
+        const auto& rows = modelRemains->getArray();
+        Interval selected;
+        if (rows.size() == 1 && !rows.front().getMember("model_name")) {
+            // Legacy single-row responses omit the model identity.
+            if (!readWindow(rows.front(), selected, response.error) ||
+                !readCounts(rows.front(), selected, response.error)) {
+                return false;
+            }
+        } else {
+            std::optional<Interval> latest;
+            bool selectedCountQuota = false;
+            bool conflictingBalance = false;
+            std::string invalidInterval;
+            constexpr auto hourSeconds = 60 * 60;
+            for (const auto& row : rows) {
+                const auto* modelName = row.getMember("model_name");
+                if (!modelName || !modelName->isString()) {
+                    continue;
+                }
+                const bool countQuota = modelName->getString() == "MiniMax-M*";
+                if (!countQuota && !(tokenPlan && modelName->getString() == "general")) {
+                    continue;
+                }
+
+                Interval interval;
+                if (!readWindow(row, interval, invalidInterval) || interval.startMs <= 0 ||
+                    interval.endMs <= interval.startMs) {
+                    continue;
+                }
+                const auto span = parseTimestamp(interval.endMs) - parseTimestamp(interval.startMs);
+                if (span <= 0) {
+                    continue;
+                }
+                // Only the shared five-hour row establishes a request balance. Token Plan general
+                // rows establish a reset window even when the meaning of their counts is unknown.
+                if (countQuota && (span <= 4 * hourSeconds || span > 5 * hourSeconds ||
+                                   !readCounts(row, interval, invalidInterval) || interval.limit <= 0)) {
+                    continue;
+                }
+
+                const auto window = std::tie(countQuota, interval.endMs, interval.startMs);
+                if (!latest || window > std::tie(selectedCountQuota, latest->endMs, latest->startMs)) {
+                    latest = interval;
+                    selectedCountQuota = countQuota;
+                    conflictingBalance = false;
+                } else if (window == std::tie(selectedCountQuota, latest->endMs, latest->startMs) &&
+                           (interval.limit != latest->limit || interval.remaining != latest->remaining)) {
+                    conflictingBalance = true;
+                }
+            }
+            if (!latest) {
+                response.error = rows.size() == 1 && !invalidInterval.empty()
+                                     ? invalidInterval
+                                     : "No supported MiniMax coding quota in response";
+                return false;
+            }
+            if (conflictingBalance) {
+                response.error = "Conflicting MiniMax coding quota balances";
+                return false;
+            }
+            selected = *latest;
         }
 
-        long long startTimeMs = 0;
-        long long endTimeMs = 0;
-        long long remainingCount = 0;
-        long long limitCount = 0;
-
-        if (!tryGetRequiredNumber(firstModel, "start_time", startTimeMs, response.error) ||
-            !tryGetRequiredNumber(firstModel, "end_time", endTimeMs, response.error) ||
-            !tryGetRequiredNumber(firstModel, "current_interval_usage_count", remainingCount, response.error) ||
-            !tryGetRequiredNumber(firstModel, "current_interval_total_count", limitCount, response.error)) {
-            response.success = false;
-            return false;
-        }
-
-        response.windowStart = parseTimestamp(startTimeMs);
-        response.windowEnd = parseTimestamp(endTimeMs);
-        response.limit = std::max<long long>(0, limitCount);
-        response.remaining = std::clamp(remainingCount, 0LL, response.limit);
-        response.used = std::clamp(response.limit - response.remaining, 0LL, response.limit);
+        response.windowStart = parseTimestamp(selected.startMs);
+        response.windowEnd = parseTimestamp(selected.endMs);
+        response.limit = std::max<long long>(0, selected.limit);
+        response.remaining = std::clamp(selected.remaining, 0LL, response.limit);
+        response.used = response.limit - response.remaining;
         response.windowType = "interval";
         response.error.clear();
         response.success = true;
@@ -276,27 +343,13 @@ public:
         return "";
     }
 
-    bool hasActiveSubscriptionProfile() const {
-        return !subscriptionProfile.secretRef.empty() ||
-            !subscriptionProfile.planKey.empty() ||
-            !subscriptionProfile.endpointFamily.empty();
+    static bool hasSubscriptionProfile(const MiniMaxSubscriptionCredentialProfile& profile) {
+        return !profile.secretRef.empty() || !profile.planKey.empty() || !profile.endpointFamily.empty();
     }
 
-    void recordValidationResult(
-        bool success,
-        const std::string& validationState,
-        const std::string& error) {
-        if (!hasActiveSubscriptionProfile()) {
-            return;
-        }
-
-        subscriptionProfile.lastValidatedAt = std::time(nullptr);
-        subscriptionProfile.validationState = validationState;
-        subscriptionProfile.lastValidationError = success ? std::string() : error;
-    }
-
-    std::optional<std::string> resolveBearerToken(std::string& error) {
-        if (!hasActiveSubscriptionProfile()) {
+    std::optional<std::string> resolveBearerToken(const MiniMaxSubscriptionCredentialProfile& profile,
+                                                  std::string& error) {
+        if (!hasSubscriptionProfile(profile)) {
             if (!apiKey.empty()) {
                 error.clear();
                 return apiKey;
@@ -310,8 +363,7 @@ public:
             return std::nullopt;
         }
 
-        std::optional<std::string> secret =
-            credentialStore->readGenericCredential(subscriptionProfile.secretRef);
+        std::optional<std::string> secret = credentialStore->readGenericCredential(profile.secretRef);
         if (!secret.has_value()) {
             error = credentialStore->getLastError();
             return std::nullopt;
@@ -319,6 +371,32 @@ public:
 
         error.clear();
         return secret;
+    }
+
+    struct ValidationRequest {
+        MiniMaxSubscriptionCredentialProfile profile;
+        std::optional<std::string> bearerToken;
+        std::string tokenError;
+        std::string endpoint;
+        std::string groupId;
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        ValidationTransport mockTransport;
+#endif
+    };
+
+    ValidationRequest prepareValidation(const MiniMaxSubscriptionCredentialProfile& profile) {
+        ValidationRequest request;
+        request.profile = profile;
+        request.bearerToken = resolveBearerToken(profile, request.tokenError);
+        request.endpoint = endpointPathForFamily(profile.endpointFamily);
+        if (request.endpoint.empty()) {
+            request.endpoint = MODELS_ENDPOINT;
+        }
+        request.groupId = groupId;
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        request.mockTransport = mockValidationTransport;
+#endif
+        return request;
     }
 
     static std::string classifyValidationError(
@@ -370,19 +448,9 @@ public:
         return CODING_PLAN_ENDPOINT;
     }
 
-    std::string resolveValidationEndpoint() {
-        const std::string endpoint = endpointPathForFamily(subscriptionProfile.endpointFamily);
-        if (!endpoint.empty()) {
-            lastResolvedEndpoint = endpoint;
-            return endpoint;
-        }
-
-        lastResolvedEndpoint = MODELS_ENDPOINT;
-        return MODELS_ENDPOINT;
-    }
-    
     // Fetch quota from a specific endpoint
-    QuotaResponse fetchQuotaFromEndpoint(const std::string& endpoint, const std::string& bearerToken) {
+    QuotaResponse fetchQuotaFromEndpoint(const std::string& endpoint, const std::string& bearerToken,
+                                         const std::string& requestGroupId) {
         QuotaResponse response;
         response.snapshotTime = std::time(nullptr);
         
@@ -398,10 +466,10 @@ public:
         
         // Configure HTTP client
         httpClient.setApiKey(bearerToken);
-        if (!groupId.empty()) {
-            httpClient.setGroupId(groupId);
+        if (!requestGroupId.empty()) {
+            httpClient.setGroupId(requestGroupId);
         }
-        
+
         // Make request
         HttpResponse httpResp = httpClient.get(url);
         
@@ -412,13 +480,64 @@ public:
             return response;
         }
 
-        parseQuotaPayload(httpResp.body, response);
-        const std::string endpointFamily =
-            canonicalEndpointFamily(subscriptionProfile.endpointFamily, subscriptionProfile.planKey);
-        if (response.success) {
-            response.providerSurface = providerSurfaceForFamily(endpointFamily);
-        }
+        parseQuotaPayload(httpResp.body, endpoint == TOKEN_PLAN_ENDPOINT, response);
         return response;
+    }
+
+    static bool validate(ValidationRequest& request) {
+        const bool subscription = hasSubscriptionProfile(request.profile);
+        const auto complete = [&](std::string state, std::string error = {}) {
+            if (subscription) {
+                request.profile.lastValidatedAt = std::time(nullptr);
+                request.profile.validationState = std::move(state);
+                request.profile.lastValidationError = std::move(error);
+            }
+        };
+        if (!request.bearerToken.has_value()) {
+            if (subscription && request.tokenError.rfind("Credential not found:", 0) == 0) {
+                request.tokenError = "Stored MiniMax credential is missing from Windows Credential Manager";
+            }
+            complete("invalid", std::move(request.tokenError));
+            return false;
+        }
+
+        const std::string url = std::string(MINIMAX_API_BASE) + request.endpoint;
+        HttpResponse response;
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (request.mockTransport) {
+            response = request.mockTransport(url, *request.bearerToken);
+        } else {
+#endif
+            HttpClient client;
+            client.setApiKey(*request.bearerToken);
+            if (!request.groupId.empty()) {
+                client.setGroupId(request.groupId);
+            }
+            response = client.get(url);
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        }
+#endif
+        if (response.success && request.endpoint != MODELS_ENDPOINT) {
+            JsonValue payload;
+            const auto* baseResponse =
+                JsonParser::parse(response.body, payload) ? payload.getMember("base_resp") : nullptr;
+            const auto* statusCode = baseResponse ? baseResponse->getMember("status_code") : nullptr;
+            if (!statusCode || !statusCode->isNumber()) {
+                complete("unreachable", "MiniMax subscription validation response has no numeric status code");
+                return false;
+            }
+            if (statusCode->getNumber() != 0) {
+                complete("invalid", "MiniMax subscription validation failed with a provider error");
+                return false;
+            }
+        }
+
+        if (response.success) {
+            complete("valid");
+            return true;
+        }
+        complete(classifyValidationState(response), classifyValidationError(subscription, response));
+        return false;
     }
 };
 
@@ -446,93 +565,87 @@ UsageResponse MiniMaxAdapter::fetchUsage(std::time_t from, std::time_t to) {
 QuotaResponse MiniMaxAdapter::fetchQuota() {
     QuotaResponse response;
     response.snapshotTime = std::time(nullptr);
+    std::unique_lock<std::mutex> lock(pImpl->credentialMutex);
+    const auto& profile = pImpl->subscriptionProfile;
     const auto configuredSurface =
-        MiniMaxAdapter::Impl::providerSurfaceForFamily(MiniMaxAdapter::Impl::canonicalEndpointFamily(
-            pImpl->subscriptionProfile.endpointFamily, pImpl->subscriptionProfile.planKey));
-    if (pImpl->hasActiveSubscriptionProfile()) {
+        Impl::providerSurfaceForFamily(Impl::canonicalEndpointFamily(profile.endpointFamily, profile.planKey));
+    if (Impl::hasSubscriptionProfile(profile)) {
         response.providerSurface = configuredSurface;
     }
 
-    if (!pImpl->mockQuotaResponse.empty()) {
-        std::string tokenError;
-        if (!pImpl->resolveBearerToken(tokenError).has_value()) {
-            response.success = false;
-            response.error = tokenError;
-            return response;
-        }
-        pImpl->lastResolvedEndpoint = pImpl->resolveQuotaEndpoint();
-        pImpl->parseQuotaPayload(pImpl->mockQuotaResponse, response);
+    std::string tokenError;
+    const auto bearerToken = pImpl->resolveBearerToken(profile, tokenError);
+    if (!bearerToken.has_value()) {
+        response.error = tokenError;
+        return response;
+    }
+
+    const bool useLegacyFallback = profile.endpointFamily.empty();
+    const auto configuredEndpoint = pImpl->resolveQuotaEndpoint();
+    std::string requestGroupId = pImpl->groupId;
+    std::string mockQuota = pImpl->mockQuotaResponse;
+    lock.unlock();
+
+    if (!mockQuota.empty()) {
+        pImpl->parseQuotaPayload(mockQuota, configuredEndpoint == Impl::TOKEN_PLAN_ENDPOINT, response);
         if (response.success) {
             response.providerSurface = configuredSurface;
         }
         return response;
     }
 
-    std::string tokenError;
-    const std::optional<std::string> bearerToken = pImpl->resolveBearerToken(tokenError);
-    if (!bearerToken.has_value()) {
-        response.success = false;
-        response.error = tokenError;
-        return response;
+    auto endpoint = configuredEndpoint;
+    response = pImpl->fetchQuotaFromEndpoint(endpoint, *bearerToken, requestGroupId);
+    if (!response.success && useLegacyFallback) {
+        endpoint = Impl::TOKEN_PLAN_ENDPOINT;
+        response = pImpl->fetchQuotaFromEndpoint(endpoint, *bearerToken, requestGroupId);
+        lock.lock();
+        pImpl->lastResolvedEndpoint = endpoint;
     }
-    
-    // Real implementation: fetch from MiniMax API
-    const std::string configuredEndpoint = pImpl->resolveQuotaEndpoint();
-    response = pImpl->fetchQuotaFromEndpoint(configuredEndpoint, *bearerToken);
-
-    if (!response.success && pImpl->subscriptionProfile.endpointFamily.empty()) {
-        response = pImpl->fetchQuotaFromEndpoint(MiniMaxAdapter::Impl::TOKEN_PLAN_ENDPOINT, *bearerToken);
-        pImpl->lastResolvedEndpoint = MiniMaxAdapter::Impl::TOKEN_PLAN_ENDPOINT;
-    }
-
-    if (!response.success && !pImpl->subscriptionProfile.endpointFamily.empty()) {
+    if (response.success) {
+        response.providerSurface = endpoint == Impl::TOKEN_PLAN_ENDPOINT
+                                       ? Impl::providerSurfaceForFamily("token_plan_remains")
+                                       : configuredSurface;
+    } else if (!useLegacyFallback) {
         response.providerSurface = configuredSurface;
     }
     return response;
 }
 
 bool MiniMaxAdapter::validateCredentials() {
-    std::string tokenError;
-    const std::optional<std::string> bearerToken = pImpl->resolveBearerToken(tokenError);
-    if (!bearerToken.has_value()) {
-        if (tokenError.rfind("Credential not found:", 0) == 0 &&
-            pImpl->hasActiveSubscriptionProfile()) {
-            tokenError = "Stored MiniMax credential is missing from Windows Credential Manager";
-        }
-        pImpl->recordValidationResult(false, "invalid", tokenError);
-        return false;
+    std::unique_lock<std::mutex> lock(pImpl->credentialMutex);
+    auto request = pImpl->prepareValidation(pImpl->subscriptionProfile);
+    const auto revision = ++pImpl->validationRevision;
+    if (request.bearerToken) {
+        pImpl->lastResolvedEndpoint = request.endpoint;
     }
+    lock.unlock();
 
-    const std::string endpoint = pImpl->resolveValidationEndpoint();
-    HttpResponse resp;
-#ifdef JISTATS_ENABLE_TEST_HOOKS
-    if (pImpl->mockValidationResponse.has_value()) {
-        resp = *pImpl->mockValidationResponse;
-    } else {
-#endif
-        HttpClient client;
-        client.setApiKey(*bearerToken);
-        if (!pImpl->groupId.empty()) {
-            client.setGroupId(pImpl->groupId);
-        }
+    const bool valid = Impl::validate(request);
 
-        resp = client.get(std::string(MiniMaxAdapter::Impl::MINIMAX_API_BASE) + endpoint);
-#ifdef JISTATS_ENABLE_TEST_HOOKS
+    lock.lock();
+    if (pImpl->validationRevision == revision) {
+        pImpl->subscriptionProfile = std::move(request.profile);
     }
-#endif
+    return valid;
+}
 
-    if (resp.success) {
-        pImpl->recordValidationResult(true, "valid", "");
-        return true;
-    }
-
-    pImpl->recordValidationResult(
-        false,
-        MiniMaxAdapter::Impl::classifyValidationState(resp),
-        MiniMaxAdapter::Impl::classifyValidationError(
-            pImpl->hasActiveSubscriptionProfile(),
-            resp));
-    return false;
+PreparedMiniMaxSubscriptionValidation
+MiniMaxAdapter::prepareSubscriptionCredentialValidation(const MiniMaxSubscriptionCredentialProfile& profile) {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
+    auto request = pImpl->prepareValidation(Impl::normalizeProfile(profile));
+    auto matchesCredential = [submitted = request.profile, bearer = request.bearerToken](MiniMaxAdapter& adapter) {
+        std::lock_guard<std::mutex> credentialLock(adapter.pImpl->credentialMutex);
+        std::string error;
+        return adapter.pImpl->resolveBearerToken(submitted, error) == bearer;
+    };
+    return {
+        [request = std::move(request)]() mutable {
+            Impl::validate(request);
+            return std::move(request.profile);
+        },
+        std::move(matchesCredential),
+    };
 }
 
 std::vector<Capability> MiniMaxAdapter::getCapabilities() {
@@ -562,6 +675,7 @@ void MiniMaxAdapter::setEnabled(bool enabled) {
 }
 
 bool MiniMaxAdapter::hasDirectQuotaApiConfigured() const {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
     if (!pImpl->subscriptionProfile.secretRef.empty()) {
         return true;
     }
@@ -569,7 +683,8 @@ bool MiniMaxAdapter::hasDirectQuotaApiConfigured() const {
 }
 
 std::string MiniMaxAdapter::directQuotaApiThrottleKey() const {
-    if (!hasDirectQuotaApiConfigured()) {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
+    if (pImpl->subscriptionProfile.secretRef.empty() && pImpl->apiKey.empty()) {
         return {};
     }
 
@@ -585,18 +700,24 @@ std::string MiniMaxAdapter::directQuotaApiThrottleKey() const {
 }
 
 void MiniMaxAdapter::setApiKey(const std::string& apiKey) {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
+    ++pImpl->validationRevision;
     pImpl->apiKey = apiKey;
 }
 
 void MiniMaxAdapter::setGroupId(const std::string& groupId) {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
+    ++pImpl->validationRevision;
     pImpl->groupId = groupId;
 }
 
 std::string MiniMaxAdapter::getApiKey() const {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
     return pImpl->apiKey;
 }
 
 std::string MiniMaxAdapter::getGroupId() const {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
     return pImpl->groupId;
 }
 
@@ -607,16 +728,23 @@ void MiniMaxAdapter::setSubscriptionCredentialProfile(
         return;
     }
 
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
+    ++pImpl->validationRevision;
     pImpl->subscriptionProfile = MiniMaxAdapter::Impl::normalizeProfile(profile);
 }
 
 MiniMaxSubscriptionCredentialProfile MiniMaxAdapter::getSubscriptionCredentialProfile() const {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
     return pImpl->subscriptionProfile;
 }
 
-bool MiniMaxAdapter::storeSubscriptionCredential(
-    const MiniMaxSubscriptionCredentialProfile& profile,
-    const std::string& secret) {
+bool MiniMaxAdapter::storeSubscriptionCredential(const MiniMaxSubscriptionCredentialProfile& profile,
+                                                 const std::string& secret, bool* previousSecretPreserved) {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
+    ++pImpl->validationRevision;
+    if (previousSecretPreserved) {
+        *previousSecretPreserved = false;
+    }
     std::string error;
     if (!validateSubscriptionCredentialProfile(profile, error)) {
         pImpl->subscriptionProfile = MiniMaxSubscriptionCredentialProfile{};
@@ -647,14 +775,21 @@ bool MiniMaxAdapter::storeSubscriptionCredential(
     request.userName = normalized.profileName;
     request.comment = "JiStats MiniMax subscription credential";
 
+    const auto previousSecret =
+        previousSecretPreserved ? pImpl->credentialStore->readGenericCredential(request.targetName) : std::nullopt;
     if (!pImpl->credentialStore->writeGenericCredential(request)) {
         normalized.validationState = "invalid";
         normalized.lastValidationError = pImpl->credentialStore->getLastError();
+        if (previousSecret.has_value()) {
+            *previousSecretPreserved =
+                pImpl->credentialStore->readGenericCredential(request.targetName) == previousSecret;
+        }
         pImpl->subscriptionProfile = normalized;
         return false;
     }
 
     normalized.validationState = "pending";
+    normalized.lastValidatedAt = 0;
     normalized.lastValidationError.clear();
     pImpl->subscriptionProfile = normalized;
     pImpl->apiKey.clear();
@@ -663,12 +798,13 @@ bool MiniMaxAdapter::storeSubscriptionCredential(
 
 std::optional<MiniMaxSubscriptionPollingConfig> MiniMaxAdapter::resolveSubscriptionPollingConfig(
     std::string& error) {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
     if (pImpl->subscriptionProfile.secretRef.empty()) {
         error = "No MiniMax credential configured";
         return std::nullopt;
     }
 
-    const std::optional<std::string> bearerToken = pImpl->resolveBearerToken(error);
+    const std::optional<std::string> bearerToken = pImpl->resolveBearerToken(pImpl->subscriptionProfile, error);
     if (!bearerToken.has_value()) {
         return std::nullopt;
     }
@@ -682,7 +818,11 @@ std::optional<MiniMaxSubscriptionPollingConfig> MiniMaxAdapter::resolveSubscript
 }
 
 void MiniMaxAdapter::setCredentialStore(std::shared_ptr<WindowsCredentialStore> credentialStore) {
-    pImpl->credentialStore = credentialStore;
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
+    if (pImpl->credentialStore != credentialStore) {
+        ++pImpl->validationRevision;
+        pImpl->credentialStore = std::move(credentialStore);
+    }
 }
 
 bool MiniMaxAdapter::validateSubscriptionCredentialProfile(
@@ -696,6 +836,7 @@ std::string MiniMaxAdapter::buildSecretRef(const MiniMaxSubscriptionCredentialPr
 }
 
 void MiniMaxAdapter::setMockQuotaResponse(const std::string& jsonResponse) {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
     pImpl->mockQuotaResponse = jsonResponse;
 }
 
@@ -704,12 +845,19 @@ void MiniMaxAdapter::setMockUsageResponse(const std::string& jsonResponse) {
 }
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
+void MiniMaxAdapter::setMockValidationTransport(ValidationTransport transport) {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
+    pImpl->mockValidationTransport = std::move(transport);
+}
+
 void MiniMaxAdapter::setMockValidationResponse(bool success, int statusCode,
     const std::string& body, const std::string& error) {
-    pImpl->mockValidationResponse = HttpResponse{success, statusCode, body, error};
+    setMockValidationTransport([response = HttpResponse{success, statusCode, body, error}](
+                                   const std::string&, const std::string&) { return response; });
 }
 
 std::string MiniMaxAdapter::getLastResolvedEndpointForTesting() const {
+    std::lock_guard<std::mutex> lock(pImpl->credentialMutex);
     return pImpl->lastResolvedEndpoint;
 }
 #endif

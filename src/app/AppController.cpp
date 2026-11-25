@@ -102,6 +102,7 @@ constexpr std::time_t kRetryDelayEscalatedSeconds = 15 * 60;
 constexpr std::time_t kOfflineNoticeCooldownSeconds = 60 * 60;
 constexpr const char* kRuntimeRefreshSyncKind = "runtime_refresh";
 constexpr const char* kRuntimeBackfillSyncKind = "runtime_backfill";
+constexpr const char* kClaudeSourceDaySnapshotBasis = "Claude local activity dated by the cache source day";
 constexpr auto kOpenAICodexRefreshPollInterval = std::chrono::seconds(2);
 constexpr auto kMiniMaxRefreshPollInterval = std::chrono::seconds(45);
 constexpr auto kTaskbarRefreshPollInterval = std::chrono::minutes(5);
@@ -119,6 +120,10 @@ constexpr std::time_t kRetentionDailyRollupDays = 365;
 constexpr std::time_t kRetentionGapMarkerDays = 90;
 constexpr std::time_t kRetentionIntervalSeconds = 24 * 3600;
 constexpr auto kRetentionCheckInterval = std::chrono::hours(1);
+
+constexpr std::time_t rawUsageRetentionCutoff(std::time_t now) {
+    return std::max<std::time_t>(0, now - kRetentionRawEventDays * 86400);
+}
 
 bool isProviderTrackingEnabled(
     const DashboardPreferences& preferences,
@@ -144,10 +149,15 @@ bool isProviderTrackingEnabled(
     return true;
 }
 
-// Consent writes and source scans share the same lock across JiStats processes.
-class CodexProfileLock {
+constexpr wchar_t kCodexProfileLockName[] = L"Global\\JiStats.CodexAttribution.";
+constexpr wchar_t kMiniMaxProfileLockName[] = L"Global\\JiStats.MiniMaxCredentials.";
+
+class ProfileDatabaseLock {
   public:
-    CodexProfileLock(const std::string& databasePath, DWORD waitMs) {
+    ProfileDatabaseLock(const std::string& databasePath, const wchar_t* prefix, DWORD waitMs) {
+        if (databasePath.empty()) {
+            return;
+        }
         const auto path = std::filesystem::path(databasePath).wstring();
         const HANDLE database =
             CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -163,9 +173,9 @@ class CodexProfileLock {
         }
 
         // The file identity also matches when a peer opened the database through a path alias.
-        const std::wstring name =
-            L"Global\\JiStats.CodexAttribution." + std::to_wstring(identity.dwVolumeSerialNumber) + L"." +
-            std::to_wstring(identity.nFileIndexHigh) + L"." + std::to_wstring(identity.nFileIndexLow);
+        const std::wstring name = prefix + std::to_wstring(identity.dwVolumeSerialNumber) + L"." +
+                                  std::to_wstring(identity.nFileIndexHigh) + L"." +
+                                  std::to_wstring(identity.nFileIndexLow);
         // An existing mutex may allow synchronization without granting security-control rights.
         const HANDLE mutex = CreateMutexExW(nullptr, name.c_str(), 0, SYNCHRONIZE | MUTEX_MODIFY_STATE);
         if (mutex != nullptr) {
@@ -178,15 +188,15 @@ class CodexProfileLock {
         }
     }
 
-    ~CodexProfileLock() {
+    ~ProfileDatabaseLock() {
         if (mutex_ != nullptr) {
             ReleaseMutex(mutex_);
             CloseHandle(mutex_);
         }
     }
 
-    CodexProfileLock(const CodexProfileLock&) = delete;
-    CodexProfileLock& operator=(const CodexProfileLock&) = delete;
+    ProfileDatabaseLock(const ProfileDatabaseLock&) = delete;
+    ProfileDatabaseLock& operator=(const ProfileDatabaseLock&) = delete;
 
     bool ownsLock() const {
         return mutex_ != nullptr;
@@ -870,11 +880,11 @@ QuantifiedUsageAggregate queryRawUsageAggregate(
         return aggregate;
     }
 
-    QueryResult result = storage.execute(
-        "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_minor_units), 0) "
-        "FROM usage_events WHERE event_time_utc >= ? AND event_time_utc <= ? "
-        "AND source_type != 'codex_local_rollout';",
-        {formatTimeUtcIso(from), formatTimeUtcIso(to)});
+    QueryResult result =
+        storage.execute("SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cost_minor_units), 0) "
+                        "FROM usage_events WHERE event_time_utc >= ? AND event_time_utc <= ? "
+                        "AND source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite');",
+                        {formatTimeUtcIso(from), formatTimeUtcIso(to)});
     if (!result.success() || result.rowCount() == 0) {
         return {};
     }
@@ -918,19 +928,19 @@ QuantifiedUsageAggregate queryRawUsageAggregateForMissingHourlyRollups(
         return aggregate;
     }
 
-    QueryResult result = storage.execute(
-        "SELECT COUNT(*), COALESCE(SUM(ue.total_tokens), 0), COALESCE(SUM(ue.cost_minor_units), 0) "
-        "FROM usage_events ue "
-        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
-        "AND ue.source_type != 'codex_local_rollout' "
-        "AND NOT EXISTS ("
-        "    SELECT 1 FROM usage_rollups_hourly r "
-        "    WHERE r.provider_id = ue.provider_id "
-        "      AND r.account_id = ue.account_id "
-        "      AND r.model_key = COALESCE(ue.model_key, '') "
-        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
-        ");",
-        {formatTimeUtcIso(fromHourStart), formatTimeUtcIso(toHourStart)});
+    QueryResult result =
+        storage.execute("SELECT COUNT(*), COALESCE(SUM(ue.total_tokens), 0), COALESCE(SUM(ue.cost_minor_units), 0) "
+                        "FROM usage_events ue "
+                        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
+                        "AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite') "
+                        "AND NOT EXISTS ("
+                        "    SELECT 1 FROM usage_rollups_hourly r "
+                        "    WHERE r.provider_id = ue.provider_id "
+                        "      AND r.account_id = ue.account_id "
+                        "      AND r.model_key = COALESCE(ue.model_key, '') "
+                        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
+                        ");",
+                        {formatTimeUtcIso(fromHourStart), formatTimeUtcIso(toHourStart)});
     if (!result.success() || result.rowCount() == 0) {
         return {};
     }
@@ -949,11 +959,10 @@ long long queryRawUsageProviderCount(
         return 0;
     }
 
-    QueryResult result = storage.execute(
-        "SELECT COUNT(DISTINCT provider_id) FROM usage_events "
-        "WHERE event_time_utc >= ? AND event_time_utc <= ? "
-        "AND source_type != 'codex_local_rollout';",
-        {formatTimeUtcIso(from), formatTimeUtcIso(to)});
+    QueryResult result = storage.execute("SELECT COUNT(DISTINCT provider_id) FROM usage_events "
+                                         "WHERE event_time_utc >= ? AND event_time_utc <= ? "
+                                         "AND source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite');",
+                                         {formatTimeUtcIso(from), formatTimeUtcIso(to)});
     if (!result.success() || result.rowCount() == 0) {
         return 0;
     }
@@ -997,49 +1006,40 @@ long long queryHybridUsageProviderCount(
         return 0;
     }
 
-    QueryResult missingRollupProviders = storage.execute(
-        "SELECT DISTINCT ue.provider_id FROM usage_events ue "
-        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
-        "AND ue.source_type != 'codex_local_rollout' "
-        "AND NOT EXISTS ("
-        "    SELECT 1 FROM usage_rollups_hourly r "
-        "    WHERE r.provider_id = ue.provider_id "
-        "      AND r.account_id = ue.account_id "
-        "      AND r.model_key = COALESCE(ue.model_key, '') "
-        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
-        ");",
-        {
-            formatTimeUtcIso(fullHours->first),
-            formatTimeUtcIso(fullHours->second + 3599)
-        });
+    QueryResult missingRollupProviders =
+        storage.execute("SELECT DISTINCT ue.provider_id FROM usage_events ue "
+                        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
+                        "AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite') "
+                        "AND NOT EXISTS ("
+                        "    SELECT 1 FROM usage_rollups_hourly r "
+                        "    WHERE r.provider_id = ue.provider_id "
+                        "      AND r.account_id = ue.account_id "
+                        "      AND r.model_key = COALESCE(ue.model_key, '') "
+                        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
+                        ");",
+                        {formatTimeUtcIso(fullHours->first), formatTimeUtcIso(fullHours->second + 3599)});
     if (!appendProviderIds(missingRollupProviders)) {
         return 0;
     }
 
     const std::time_t trailingStart = fullHours->second + 3600;
     if (from < fullHours->first) {
-        QueryResult leadingProviders = storage.execute(
-            "SELECT DISTINCT provider_id FROM usage_events "
-            "WHERE event_time_utc >= ? AND event_time_utc <= ? "
-            "AND source_type != 'codex_local_rollout';",
-            {
-                formatTimeUtcIso(from),
-                formatTimeUtcIso(fullHours->first - 1)
-            });
+        QueryResult leadingProviders =
+            storage.execute("SELECT DISTINCT provider_id FROM usage_events "
+                            "WHERE event_time_utc >= ? AND event_time_utc <= ? "
+                            "AND source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite');",
+                            {formatTimeUtcIso(from), formatTimeUtcIso(fullHours->first - 1)});
         if (!appendProviderIds(leadingProviders)) {
             return 0;
         }
     }
 
     if (trailingStart <= to) {
-        QueryResult trailingProviders = storage.execute(
-            "SELECT DISTINCT provider_id FROM usage_events "
-            "WHERE event_time_utc >= ? AND event_time_utc <= ? "
-            "AND source_type != 'codex_local_rollout';",
-            {
-                formatTimeUtcIso(trailingStart),
-                formatTimeUtcIso(to)
-            });
+        QueryResult trailingProviders =
+            storage.execute("SELECT DISTINCT provider_id FROM usage_events "
+                            "WHERE event_time_utc >= ? AND event_time_utc <= ? "
+                            "AND source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite');",
+                            {formatTimeUtcIso(trailingStart), formatTimeUtcIso(to)});
         if (!appendProviderIds(trailingProviders)) {
             return 0;
         }
@@ -1116,15 +1116,15 @@ void accumulateRawProviderUsage(
         return;
     }
 
-    QueryResult result = storage.execute(
-        "SELECT p.provider_key, p.display_name, COUNT(*), COALESCE(SUM(ue.total_tokens), 0), "
-        "COALESCE(SUM(ue.cost_minor_units), 0) "
-        "FROM usage_events ue "
-        "JOIN providers p ON p.id = ue.provider_id "
-        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
-        "AND ue.source_type != 'codex_local_rollout' "
-        "GROUP BY p.provider_key, p.display_name;",
-        {formatTimeUtcIso(from), formatTimeUtcIso(to)});
+    QueryResult result =
+        storage.execute("SELECT p.provider_key, p.display_name, COUNT(*), COALESCE(SUM(ue.total_tokens), 0), "
+                        "COALESCE(SUM(ue.cost_minor_units), 0) "
+                        "FROM usage_events ue "
+                        "JOIN providers p ON p.id = ue.provider_id "
+                        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
+                        "AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite') "
+                        "GROUP BY p.provider_key, p.display_name;",
+                        {formatTimeUtcIso(from), formatTimeUtcIso(to)});
     if (!result.success()) {
         return;
     }
@@ -1181,22 +1181,22 @@ void accumulateRawProviderUsageForMissingHourlyRollups(
         return;
     }
 
-    QueryResult result = storage.execute(
-        "SELECT p.provider_key, p.display_name, COUNT(*), COALESCE(SUM(ue.total_tokens), 0), "
-        "COALESCE(SUM(ue.cost_minor_units), 0) "
-        "FROM usage_events ue "
-        "JOIN providers p ON p.id = ue.provider_id "
-        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
-        "AND ue.source_type != 'codex_local_rollout' "
-        "AND NOT EXISTS ("
-        "    SELECT 1 FROM usage_rollups_hourly r "
-        "    WHERE r.provider_id = ue.provider_id "
-        "      AND r.account_id = ue.account_id "
-        "      AND r.model_key = COALESCE(ue.model_key, '') "
-        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
-        ") "
-        "GROUP BY p.provider_key, p.display_name;",
-        {formatTimeUtcIso(fromHourStart), formatTimeUtcIso(toHourEnd)});
+    QueryResult result =
+        storage.execute("SELECT p.provider_key, p.display_name, COUNT(*), COALESCE(SUM(ue.total_tokens), 0), "
+                        "COALESCE(SUM(ue.cost_minor_units), 0) "
+                        "FROM usage_events ue "
+                        "JOIN providers p ON p.id = ue.provider_id "
+                        "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ? "
+                        "AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite') "
+                        "AND NOT EXISTS ("
+                        "    SELECT 1 FROM usage_rollups_hourly r "
+                        "    WHERE r.provider_id = ue.provider_id "
+                        "      AND r.account_id = ue.account_id "
+                        "      AND r.model_key = COALESCE(ue.model_key, '') "
+                        "      AND r.rollup_period_start_utc = substr(ue.event_time_utc, 1, 13) || ':00:00Z'"
+                        ") "
+                        "GROUP BY p.provider_key, p.display_name;",
+                        {formatTimeUtcIso(fromHourStart), formatTimeUtcIso(toHourEnd)});
     if (!result.success()) {
         return;
     }
@@ -1600,7 +1600,7 @@ ReportAggregateData buildReportAggregateData(
                           "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
         std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
         appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
-        sql += " AND ue.source_type != 'codex_local_rollout'";
+        sql += " AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')";
         if (missingDailyRollupsOnly) {
             sql +=
                 " AND NOT EXISTS ("
@@ -1737,7 +1737,7 @@ ReportAggregateData buildReportAggregateData(
                 "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
             std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
             appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
-            sql += " AND ue.source_type != 'codex_local_rollout'";
+            sql += " AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')";
             if (missingDailyRollupsOnly) {
                 sql +=
                     " AND NOT EXISTS ("
@@ -1835,7 +1835,7 @@ ReportAggregateData buildReportAggregateData(
                 "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
             std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
             appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
-            sql += " AND ue.source_type != 'codex_local_rollout'";
+            sql += " AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')";
             if (missingDailyRollupsOnly) {
                 sql +=
                     " AND NOT EXISTS ("
@@ -1927,7 +1927,7 @@ ReportAggregateData buildReportAggregateData(
                 "WHERE ue.event_time_utc >= ? AND ue.event_time_utc <= ?";
             std::vector<std::string> params{formatTimeUtcIso(from), formatTimeUtcIso(to)};
             appendScopeFilters(sql, params, "p.provider_key", "a.account_key");
-            sql += " AND ue.source_type != 'codex_local_rollout'";
+            sql += " AND ue.source_type NOT IN ('codex_local_rollout', 'codex_local_sqlite')";
             if (missingDailyRollupsOnly) {
                 sql +=
                     " AND NOT EXISTS ("
@@ -2573,13 +2573,15 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
 
     QueryResult result = storage.execute(
         "WITH latest_provider_snapshots AS ("
-        "    SELECT provider_id, MAX(snapshot_time_utc) AS latest_snapshot_time "
+        "    SELECT provider_id, MAX(snapshot_time_utc) AS latest_snapshot_time, "
+        "           MAX(snapshot_time_utc) FILTER (WHERE basis_summary = ?1) AS latest_claude_source_time "
         "    FROM quota_snapshots "
         "    GROUP BY provider_id"
         ") "
         "SELECT p.provider_key, "
         "       p.display_name, "
-        "       qs.snapshot_time_utc, "
+        "       CASE WHEN p.provider_key = 'claude_code' THEN COALESCE(latest.latest_claude_source_time, '') "
+        "            ELSE qs.snapshot_time_utc END, "
         "       COALESCE(pl.plan_key, ''), "
         "       COALESCE(pl.display_name, ''), "
         "       COALESCE(pl.quota_window, ''), "
@@ -2593,13 +2595,22 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         "FROM latest_provider_snapshots latest "
         "JOIN quota_snapshots qs "
         "  ON qs.provider_id = latest.provider_id "
-        " AND qs.snapshot_time_utc = latest.latest_snapshot_time "
+        " AND qs.snapshot_time_utc = COALESCE(latest.latest_claude_source_time, latest.latest_snapshot_time) "
         "JOIN providers p ON p.id = qs.provider_id "
         "LEFT JOIN plans pl ON pl.id = qs.plan_id "
         "WHERE p.enabled = 1 "
+        "AND (latest.latest_claude_source_time IS NULL OR qs.basis_summary = ?1) "
+        "AND (p.provider_key <> 'claude_code' OR qs.id = ("
+        "    SELECT MAX(other.id) FROM quota_snapshots other "
+        "    WHERE other.provider_id = qs.provider_id AND other.account_id = qs.account_id "
+        "    AND other.plan_id IS qs.plan_id AND other.quota_dimension = qs.quota_dimension "
+        "    AND other.snapshot_time_utc = qs.snapshot_time_utc "
+        "    AND (latest.latest_claude_source_time IS NULL OR other.basis_summary = ?1)"
+        ")) "
         "ORDER BY p.display_name ASC, COALESCE(pl.display_name, '') ASC, "
         "         CASE WHEN codex_sample THEN qs.snapshot_subsecond_ns END DESC, "
-        "         CASE WHEN codex_sample THEN -qs.id ELSE qs.id END;");
+        "         CASE WHEN codex_sample THEN -qs.id ELSE qs.id END;",
+        {kClaudeSourceDaySnapshotBasis});
     if (!result.success() || result.rowCount() == 0) {
         return std::nullopt;
     }
@@ -2640,7 +2651,9 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         }
 
         const auto planKey = result.getString(row, 3);
-        if (result.getBool(row, 13)) {
+        const bool isCodexSample = result.getBool(row, 13);
+        std::time_t codexResetAt = 0;
+        if (isCodexSample) {
             const auto window = savedWindow(row);
             const auto start = std::get<1>(window);
             const auto end = std::get<2>(window);
@@ -2651,6 +2664,7 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
             if (!seenCodexWindows.emplace(planKey, std::get<0>(window), start, end).second) {
                 continue;
             }
+            codexResetAt = end;
         }
 
         const std::string providerDisplayName = result.getString(row, 1);
@@ -2675,6 +2689,9 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
             QuotaResponse snapshotQuota;
             snapshotQuota.success = true;
             snapshotQuota.snapshotTime = snapshotTime;
+            if (providerKey == "claude_code") {
+                snapshotQuota.providerSurface = ClaudeCodeLocalParser::kProviderSurface;
+            }
             provider.state = determineProviderState(snapshotQuota, now);
             viewModel.providers.push_back(std::move(provider));
             providerIt = std::prev(viewModel.providers.end());
@@ -2685,7 +2702,10 @@ std::optional<DashboardViewModel> buildDashboardViewModelFromPersistedQuotaSnaps
         const long long remaining = result.getInt64(row, 8);
         QuotaInfo quota = makeQuota(quotaPlanLabelForProvider(providerKey, "", planKey, result.getString(row, 4)),
                                     result.getString(row, 5), used, limit, result.getString(row, 9), remaining);
-        if (providerKey == "grok" || providerKey == "cursor") {
+        if (isCodexSample) {
+            quota.providerSurface = "openai_subscription_codex_local";
+            quota.windowResetAt = codexResetAt;
+        } else if (providerKey == "grok" || providerKey == "cursor") {
             quota.providerSurface = providerKey + "_subscription_api";
             const auto resetTime = parseRuntimeTimestamp(result.getString(row, 10));
             quota.windowResetAt = resetTime > snapshotTime ? resetTime : 0;
@@ -2801,8 +2821,9 @@ void applyRuntimeStateToViewModel(DashboardViewModel& viewModel) {
     viewModel.isOnline = runtimeStateIsOnline(viewModel.runtimeState);
 }
 
-bool isUndatedCodexQuota(const QuotaResponse& quota) {
-    return quota.providerSurface == "openai_subscription_codex_local" && quota.snapshotTime <= 0;
+bool isUndatedLocalSnapshot(const QuotaResponse& quota) {
+    return quota.snapshotTime <= 0 && (quota.providerSurface == "openai_subscription_codex_local" ||
+                                       quota.providerSurface == ClaudeCodeLocalParser::kProviderSurface);
 }
 
 ProviderState determineProviderState(const QuotaResponse& quota, std::time_t now) {
@@ -2813,7 +2834,7 @@ ProviderState determineProviderState(const QuotaResponse& quota, std::time_t now
         return ProviderState::Offline;
     }
 
-    if (isUndatedCodexQuota(quota)) {
+    if (isUndatedLocalSnapshot(quota)) {
         return ProviderState::Unknown;
     }
 
@@ -3335,14 +3356,15 @@ std::optional<int> ensureQuotaSnapshotPlanId(
     return static_cast<int>(insert.lastInsertRowId());
 }
 
-enum class QuotaSnapshotKind { Count, Percentage, CodexPercentage };
+enum class QuotaSnapshotKind { Count, Percentage, CodexPercentage, ClaudeLocalActivity };
 
 bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accountId, std::optional<int> planId,
                              std::time_t snapshotTime, std::time_t windowStart, std::time_t windowEnd, long long used,
                              long long limit, long long remaining, const std::string& confidenceTier,
                              const std::string& basisSummary, QuotaSnapshotKind kind,
                              const std::optional<int>& snapshotSubsecondNs) {
-    const bool percentageReading = kind != QuotaSnapshotKind::Count;
+    const bool percentageReading = kind == QuotaSnapshotKind::Percentage || kind == QuotaSnapshotKind::CodexPercentage;
+    const bool claudeReading = kind == QuotaSnapshotKind::ClaudeLocalActivity;
     if (percentageReading && !planId.has_value()) {
         return false;
     }
@@ -3365,7 +3387,7 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
         "used_value, limit_value, confidence_tier, basis_summary, quota_dimension, remaining_value, is_reconciled, "
         "snapshot_subsecond_ns";
     sql += codexReading ? ", id) " : ") ";
-    sql += percentageReading ? "SELECT ?, ?, " : "VALUES (?, ?, ";
+    sql += percentageReading || claudeReading ? "SELECT ?, ?, " : "VALUES (?, ?, ";
     sql += planId.has_value() ? "?" : "NULL";
     sql += ", ?, ?, ?, ?, ";
     sql += limit > 0 ? "?" : "NULL";
@@ -3398,6 +3420,12 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
                ") replay ON TRUE WHERE TRUE "
                "ON CONFLICT(id) DO UPDATE SET snapshot_subsecond_ns = excluded.snapshot_subsecond_ns "
                "WHERE quota_snapshots.snapshot_subsecond_ns IS NULL AND excluded.snapshot_subsecond_ns IS NOT NULL;";
+    } else if (claudeReading) {
+        // The source day is shared by every read. Save a changed counter, including a return to a prior value.
+        sql += " WHERE (SELECT used_value FROM quota_snapshots WHERE provider_id = ? AND account_id = ? "
+               "AND plan_id IS CAST(NULLIF(?, '') AS INTEGER) AND snapshot_time_utc = ? "
+               "AND quota_dimension = 'requests' AND basis_summary = ? "
+               "ORDER BY id DESC LIMIT 1) IS NOT CAST(? AS INTEGER);";
     } else if (percentageReading) {
         sql += " WHERE NOT EXISTS (SELECT 1 FROM quota_snapshots WHERE provider_id = ? AND account_id = ? "
                "AND plan_id = ? AND snapshot_time_utc = ?);";
@@ -3436,11 +3464,15 @@ bool persistQuotaSnapshotRow(StorageService& storage, int providerId, int accoun
         params.push_back(std::to_string(std::max<long long>(0, limit)));
         params.push_back(remainingText);
     }
-    if (percentageReading) {
+    if (percentageReading || claudeReading) {
         params.push_back(std::to_string(providerId));
         params.push_back(std::to_string(accountId));
-        params.push_back(std::to_string(*planId));
+        params.push_back(planId ? std::to_string(*planId) : std::string{});
         params.push_back(snapshotTimeUtc);
+    }
+    if (claudeReading) {
+        params.push_back(basisSummary);
+        params.push_back(usedText);
     }
     if (codexReading) {
         // Older Codex rows used the capture time when the rollout omitted its window.
@@ -3489,7 +3521,13 @@ bool providerHasBackfilledUsage(
     return result.getInt64(0, 0) > 0;
 }
 
-bool rebuildUsageRollupsForRange(StorageService& storage, std::time_t from, std::time_t to) {
+bool rebuildUsageRollupsForRange(StorageService& storage, std::time_t from, std::time_t to,
+                                 std::time_t rawEventCutoff) {
+    // Storage normalizes the requested range down to bucket boundaries. Round the cutoff
+    // forward first so a bucket with pruned raw events keeps its saved total.
+    const std::time_t hourlyFrom = std::max(from, utcHourStart(rawEventCutoff + 3600 - 1));
+    const std::time_t dailyFrom = std::max(from, utcDayStart(rawEventCutoff + 86400 - 1));
+
     QueryResult scopes = storage.execute(
         "SELECT DISTINCT provider_id, account_id FROM usage_events "
         "WHERE event_time_utc >= ? AND event_time_utc <= ? "
@@ -3503,18 +3541,15 @@ bool rebuildUsageRollupsForRange(StorageService& storage, std::time_t from, std:
     for (size_t row = 0; row < scopes.rowCount(); ++row) {
         const int providerId = scopes.getInt(row, 0);
         const int accountId = scopes.getInt(row, 1);
-        success = storage.rebuildUsageRollups(
-            UsageRollupResolution::Hourly,
-            providerId,
-            accountId,
-            from,
-            to) && success;
-        success = storage.rebuildUsageRollups(
-            UsageRollupResolution::Daily,
-            providerId,
-            accountId,
-            from,
-            to) && success;
+        if (hourlyFrom <= to) {
+            success =
+                storage.rebuildUsageRollups(UsageRollupResolution::Hourly, providerId, accountId, hourlyFrom, to) &&
+                success;
+        }
+        if (dailyFrom <= to) {
+            success = storage.rebuildUsageRollups(UsageRollupResolution::Daily, providerId, accountId, dailyFrom, to) &&
+                      success;
+        }
     }
 
     return success;
@@ -3541,6 +3576,29 @@ std::string normalizeMiniMaxValidationError(const std::string& error) {
         return "Stored MiniMax credential is missing from Windows Credential Manager";
     }
     return error;
+}
+
+std::string miniMaxValidationErrorForStorage(const MiniMaxSubscriptionCredentialProfile& profile) {
+    if (profile.validationState == "valid") {
+        return {};
+    }
+
+    // Persist only known UI diagnoses. Platform or transport error details can contain private data.
+    constexpr const char* safeErrors[] = {
+        "Stored MiniMax credential is missing from Windows Credential Manager",
+        "This credential does not match the selected MiniMax subscription surface",
+        "MiniMax subscription key rejected",
+        "MiniMax subscription validation failed with a provider error",
+        "MiniMax subscription validation response has no numeric status code",
+        "MiniMax validation endpoint is temporarily unavailable",
+    };
+    for (const auto* safeError : safeErrors) {
+        if (profile.lastValidationError == safeError) {
+            return safeError;
+        }
+    }
+    return profile.validationState == "unreachable" ? "Could not reach MiniMax to validate this credential"
+                                                    : "MiniMax credential validation failed";
 }
 
 std::string lastValidatedLabel(std::time_t timestamp) {
@@ -3984,6 +4042,7 @@ public:
     std::mutex codexModelAttributionMutex;
     // Keep ordinary preferences and attribution off the connection shared by runtime and retention work.
     StorageService preferencesStorage;
+    StorageService miniMaxCredentialStorage;
     SettingsService preferenceWriter{preferencesStorage};
     StorageService codexAttributionStorage;
     SettingsService codexAttributionSettings{codexAttributionStorage};
@@ -4001,6 +4060,8 @@ public:
     std::shared_ptr<WindowsCredentialStore> miniMaxCredentialStore;
     std::map<std::string, MiniMaxSubscriptionCredentialProfile> miniMaxCredentialProfiles;
     mutable std::mutex miniMaxValidationMutex;
+    std::mutex miniMaxCredentialActionMutex;
+    std::map<std::string, std::uint64_t> miniMaxCredentialRevisions;
     std::mutex runtimeRefreshMutex;
     // Serializes connectivity writes and notice publication independently of provider I/O.
     std::mutex offlineNoticeMutex;
@@ -4064,16 +4125,20 @@ public:
     std::string kimiCodeDetectionMessage;
     std::time_t lastScheduledExportAt = 0;
     std::time_t lastRetentionRunAt = 0;
+    std::mutex rawUsageRetentionMutex;
+    std::time_t rawUsagePrunedBefore = 0;
     std::atomic<bool> shuttingDown{false};
     std::atomic<bool> exitRequested{false};
 #ifdef JISTATS_ENABLE_TEST_HOOKS
     bool forceDashboardInitFailureForTesting = false;
     std::shared_ptr<ProviderManager> testProviderManager;
     bool headlessForTesting = false;
+    bool runtimeWorkersEnabledForTesting = true;
     bool disableTaskbarForTesting = false;
     bool taskbarTestModeForTesting = false;
     bool disableCodexTokenImportForTesting = false;
     std::shared_future<void> miniMaxValidationReleaseForTesting;
+    std::function<void()> afterMiniMaxValidationClearForTesting;
     std::function<void()> afterSettingsDequeueForTesting;
     std::function<void()> beforeRuntimePublicationForTesting;
     std::function<void()> beforeCodexSourceReadForTesting;
@@ -4470,8 +4535,8 @@ public:
         for (size_t index = 0; index < pairCount; ++index) {
             const auto& provider = providers[index];
             const auto& quota = quotaResponses[index];
-            // Quota history requires an observation time. Undated Codex values can still be displayed.
-            if (!provider || !shouldExposeQuotaSnapshot(quota) || isUndatedCodexQuota(quota)) {
+            // Undated local values can be displayed without adding a history row.
+            if (!provider || !shouldExposeQuotaSnapshot(quota) || isUndatedLocalSnapshot(quota)) {
                 continue;
             }
 
@@ -4492,6 +4557,9 @@ public:
                 snapshotKind = QuotaSnapshotKind::CodexPercentage;
             } else if (providerKey == "grok" || providerKey == "cursor") {
                 snapshotKind = QuotaSnapshotKind::Percentage;
+            } else if (providerKey == "claude_code" &&
+                       quota.providerSurface == ClaudeCodeLocalParser::kProviderSurface) {
+                snapshotKind = QuotaSnapshotKind::ClaudeLocalActivity;
             }
             const std::time_t snapshotTime = quota.snapshotTime > 0 ? quota.snapshotTime : now;
 
@@ -4505,8 +4573,11 @@ public:
                 displayName,
                 primaryValues.limit);
             const std::string primaryBasisSummary =
-                "Runtime quota snapshot captured from " +
-                reportSourceLabelForSurface(quota.providerSurface.empty() ? providerKey : quota.providerSurface);
+                snapshotKind == QuotaSnapshotKind::ClaudeLocalActivity
+                    ? kClaudeSourceDaySnapshotBasis
+                    : "Runtime quota snapshot captured from " +
+                          reportSourceLabelForSurface(quota.providerSurface.empty() ? providerKey
+                                                                                    : quota.providerSurface);
             persistQuotaSnapshotRow(storageService, *providerId, *accountId, primaryPlanId, snapshotTime,
                                     quota.windowStart, quota.windowEnd, primaryValues.used, primaryValues.limit,
                                     primaryValues.remaining, confidenceTier, primaryBasisSummary, snapshotKind,
@@ -5598,21 +5669,25 @@ public:
         (void)storageService.insertExportRun(exportRun);
     }
 
-    void runScheduledExportIfDue(std::time_t now) {
+    std::optional<std::time_t> runScheduledExportIfDue(std::time_t now) {
         const DashboardPreferences preferences = appliedScheduledExportPreferences();
         if (!shouldRunScheduledExport(preferences)) {
-            return;
+            return std::nullopt;
         }
         {
             std::lock_guard<std::mutex> exportLock(scheduledExportMutex);
             if (!isScheduledExportDue(preferences, now)) {
-                return;
+                return std::nullopt;
             }
         }
 
         const std::time_t requestedAt = now;
         ReportRequest request =
             buildAnalysisScopedHtmlExportRequest(preferences, "", requestedAt);
+        const auto rangeStart = std::chrono::system_clock::to_time_t(request.dateRange.start);
+        if (rangeStart > requestedAt) {
+            return rangeStart;
+        }
 
         const std::string originalDefaultOutputDir = reportingService.getDefaultOutputDirectory();
         if (!preferences.scheduledExportPath.empty()) {
@@ -5630,7 +5705,7 @@ public:
             JISTATS_LOG_WARN(
                 LogCategory::General,
                 "Scheduled HTML export failed: " + result.errorMessage);
-            return;
+            return std::nullopt;
         }
 
         {
@@ -5649,6 +5724,7 @@ public:
         JISTATS_LOG_INFO(
             LogCategory::General,
             "Scheduled HTML export wrote: " + result.outputPath);
+        return std::nullopt;
     }
 
     DashboardHtmlExportResult handleManualHtmlExport(const std::string& outputPath) {
@@ -5659,7 +5735,12 @@ public:
         ReportRequest request =
             buildAnalysisScopedHtmlExportRequest(preferences, outputPath, requestedAt);
 
-        const ReportResult reportResult = reportingService.generateReport(request);
+        ReportResult reportResult;
+        if (std::chrono::system_clock::to_time_t(request.dateRange.start) > requestedAt) {
+            reportResult.errorMessage = "The Analysis From date is in the future. Select today or an earlier UTC date.";
+        } else {
+            reportResult = reportingService.generateReport(request);
+        }
         persistExportRun("manual_html", request, reportResult, requestedAt, std::time(nullptr));
 
         if (!reportResult.success) {
@@ -5686,9 +5767,14 @@ public:
         scheduledExportThread = std::thread([this]() {
             while (!shouldStopMiniMaxValidation()) {
                 const std::time_t now = std::time(nullptr);
-                runScheduledExportIfDue(now);
+                const auto deferredUntil = runScheduledExportIfDue(now);
+                // While the selected range is in the future, recheck for scope edits without repeatedly exporting.
+                const auto wait = deferredUntil ? std::min(scheduledExportPollInterval,
+                                                           std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                               std::chrono::seconds(*deferredUntil - now)))
+                                                : scheduledExportWaitInterval(now);
 
-                if (waitForRefreshWatcherInterval(scheduledExportWaitInterval(now))) {
+                if (waitForRefreshWatcherInterval(wait)) {
                     break;
                 }
             }
@@ -5697,6 +5783,7 @@ public:
 
     void loadRetentionStateFromStorage() {
         lastRetentionRunAt = 0;
+        rawUsagePrunedBefore = 0;
         if (!storageAvailable) {
             return;
         }
@@ -5704,6 +5791,7 @@ public:
         if (const auto value = settingsService.getString(preference_keys::RETENTION_LAST_RUN_UTC)) {
             if (const auto parsed = parseTimeUtcIso(*value)) {
                 lastRetentionRunAt = *parsed;
+                rawUsagePrunedBefore = rawUsageRetentionCutoff(*parsed);
             }
         }
     }
@@ -5725,7 +5813,7 @@ public:
 
         constexpr std::time_t kSecondsPerDay = 24 * 3600;
 
-        const std::time_t rawEventCutoff = now - (kRetentionRawEventDays * kSecondsPerDay);
+        const std::time_t rawEventCutoff = rawUsageRetentionCutoff(now);
         const std::time_t hourlyRollupCutoff = now - (kRetentionHourlyRollupDays * kSecondsPerDay);
         const std::time_t dailyRollupCutoff = now - (kRetentionDailyRollupDays * kSecondsPerDay);
         const std::time_t gapMarkerCutoff = now - (kRetentionGapMarkerDays * kSecondsPerDay);
@@ -5733,9 +5821,14 @@ public:
         JISTATS_LOG_INFO(LogCategory::Db, "Retention pass starting");
 
         bool allSucceeded = true;
-        if (!storageService.deleteUsageEventsOlderThan(rawEventCutoff)) {
-            JISTATS_LOG_WARN(LogCategory::Db, "Retention: failed to delete old usage events");
-            allSucceeded = false;
+        {
+            std::lock_guard<std::mutex> retentionLock(rawUsageRetentionMutex);
+            if (storageService.deleteUsageEventsOlderThan(rawEventCutoff)) {
+                rawUsagePrunedBefore = std::max(rawUsagePrunedBefore, rawEventCutoff);
+            } else {
+                JISTATS_LOG_WARN(LogCategory::Db, "Retention: failed to delete old usage events");
+                allSucceeded = false;
+            }
         }
         if (!storageService.deleteUsageRollupsOlderThan(
                 UsageRollupResolution::Hourly, hourlyRollupCutoff)) {
@@ -5797,47 +5890,56 @@ public:
         return shuttingDown;
     }
 
-    void queueMiniMaxCredentialValidation(
-        const std::string& planKey,
-        const MiniMaxSubscriptionCredentialProfile& profile) {
+    void queueMiniMaxCredentialValidation(const std::string& planKey, std::uint64_t revision,
+                                          std::shared_ptr<MiniMaxAdapter> adapter,
+                                          PreparedMiniMaxSubscriptionValidation validation) {
         std::lock_guard<std::mutex> lock(miniMaxValidationMutex);
-        miniMaxValidationThreads.emplace_back([this, planKey, profile]() {
 #ifdef JISTATS_ENABLE_TEST_HOOKS
-            if (miniMaxValidationReleaseForTesting.valid()) {
-                miniMaxValidationReleaseForTesting.wait();
-            }
+        if (miniMaxValidationReleaseForTesting.valid()) {
+            validation.validate = [release = miniMaxValidationReleaseForTesting,
+                                   validate = std::move(validation.validate)] {
+                release.wait();
+                return validate();
+            };
+        }
 #endif
 
+        miniMaxValidationThreads.emplace_back([this, planKey, revision, adapter = std::move(adapter),
+                                               validation = std::move(validation)]() {
             if (shouldStopMiniMaxValidation()) {
                 return;
             }
 
-            ensureMiniMaxCredentialAdapter();
-            const auto adapter = resolveMiniMaxRuntimeAdapter();
-            if (!adapter) {
-                return;
-            }
-
-            if (miniMaxCredentialStore) {
-                adapter->setCredentialStore(miniMaxCredentialStore);
-            }
-
-            adapter->setSubscriptionCredentialProfile(profile);
-            adapter->validateCredentials();
-
-            MiniMaxSubscriptionCredentialProfile validatedProfile =
-                adapter->getSubscriptionCredentialProfile();
+            auto validatedProfile = validation.validate();
             validatedProfile.lastValidationError =
                 normalizeMiniMaxValidationError(validatedProfile.lastValidationError);
 
-            std::string persistError;
-            if (!persistMiniMaxCredentialProfile(validatedProfile, persistError)) {
-                validatedProfile.validationState = "invalid";
-                validatedProfile.lastValidationError = persistError;
-            }
+            {
+                // Local writes and completions share this lock. Provider requests never hold it.
+                std::lock_guard<std::mutex> actionLock(miniMaxCredentialActionMutex);
+                if (shuttingDown || miniMaxCredentialRevisions.at(planKey) != revision) {
+                    return;
+                }
 
-            updateMiniMaxCredentialProfile(planKey, validatedProfile);
-            syncActiveMiniMaxRuntimeProfile(planKey);
+                const ProfileDatabaseLock profileLock(storageAvailable ? storageService.getDbPath() : "",
+                                                      kMiniMaxProfileLockName, 5000);
+                if (storageAvailable && !profileLock.ownsLock()) {
+                    validatedProfile.validationState = "unreachable";
+                    validatedProfile.lastValidatedAt = 0;
+                    validatedProfile.lastValidationError = "Profile busy. Retry validation.";
+                } else if (!validation.matchesCredential(*adapter)) {
+                    validatedProfile.validationState = "unknown";
+                    validatedProfile.lastValidatedAt = 0;
+                    validatedProfile.lastValidationError.clear();
+                } else {
+                    std::string persistError;
+                    if (!persistMiniMaxCredentialProfile(validatedProfile, persistError)) {
+                        validatedProfile.validationState = "invalid";
+                        validatedProfile.lastValidationError = persistError;
+                    }
+                }
+                updateMiniMaxCredentialProfile(planKey, validatedProfile);
+            }
 
             if (!shouldStopMiniMaxValidation()) {
                 refreshProviderRuntimeState(std::time(nullptr), true, true);
@@ -5893,9 +5995,9 @@ public:
                 account.accountDisplayName);
             profile.profileName = persisted->profileName;
             profile.secretRef = persisted->secretRef;
-            profile.validationState = "unknown";
+            profile.validationState = persisted->validationState;
             profile.lastValidatedAt = persisted->lastValidatedAt;
-            profile.lastValidationError.clear();
+            profile.lastValidationError = persisted->lastValidationError;
             updateMiniMaxCredentialProfile(planKey, profile);
         }
 
@@ -5946,47 +6048,50 @@ public:
         viewModel.minimaxCredentialProfiles = buildMiniMaxCredentialSummaries();
     }
 
+    bool openMiniMaxCredentialStorage() {
+        return miniMaxCredentialStorage.isOpen() || miniMaxCredentialStorage.init(storageService.getDbPath());
+    }
+
     bool persistMiniMaxCredentialProfile(const MiniMaxSubscriptionCredentialProfile& profile, std::string& error) {
         if (!storageAvailable) {
             error.clear();
             return true;
         }
+        if (!openMiniMaxCredentialStorage()) {
+            error = miniMaxCredentialStorage.getLastError();
+            return false;
+        }
 
-        const auto providerId = findProviderIdByKey(storageService, "minimax");
+        const auto providerId = findProviderIdByKey(miniMaxCredentialStorage, "minimax");
         if (!providerId.has_value()) {
             error = "MiniMax provider row is missing from storage";
             return false;
         }
 
         MiniMaxStoredAccountRecord account =
-            loadMiniMaxStoredAccount(storageService, *providerId, profile.planKey);
+            loadMiniMaxStoredAccount(miniMaxCredentialStorage, *providerId, profile.planKey);
         const std::string desiredDisplayName = profile.accountDisplayName.empty()
             ? minimaxDefaultAccountDisplayName(profile.planKey)
             : profile.accountDisplayName;
 
         if (!account.exists) {
-            QueryResult insert = storageService.execute(
+            QueryResult insert = miniMaxCredentialStorage.execute(
                 "INSERT INTO accounts (provider_id, account_key, display_name, scope_type, scope_identifier) "
                 "VALUES (?, ?, ?, ?, ?);",
-                {
-                    std::to_string(*providerId),
-                    minimaxAccountKey(profile.planKey),
-                    desiredDisplayName,
-                    "subscription",
-                    minimaxAccountKey(profile.planKey)
-                });
+                {std::to_string(*providerId), minimaxAccountKey(profile.planKey), desiredDisplayName, "subscription",
+                 minimaxAccountKey(profile.planKey)});
             if (!insert.success()) {
-                error = storageService.getLastError();
+                error = miniMaxCredentialStorage.getLastError();
                 return false;
             }
             account.accountId = static_cast<int>(insert.lastInsertRowId());
         } else if (account.accountDisplayName != desiredDisplayName) {
-            QueryResult update = storageService.execute(
+            QueryResult update = miniMaxCredentialStorage.execute(
                 "UPDATE accounts SET display_name = ?, updated_at_utc = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
                 "WHERE id = ?;",
                 {desiredDisplayName, std::to_string(account.accountId)});
             if (!update.success()) {
-                error = storageService.getLastError();
+                error = miniMaxCredentialStorage.getLastError();
                 return false;
             }
         }
@@ -6001,10 +6106,16 @@ public:
         persisted.credentialType = profile.credentialType.empty()
             ? "subscription_key"
             : profile.credentialType;
-        persisted.lastValidatedAt = profile.lastValidatedAt;
+        if (profile.lastValidatedAt > 0 &&
+            (profile.validationState == "valid" || profile.validationState == "invalid" ||
+             profile.validationState == "unreachable")) {
+            persisted.lastValidatedAt = profile.lastValidatedAt;
+            persisted.validationState = profile.validationState;
+            persisted.lastValidationError = miniMaxValidationErrorForStorage(profile);
+        }
 
-        if (!storageService.upsertCredentialProfile(persisted)) {
-            error = storageService.getLastError();
+        if (!miniMaxCredentialStorage.upsertCredentialProfile(persisted)) {
+            error = miniMaxCredentialStorage.getLastError();
             return false;
         }
 
@@ -6012,8 +6123,60 @@ public:
         return true;
     }
 
-    DashboardMiniMaxCredentialResult handleMiniMaxCredentialAction(
-        const DashboardMiniMaxCredentialRequest& request) {
+    bool clearMiniMaxValidation(const std::string& target, QueryResult& previous) {
+        auto& storage = miniMaxCredentialStorage;
+        // Own and commit this transaction before writing the secret to Credential Manager.
+        if (!openMiniMaxCredentialStorage() || !storage.beginTransaction(StorageService::TransactionMode::Immediate)) {
+            return false;
+        }
+
+        previous = storage.execute(
+            "SELECT id, validation_state, last_validation_error, last_validated_at_utc "
+            "FROM credential_profiles WHERE secret_ref = ? AND "
+            "(validation_state <> 'unknown' OR last_validation_error <> '' OR last_validated_at_utc IS NOT NULL);",
+            {target});
+        if (previous.success() &&
+            storage
+                .execute("UPDATE credential_profiles SET validation_state = 'unknown', last_validation_error = '', "
+                         "last_validated_at_utc = NULL WHERE secret_ref = ? AND "
+                         "(validation_state <> 'unknown' OR last_validation_error <> '' OR last_validated_at_utc IS "
+                         "NOT NULL);",
+                         {target})
+                .success() &&
+            storage.commitTransaction()) {
+            return true;
+        }
+
+        if (!storage.rollbackTransaction()) {
+            storage.close();
+        }
+        return false;
+    }
+
+    bool restoreMiniMaxValidation(const std::string& target, const QueryResult& previous) {
+        bool restored = true;
+        for (std::size_t row = 0; row < previous.rowCount(); ++row) {
+            const auto result = miniMaxCredentialStorage.execute(
+                "UPDATE credential_profiles SET validation_state = ?, last_validation_error = ?, "
+                "last_validated_at_utc = NULLIF(?, '') WHERE id = ? AND secret_ref = ? AND "
+                "validation_state = 'unknown' AND last_validation_error = '' AND last_validated_at_utc IS NULL;",
+                {previous.getString(row, 1), previous.getString(row, 2), previous.getString(row, 3),
+                 previous.getString(row, 0), target});
+            restored = result.success() && restored;
+        }
+        return restored;
+    }
+
+    DashboardMiniMaxCredentialResult handleMiniMaxCredentialAction(const DashboardMiniMaxCredentialRequest& request) {
+        const auto result = [&]() {
+            std::lock_guard<std::mutex> actionLock(miniMaxCredentialActionMutex);
+            return applyMiniMaxCredentialAction(request);
+        }();
+        refreshProviderRuntimeState(std::time(nullptr), true, true);
+        return result;
+    }
+
+    DashboardMiniMaxCredentialResult applyMiniMaxCredentialAction(const DashboardMiniMaxCredentialRequest& request) {
         DashboardMiniMaxCredentialResult result;
         result.planKey = request.planKey;
 
@@ -6028,7 +6191,16 @@ public:
             adapter->setCredentialStore(miniMaxCredentialStore);
         }
 
+        // Share the complete clear, credential write, and recovery sequence with peer instances.
+        const ProfileDatabaseLock profileLock(storageAvailable ? storageService.getDbPath() : "",
+                                              kMiniMaxProfileLockName, 0);
+        if (storageAvailable && !profileLock.ownsLock()) {
+            result.message = "Could not lock the MiniMax credential profile. Try again.";
+            return result;
+        }
+
         const std::string planKey = request.planKey == "token_plan" ? "token_plan" : "coding_plan";
+        auto& revision = miniMaxCredentialRevisions[planKey];
         const auto storedProfile = getMiniMaxCredentialProfile(planKey);
         MiniMaxSubscriptionCredentialProfile profile = storedProfile.has_value()
             ? *storedProfile
@@ -6040,19 +6212,47 @@ public:
             profile.accountDisplayName = minimaxDefaultAccountDisplayName(planKey);
         }
 
-        if (request.action == DashboardMiniMaxCredentialAction::Save) {
-            if (!adapter->storeSubscriptionCredential(profile, request.secret)) {
+        const bool save = request.action == DashboardMiniMaxCredentialAction::Save;
+        if (save || !request.secret.empty()) {
+            QueryResult previousValidation;
+            std::string target;
+            if (!request.secret.empty()) {
+                if (!storageAvailable) {
+                    result.message = "MiniMax credential changes require access to saved validation results.";
+                    return result;
+                }
+
+                target = profile.secretRef.empty() ? MiniMaxAdapter::buildSecretRef(profile) : profile.secretRef;
+                if (!clearMiniMaxValidation(target, previousValidation)) {
+                    result.message = "Could not clear the previous MiniMax validation result.";
+                    return result;
+                }
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+                if (afterMiniMaxValidationClearForTesting) {
+                    afterMiniMaxValidationClearForTesting();
+                }
+#endif
+                profile.lastValidatedAt = 0;
+            }
+
+            bool previousSecretPreserved = false;
+            if (!adapter->storeSubscriptionCredential(profile, request.secret, &previousSecretPreserved)) {
                 MiniMaxSubscriptionCredentialProfile failed = adapter->getSubscriptionCredentialProfile();
                 failed.lastValidationError = normalizeMiniMaxValidationError(failed.lastValidationError);
+                result.message =
+                    failed.lastValidationError.empty() ? "MiniMax credential save failed." : failed.lastValidationError;
+                if (previousSecretPreserved && restoreMiniMaxValidation(target, previousValidation)) {
+                    syncActiveMiniMaxRuntimeProfile(planKey);
+                    return result;
+                }
+
+                ++revision;
                 updateMiniMaxCredentialProfile(planKey, failed);
                 syncActiveMiniMaxRuntimeProfile(planKey);
-                result.message = failed.lastValidationError.empty()
-                    ? "MiniMax credential save failed."
-                    : failed.lastValidationError;
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
                 return result;
             }
 
+            ++revision;
             profile = adapter->getSubscriptionCredentialProfile();
             std::string persistError;
             if (!persistMiniMaxCredentialProfile(profile, persistError)) {
@@ -6061,41 +6261,15 @@ public:
                 updateMiniMaxCredentialProfile(planKey, profile);
                 syncActiveMiniMaxRuntimeProfile(planKey);
                 result.message = persistError;
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
                 return result;
             }
 
-            updateMiniMaxCredentialProfile(planKey, profile);
-            syncActiveMiniMaxRuntimeProfile(planKey);
-            result.success = true;
-            result.accountDisplayName = profile.accountDisplayName;
-            result.message = "Stored " + minimaxPlanDisplayName(planKey) + " credential.";
-            refreshProviderRuntimeState(std::time(nullptr), true, true);
-            return result;
-        }
-
-        if (!request.secret.empty()) {
-            if (!adapter->storeSubscriptionCredential(profile, request.secret)) {
-                MiniMaxSubscriptionCredentialProfile failed = adapter->getSubscriptionCredentialProfile();
-                failed.lastValidationError = normalizeMiniMaxValidationError(failed.lastValidationError);
-                updateMiniMaxCredentialProfile(planKey, failed);
-                syncActiveMiniMaxRuntimeProfile(planKey);
-                result.message = failed.lastValidationError.empty()
-                    ? "MiniMax credential save failed."
-                    : failed.lastValidationError;
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
-                return result;
-            }
-
-            profile = adapter->getSubscriptionCredentialProfile();
-            std::string persistError;
-            if (!persistMiniMaxCredentialProfile(profile, persistError)) {
-                profile.validationState = "invalid";
-                profile.lastValidationError = persistError;
+            if (save) {
                 updateMiniMaxCredentialProfile(planKey, profile);
                 syncActiveMiniMaxRuntimeProfile(planKey);
-                result.message = persistError;
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
+                result.success = true;
+                result.accountDisplayName = profile.accountDisplayName;
+                result.message = "Stored " + minimaxPlanDisplayName(planKey) + " credential.";
                 return result;
             }
         } else {
@@ -6107,21 +6281,21 @@ public:
                 missing.lastValidationError = "No MiniMax credential has been saved for this plan yet";
                 updateMiniMaxCredentialProfile(planKey, missing);
                 result.message = missing.lastValidationError;
-                refreshProviderRuntimeState(std::time(nullptr), true, true);
                 return result;
             }
             adapter->setSubscriptionCredentialProfile(profile);
+            ++revision;
         }
 
         profile.validationState = "pending";
         profile.lastValidationError.clear();
         updateMiniMaxCredentialProfile(planKey, profile);
         syncActiveMiniMaxRuntimeProfile(planKey);
-        queueMiniMaxCredentialValidation(planKey, profile);
+        queueMiniMaxCredentialValidation(planKey, revision, adapter,
+                                         adapter->prepareSubscriptionCredentialValidation(profile));
         result.success = true;
         result.accountDisplayName = profile.accountDisplayName;
         result.message = "Validating " + minimaxPlanDisplayName(planKey) + " credential...";
-        refreshProviderRuntimeState(std::time(nullptr), true, true);
         return result;
     }
 
@@ -6503,9 +6677,12 @@ public:
                     (provider.state == ProviderState::Stale ? "stale" : "online");
                 connectivity.failureCategory.clear();
                 connectivity.nextRetryAt = 0;
-                staged.fetchedRecovery =
-                    (provider.state == ProviderState::Live || provider.state == ProviderState::Stale) &&
-                    refresh.fetchedProviderKeys.count(provider.providerKey) != 0;
+                const bool usableUndatedClaude =
+                    provider.state == ProviderState::Unknown && provider.providerKey == "claude_code" &&
+                    provider.quotaSource == ClaudeCodeLocalParser::kProviderSurface && !provider.quotas.empty();
+                staged.fetchedRecovery = (provider.state == ProviderState::Live ||
+                                          provider.state == ProviderState::Stale || usableUndatedClaude) &&
+                                         refresh.fetchedProviderKeys.count(provider.providerKey) != 0;
 
                 syncState.lastSuccessAt = now;
                 syncState.lastFailureCategory.clear();
@@ -6774,12 +6951,19 @@ public:
             }
         }
 
-        // Rebuild usage rollups for the recovery range
-        if (!rebuildUsageRollupsForRange(storageService, recoveryStart, now) || exitRequested.load()) {
-            return false;
+        {
+            // Raw pruning must wait until the rebuild has finished using this cutoff.
+            std::lock_guard<std::mutex> retentionLock(rawUsageRetentionMutex);
+            const std::time_t rawEventCutoff =
+                std::max(rawUsagePrunedBefore, rawUsageRetentionCutoff(std::max(now, currentTime())));
+            if (!rebuildUsageRollupsForRange(storageService, recoveryStart, now, rawEventCutoff) ||
+                exitRequested.load()) {
+                return false;
+            }
         }
 
-        // Once gap writes start, finish the recovery marker update even if Exit arrives.
+        std::vector<PersistedGapMarker> gapMarkers;
+        gapMarkers.reserve(viewModel.providers.size());
         for (const auto& provider : viewModel.providers) {
             const auto providerId = findProviderIdByKey(storageService, provider.providerKey);
             const auto runtimeAccountId =
@@ -6808,12 +6992,17 @@ public:
                 marker.classification == GapClassification::Reconstructed
                     ? "provider_backfill"
                     : "runtime_recovery";
-            storageService.upsertGapMarker(marker);
+            gapMarkers.push_back(std::move(marker));
         }
 
+        // Once gap finalization starts, finish its transaction even if Exit arrives.
         runtimeState->recoveryMarker.clear();
         runtimeState->lastSuccessfulSyncAt = now;
-        storageService.upsertRuntimeState(*runtimeState);
+        if (!storageService.persistRecoveryCompletion(gapMarkers, *runtimeState)) {
+            JISTATS_LOG_WARN(LogCategory::Reconciliation,
+                             "Failed to finalize catch-up recovery: " + storageService.getLastError());
+            return false;
+        }
         markPersistedMetricSnapshotDirty(false);
         return true;
     }
@@ -6902,7 +7091,7 @@ public:
         if (!openCodexAttributionStorage()) {
             return false;
         }
-        const CodexProfileLock profileLock(codexAttributionStorage.getDbPath(), 5000);
+        const ProfileDatabaseLock profileLock(codexAttributionStorage.getDbPath(), kCodexProfileLockName, 5000);
         if (!profileLock.ownsLock()) {
             return false;
         }
@@ -6965,7 +7154,7 @@ public:
             return;
         }
 
-        const CodexProfileLock profileLock(codexAttributionStorage.getDbPath(), 0);
+        const ProfileDatabaseLock profileLock(codexAttributionStorage.getDbPath(), kCodexProfileLockName, 0);
         if (!profileLock.ownsLock() || readCodexAttributionGeneration() != generation || hasPendingCodexRevocation()) {
             return;
         }
@@ -7197,6 +7386,7 @@ public:
         }
         codexAttributionStorage.close();
         preferencesStorage.close();
+        miniMaxCredentialStorage.close();
         if (storageService.isOpen()) {
             storageService.close();
         }
@@ -7874,21 +8064,23 @@ bool AppController::init(bool launchInBackground) {
         pImpl->applyTaskbarPreference(viewModel.preferences);
 #endif
 
-        pImpl->startInteractionWorkThread();
-        if (pImpl->shouldQueueDeferredStartupRefresh(
-                loadedPreferences,
-                usedPersistedStartupHydration,
-                executedStartupCatchUp)) {
-            pImpl->queueDeferredStartupRefresh(
-                false,
-                pImpl->shouldImportLocalActivityDuringStartupRefresh(loadedPreferences));
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+        if (pImpl->runtimeWorkersEnabledForTesting)
+#endif
+        {
+            pImpl->startInteractionWorkThread();
+            if (pImpl->shouldQueueDeferredStartupRefresh(loadedPreferences, usedPersistedStartupHydration,
+                                                         executedStartupCatchUp)) {
+                pImpl->queueDeferredStartupRefresh(
+                    false, pImpl->shouldImportLocalActivityDuringStartupRefresh(loadedPreferences));
+            }
+            pImpl->startTaskbarRefreshWatcher();
+            pImpl->startOpenAICodexRefreshWatcher();
+            pImpl->startLocalProviderRefreshWatcher();
+            pImpl->startMiniMaxRefreshWatcher();
+            pImpl->startScheduledExportWatcher();
+            pImpl->startRetentionWatcher();
         }
-        pImpl->startTaskbarRefreshWatcher();
-        pImpl->startOpenAICodexRefreshWatcher();
-        pImpl->startLocalProviderRefreshWatcher();
-        pImpl->startMiniMaxRefreshWatcher();
-        pImpl->startScheduledExportWatcher();
-        pImpl->startRetentionWatcher();
 
         pImpl->state = "running";
         JISTATS_LOG_INFO(LogCategory::Startup, "JiStats initialized");
@@ -7933,6 +8125,10 @@ std::string AppController::getState() const {
 #ifdef JISTATS_ENABLE_TEST_HOOKS
 void AppController::setHeadlessForTesting(bool value) {
     pImpl->headlessForTesting = value;
+}
+
+void AppController::setRuntimeWorkersEnabledForTesting(bool value) {
+    pImpl->runtimeWorkersEnabledForTesting = value;
 }
 
 void AppController::setDisableTaskbarForTesting(bool value) {
@@ -8071,6 +8267,20 @@ bool AppController::submitMiniMaxCredentialActionForTesting(
     return pImpl->handleMiniMaxCredentialAction(request).success;
 }
 
+std::optional<bool> AppController::submitMiniMaxCredentialActionWithStorageRollbackForTesting(
+    const DashboardMiniMaxCredentialRequest& request) {
+    auto& storage = pImpl->storageService;
+    if (!storage.execute("BEGIN TRANSACTION;").success()) {
+        return std::nullopt;
+    }
+    std::lock_guard<std::mutex> actionLock(pImpl->miniMaxCredentialActionMutex);
+    const auto result = pImpl->applyMiniMaxCredentialAction(request);
+    if (!storage.execute("ROLLBACK;").success()) {
+        return std::nullopt;
+    }
+    return result.success;
+}
+
 std::string AppController::getMiniMaxSecretFieldTextForTesting() const {
     return pImpl->dashboardPresenter.getMiniMaxSecretFieldTextForTesting();
 }
@@ -8185,7 +8395,16 @@ void AppController::setMiniMaxValidationResponseForTesting(
 }
 
 void AppController::setMiniMaxValidationReleaseForTesting(std::shared_future<void> release) {
+    std::lock_guard<std::mutex> lock(pImpl->miniMaxValidationMutex);
     pImpl->miniMaxValidationReleaseForTesting = std::move(release);
+}
+
+void AppController::setAfterMiniMaxValidationClearForTesting(std::function<void()> callback) {
+    pImpl->afterMiniMaxValidationClearForTesting = std::move(callback);
+}
+
+void AppController::waitForMiniMaxValidationForTesting() {
+    pImpl->joinMiniMaxValidationThreads();
 }
 
 void AppController::setOpenAICodexRefreshPollIntervalForTesting(int intervalMs) {

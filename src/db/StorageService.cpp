@@ -2,6 +2,7 @@
 #include "core/LocalPathReference.hpp"
 #include "db/QueryResult.hpp"
 #include "db/SchemaManager.hpp"
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -318,7 +319,24 @@ struct QuotaRollupAggregate {
     int reconciledSampleCount = 0;
     std::string latestConfidenceTier = "Unknown";
     std::optional<std::pair<std::time_t, std::time_t>> previousWindow;
+    std::optional<std::pair<std::time_t, std::time_t>> lastRecordedWindow;
+    std::string observedBillingWindows;
 };
+
+std::optional<std::vector<std::pair<std::time_t, std::time_t>>>
+parseObservedBillingWindows(const std::string& encoded) {
+    std::istringstream stream(encoded);
+    std::vector<std::pair<std::time_t, std::time_t>> windows;
+    while (stream >> std::ws && !stream.eof()) {
+        std::time_t start = 0;
+        std::time_t end = 0;
+        if (!(stream >> start >> end)) {
+            return std::nullopt;
+        }
+        windows.emplace_back(start, end);
+    }
+    return windows;
+}
 
 std::optional<long long> normalizedQuotaRemainingValue(const PersistedQuotaSnapshot& snapshot) {
     if (snapshot.remainingValue.has_value()) {
@@ -758,7 +776,28 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
     }
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    static constexpr char claudeDailyActivityPredicate[] =
+        "provider_surface = 'claude_code_local_stats' AND activity_kind = 'session_active' "
+        "AND source_type = 'local' AND surface_key = 'stats-cache' AND raw_reference GLOB 'scope:fnv1a64:?*'";
     auto activityEventExists = [this](const PersistedActivityEvent& candidate) -> std::optional<bool> {
+        const auto& activity = candidate.activity;
+        const auto& reference = activity.rawReference;
+        if (activity.providerSurface == "claude_code_local_stats" &&
+            activity.activityKind == ActivityKind::SessionActive &&
+            (activity.sourceType.empty() || activity.sourceType == "local") && activity.surfaceKey == "stats-cache" &&
+            reference.size() > kLocalPathReferencePrefix.size() &&
+            reference.compare(0, kLocalPathReferencePrefix.size(), kLocalPathReferencePrefix) == 0) {
+            // A conflicting AUTOINCREMENT insert still advances sqlite_sequence.
+            static const std::string lookup =
+                std::string("SELECT 1 FROM activity_events WHERE provider_id = ? AND account_id = ? "
+                            "AND started_at_utc = ? AND raw_reference = ? AND ") +
+                claudeDailyActivityPredicate + " LIMIT 1";
+            const auto result =
+                execute(lookup, {std::to_string(candidate.providerId), std::to_string(candidate.accountId),
+                                 toUtcIsoString(activity.startedAt), reference});
+            return result.success() ? std::optional<bool>(result.rowCount() != 0) : std::nullopt;
+        }
+
         std::string sql = "SELECT 1 FROM activity_events "
                           "WHERE provider_id = ? AND account_id = ? AND ";
         std::vector<std::string> params = {
@@ -825,7 +864,6 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
 
         QueryResult result = execute(sql, params);
         if (!result.success()) {
-            pImpl->lastError = "Failed to check for duplicate activity event";
             return std::nullopt;
         }
 
@@ -834,6 +872,7 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
 
     const auto alreadyExists = activityEventExists(event);
     if (!alreadyExists.has_value()) {
+        pImpl->lastError = "Failed to check for duplicate activity event";
         return false;
     }
     if (*alreadyExists) {
@@ -841,14 +880,37 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
         return true;
     }
 
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql =
+    constexpr const char* insertSql =
         "INSERT INTO activity_events ("
         "provider_id, account_id, plan_id, provider_surface, activity_kind, started_at_utc, ended_at_utc, "
         "duration_seconds, source_type, source_run_id, surface_key, window_title_hint, confidence_tier, raw_reference"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    static const std::string insertWithClaudeConflictSql =
+        std::string(insertSql) + " ON CONFLICT(provider_id, account_id, started_at_utc, raw_reference) WHERE " +
+        claudeDailyActivityPredicate + " DO NOTHING;";
 
-    int rc = sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr);
+    // A task's runtime status and duration change during its lifetime, but its reference does not.
+    // Preserve terminal states even when a refresh replays an earlier, unfinished snapshot.
+    static const std::string upsertKimiTaskSql = std::string(insertSql) + R"sql(
+            ON CONFLICT(provider_id, account_id, raw_reference)
+            WHERE provider_surface = 'kimi_local_runtime' AND source_type = 'local'
+              AND activity_kind = 'session_active' AND raw_reference IS NOT NULL
+            DO UPDATE SET plan_id = excluded.plan_id, started_at_utc = excluded.started_at_utc,
+                          ended_at_utc = excluded.ended_at_utc, duration_seconds = excluded.duration_seconds,
+                          surface_key = excluded.surface_key, window_title_hint = excluded.window_title_hint
+            WHERE (COALESCE(lower(excluded.surface_key) IN ('completed', 'failed', 'killed', 'lost', 'succeeded', 'success'), 0),
+                   COALESCE(excluded.ended_at_utc, '')) >=
+                  (COALESCE(lower(activity_events.surface_key) IN ('completed', 'failed', 'killed', 'lost', 'succeeded', 'success'), 0),
+                   COALESCE(activity_events.ended_at_utc, ''))
+        )sql";
+
+    const std::string sourceType = event.activity.sourceType.empty() ? "local" : event.activity.sourceType;
+    const bool isKimiTask = event.activity.providerSurface == "kimi_local_runtime" && sourceType == "local" &&
+                            event.activity.activityKind == ActivityKind::SessionActive &&
+                            !event.activity.rawReference.empty();
+    const auto& sql = isKimiTask ? upsertKimiTaskSql : insertWithClaudeConflictSql;
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(pImpl->db, sql.c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         pImpl->lastError = "Failed to prepare activity event insert";
         return false;
@@ -864,7 +926,6 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
 
     const std::string startedAtUtc = toUtcIsoString(event.activity.startedAt);
     const std::string endedAtUtc = toUtcIsoString(event.activity.endedAt);
-    const std::string sourceType = event.activity.sourceType.empty() ? "local" : event.activity.sourceType;
 
     sqlite3_bind_text(stmt, 4, event.activity.providerSurface.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, toString(event.activity.activityKind).c_str(), -1, SQLITE_TRANSIENT);
@@ -898,7 +959,15 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
         sqlite3_bind_null(stmt, 14);
     }
 
+    // Keep the conflict result and insert ID tied to this step on the shared connection.
+    sqlite3_mutex* const dbMutex = sqlite3_db_mutex(pImpl->db);
+    sqlite3_mutex_enter(dbMutex);
     rc = sqlite3_step(stmt);
+    const bool readWrittenId = rc == SQLITE_DONE && insertedId && sqlite3_changes(pImpl->db) != 0;
+    if (readWrittenId && !isKimiTask) {
+        *insertedId = sqlite3_last_insert_rowid(pImpl->db);
+    }
+    sqlite3_mutex_leave(dbMutex);
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE) {
@@ -906,10 +975,20 @@ bool StorageService::insertActivityEvent(const PersistedActivityEvent& event, lo
         return false;
     }
 
-    pImpl->lastError.clear();
-    if (insertedId) {
-        *insertedId = sqlite3_last_insert_rowid(pImpl->db);
+    if (readWrittenId && isKimiTask) {
+        // Read the keyed ID after the upsert so system SQLite builds before 3.35 can save tasks.
+        const auto task =
+            execute("SELECT id FROM activity_events WHERE provider_id = ? AND account_id = ? AND raw_reference = ? "
+                    "AND provider_surface = 'kimi_local_runtime' AND source_type = 'local' AND activity_kind = "
+                    "'session_active';",
+                    {std::to_string(event.providerId), std::to_string(event.accountId), event.activity.rawReference});
+        if (!task.success() || task.rowCount() != 1) {
+            pImpl->lastError = "Failed to read activity event ID";
+            return false;
+        }
+        *insertedId = task.getInt64(0, 0);
     }
+    pImpl->lastError.clear();
     return true;
 #else
     pImpl->lastError = SQLITE_UNAVAILABLE_ERROR;
@@ -1624,6 +1703,42 @@ bool StorageService::upsertGapMarker(const PersistedGapMarker& marker, long long
 #endif
 }
 
+bool StorageService::persistRecoveryCompletion(const std::vector<PersistedGapMarker>& markers,
+                                               const PersistedRuntimeState& state) {
+#if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
+    if (!isOpen()) {
+        pImpl->lastError = "Database not open";
+        return false;
+    }
+
+    // Keep unrelated writes on this shared connection outside the recovery transaction.
+    sqlite3_mutex* const dbMutex = sqlite3_db_mutex(pImpl->db);
+    sqlite3_mutex_enter(dbMutex);
+    const std::unique_ptr<sqlite3_mutex, decltype(&sqlite3_mutex_leave)> releaseConnection(dbMutex,
+                                                                                           sqlite3_mutex_leave);
+    if (!beginTransaction(TransactionMode::Immediate)) {
+        pImpl->lastError = "Failed to start recovery completion transaction";
+        return false;
+    }
+
+    const bool saved =
+        std::all_of(markers.begin(), markers.end(), [this](const auto& marker) { return upsertGapMarker(marker); }) &&
+        upsertRuntimeState(state);
+    if (saved && commitTransaction()) {
+        return true;
+    }
+    std::string error = saved ? "Failed to commit recovery completion" : pImpl->lastError;
+    if (!rollbackTransaction()) {
+        error += ". Failed to roll back recovery completion";
+    }
+    pImpl->lastError = std::move(error);
+    return false;
+#else
+    pImpl->lastError = SQLITE_UNAVAILABLE_ERROR;
+    return false;
+#endif
+}
+
 std::vector<PersistedGapMarker> StorageService::getGapMarkers(
     int providerId,
     int accountId,
@@ -1856,15 +1971,17 @@ bool StorageService::upsertCredentialProfile(
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     sqlite3_stmt* stmt = nullptr;
-    const char* sql =
-        "INSERT INTO credential_profiles ("
-        "provider_id, account_id, profile_name, secret_ref, credential_type, last_validated_at_utc"
-        ") VALUES (?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(account_id, profile_name) DO UPDATE SET "
-        "secret_ref = excluded.secret_ref, "
-        "credential_type = excluded.credential_type, "
-        "last_validated_at_utc = excluded.last_validated_at_utc, "
-        "updated_at_utc = (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));";
+    const char* sql = "INSERT INTO credential_profiles ("
+                      "provider_id, account_id, profile_name, secret_ref, credential_type, last_validated_at_utc, "
+                      "validation_state, last_validation_error"
+                      ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                      "ON CONFLICT(account_id, profile_name) DO UPDATE SET "
+                      "secret_ref = excluded.secret_ref, "
+                      "credential_type = excluded.credential_type, "
+                      "last_validated_at_utc = excluded.last_validated_at_utc, "
+                      "validation_state = excluded.validation_state, "
+                      "last_validation_error = excluded.last_validation_error, "
+                      "updated_at_utc = (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));";
 
     if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         pImpl->lastError = "Failed to prepare credential profile upsert";
@@ -1882,6 +1999,8 @@ bool StorageService::upsertCredentialProfile(
     } else {
         sqlite3_bind_null(stmt, 6);
     }
+    sqlite3_bind_text(stmt, 7, profile.validationState.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, profile.lastValidationError.c_str(), -1, SQLITE_TRANSIENT);
 
     const int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -1911,10 +2030,9 @@ std::optional<PersistedCredentialProfile> StorageService::getCredentialProfile(
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     sqlite3_stmt* stmt = nullptr;
-    const char* sql =
-        "SELECT id, provider_id, account_id, profile_name, secret_ref, credential_type, "
-        "created_at_utc, updated_at_utc, last_validated_at_utc "
-        "FROM credential_profiles WHERE account_id = ? AND profile_name = ? LIMIT 1;";
+    const char* sql = "SELECT id, provider_id, account_id, profile_name, secret_ref, credential_type, "
+                      "created_at_utc, updated_at_utc, last_validated_at_utc, validation_state, last_validation_error "
+                      "FROM credential_profiles WHERE account_id = ? AND profile_name = ? LIMIT 1;";
 
     if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         pImpl->lastError = "Failed to prepare credential profile query";
@@ -1951,6 +2069,10 @@ std::optional<PersistedCredentialProfile> StorageService::getCredentialProfile(
     profile.createdAtUtc = createdAtUtc ? createdAtUtc : "";
     profile.updatedAtUtc = updatedAtUtc ? updatedAtUtc : "";
     profile.lastValidatedAt = parseUtcOrZero(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8)));
+    const auto validationState = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+    const auto lastValidationError = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+    profile.validationState = validationState ? validationState : "unknown";
+    profile.lastValidationError = lastValidationError ? lastValidationError : "";
 
     sqlite3_finalize(stmt);
     pImpl->lastError.clear();
@@ -1969,10 +2091,9 @@ std::vector<PersistedCredentialProfile> StorageService::getCredentialProfiles(in
 
 #if defined(JISTATS_USE_SYSTEM_SQLITE) || defined(JISTATS_HAS_SQLITE)
     sqlite3_stmt* stmt = nullptr;
-    const char* sql =
-        "SELECT id, provider_id, account_id, profile_name, secret_ref, credential_type, "
-        "created_at_utc, updated_at_utc, last_validated_at_utc "
-        "FROM credential_profiles WHERE account_id = ? ORDER BY profile_name ASC;";
+    const char* sql = "SELECT id, provider_id, account_id, profile_name, secret_ref, credential_type, "
+                      "created_at_utc, updated_at_utc, last_validated_at_utc, validation_state, last_validation_error "
+                      "FROM credential_profiles WHERE account_id = ? ORDER BY profile_name ASC;";
 
     if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         pImpl->lastError = "Failed to prepare credential profile list query";
@@ -1999,6 +2120,10 @@ std::vector<PersistedCredentialProfile> StorageService::getCredentialProfiles(in
         profile.createdAtUtc = createdAtUtc ? createdAtUtc : "";
         profile.updatedAtUtc = updatedAtUtc ? updatedAtUtc : "";
         profile.lastValidatedAt = parseUtcOrZero(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8)));
+        const auto validationState = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        const auto lastValidationError = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        profile.validationState = validationState ? validationState : "unknown";
+        profile.lastValidationError = lastValidationError ? lastValidationError : "";
         profiles.push_back(std::move(profile));
     }
 
@@ -2213,11 +2338,10 @@ std::vector<PersistedUsageRollup> StorageService::getUsageRollups(
     return rollups;
 }
 
-std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
-    int providerId,
-    int accountId,
-    std::time_t snapshotTimeFrom,
-    std::time_t snapshotTimeTo) {
+std::vector<PersistedQuotaSnapshot>
+StorageService::getQuotaSnapshots(int providerId, int accountId, std::time_t snapshotTimeFrom,
+                                  std::time_t snapshotTimeTo,
+                                  std::optional<std::pair<std::time_t, std::time_t>> skipReplayableRollupDays) {
     std::vector<PersistedQuotaSnapshot> snapshots;
     if (!isOpen() ||
         providerId <= 0 ||
@@ -2228,7 +2352,7 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
         return snapshots;
     }
 
-    QueryResult result = execute(
+    std::string sql =
         "SELECT qs.id, qs.provider_id, qs.account_id, qs.plan_id, qs.snapshot_time_utc, "
         "qs.window_start_utc, qs.window_end_utc, qs.used_value, qs.limit_value, qs.remaining_value, "
         "qs.confidence_tier, qs.quota_dimension, qs.is_reconciled, COALESCE(qs.basis_summary, ''), qs.created_at_utc, "
@@ -2236,10 +2360,26 @@ std::vector<PersistedQuotaSnapshot> StorageService::getQuotaSnapshots(
         "qs.snapshot_subsecond_ns "
         "FROM quota_snapshots qs "
         "LEFT JOIN plans pl ON pl.id = qs.plan_id AND pl.account_id = qs.account_id "
-        "WHERE qs.provider_id = ? AND qs.account_id = ? AND qs.snapshot_time_utc >= ? AND qs.snapshot_time_utc <= ? "
-        "ORDER BY qs.snapshot_time_utc ASC, qs.snapshot_subsecond_ns ASC, qs.id ASC;",
-        {std::to_string(providerId), std::to_string(accountId), toUtcIsoString(snapshotTimeFrom),
-         toUtcIsoString(snapshotTimeTo)});
+        "WHERE qs.provider_id = ? AND qs.account_id = ? AND qs.snapshot_time_utc >= ? AND qs.snapshot_time_utc <= ?";
+    std::vector<std::string> params{std::to_string(providerId), std::to_string(accountId),
+                                    toUtcIsoString(snapshotTimeFrom), toUtcIsoString(snapshotTimeTo)};
+    if (skipReplayableRollupDays) {
+        // Limit to missing reset evidence without transferring raw samples represented by complete daily rollups.
+        sql += " AND NOT EXISTS (SELECT 1 FROM quota_snapshot_rollups_daily r "
+               "WHERE r.provider_id = qs.provider_id AND r.account_id = qs.account_id "
+               "AND r.plan_bucket_id = COALESCE(qs.plan_id, 0) "
+               "AND r.quota_dimension = CASE "
+               "WHEN pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB "
+               "'openai_subscription_codex_local:*' "
+               "THEN 'percent' ELSE COALESCE(NULLIF(qs.quota_dimension, ''), 'requests') END "
+               "AND r.rollup_period_start_utc = substr(qs.snapshot_time_utc, 1, 10) || 'T00:00:00Z' "
+               "AND r.rollup_period_start_utc BETWEEN ? AND ? AND r.observed_billing_windows IS NOT NULL "
+               "AND r.latest_limit_value > 0 AND qs.snapshot_time_utc <= r.latest_snapshot_time_utc)";
+        params.push_back(toUtcIsoString(skipReplayableRollupDays->first));
+        params.push_back(toUtcIsoString(skipReplayableRollupDays->second));
+    }
+    sql += " ORDER BY qs.snapshot_time_utc ASC, qs.snapshot_subsecond_ns ASC, qs.id ASC;";
+    QueryResult result = execute(sql, params);
     if (!result.success()) {
         pImpl->lastError = "Failed to query quota snapshots";
         return snapshots;
@@ -2383,12 +2523,26 @@ bool StorageService::rebuildQuotaSnapshotRollups(
             ++aggregate.resetCount;
         }
 
+        // Replay the same eligible observations as raw Analysis. Repeating the same bounds cannot change the state.
+        const auto window = std::make_pair(snapshot.windowStart, snapshot.windowEnd);
+        if (snapshot.limitValue && *snapshot.limitValue > 0 &&
+            (snapshot.quotaDimension != "percent" || window.first > 0 || window.second > 0) &&
+            aggregate.lastRecordedWindow != window) {
+            aggregate.lastRecordedWindow = window;
+            aggregate.observedBillingWindows.append(std::to_string(window.first)).push_back(' ');
+            aggregate.observedBillingWindows.append(std::to_string(window.second)).push_back(' ');
+        }
+
         const auto remainingValue = normalizedQuotaRemainingValue(snapshot);
-        if (remainingValue.has_value() &&
-            (!aggregate.lowWaterRemainingValue.has_value() ||
-             *remainingValue < *aggregate.lowWaterRemainingValue)) {
-            aggregate.lowWaterRemainingValue = remainingValue;
-            aggregate.lowWaterLimitValue = snapshot.limitValue;
+        if (remainingValue && snapshot.limitValue && *snapshot.limitValue > 0) {
+            const auto limit = *snapshot.limitValue;
+            const auto boundedRemaining = std::min(*remainingValue, limit);
+            const double fraction = static_cast<double>(boundedRemaining) / limit;
+            if (!aggregate.lowWaterRemainingValue ||
+                fraction < static_cast<double>(*aggregate.lowWaterRemainingValue) / *aggregate.lowWaterLimitValue) {
+                aggregate.lowWaterRemainingValue = boundedRemaining;
+                aggregate.lowWaterLimitValue = limit;
+            }
         }
 
         if (snapshot.snapshotTime >= aggregate.latestSnapshotTime) {
@@ -2410,14 +2564,13 @@ bool StorageService::rebuildQuotaSnapshotRollups(
             continue;
         }
 
-        std::string sql =
-            "INSERT INTO quota_snapshot_rollups_daily ("
-            "provider_id, account_id, plan_bucket_id, quota_dimension, rollup_period_start_utc, "
-            "sample_count, latest_snapshot_time_utc, latest_window_start_utc, latest_window_end_utc, "
-            "latest_used_value, latest_limit_value, latest_remaining_value, "
-            "low_water_remaining_value, low_water_limit_value, reset_count, "
-            "reconciled_sample_count, latest_confidence_tier"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ";
+        std::string sql = "INSERT INTO quota_snapshot_rollups_daily ("
+                          "provider_id, account_id, plan_bucket_id, quota_dimension, rollup_period_start_utc, "
+                          "sample_count, latest_snapshot_time_utc, latest_window_start_utc, latest_window_end_utc, "
+                          "latest_used_value, latest_limit_value, latest_remaining_value, "
+                          "low_water_remaining_value, low_water_limit_value, reset_count, "
+                          "reconciled_sample_count, latest_confidence_tier, observed_billing_windows"
+                          ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ";
         sql += aggregate.latestLimitValue.has_value() ? "?" : "NULL";
         sql += ", ";
         sql += aggregate.latestRemainingValue.has_value() ? "?" : "NULL";
@@ -2425,7 +2578,7 @@ bool StorageService::rebuildQuotaSnapshotRollups(
         sql += aggregate.lowWaterRemainingValue.has_value() ? "?" : "NULL";
         sql += ", ";
         sql += aggregate.lowWaterLimitValue.has_value() ? "?" : "NULL";
-        sql += ", ?, ?, ?);";
+        sql += ", ?, ?, ?, ?);";
 
         std::vector<std::string> params = {
             std::to_string(providerId),
@@ -2454,6 +2607,7 @@ bool StorageService::rebuildQuotaSnapshotRollups(
         params.push_back(std::to_string(aggregate.resetCount));
         params.push_back(std::to_string(aggregate.reconciledSampleCount));
         params.push_back(aggregate.latestConfidenceTier);
+        params.push_back(aggregate.observedBillingWindows);
 
         const QueryResult insertResult = execute(sql, params);
         if (!insertResult.success()) {
@@ -2494,7 +2648,8 @@ std::vector<PersistedQuotaSnapshotRollup> StorageService::getQuotaSnapshotRollup
         "r.latest_used_value, r.latest_limit_value, r.latest_remaining_value, r.low_water_remaining_value, "
         "r.low_water_limit_value, r.reset_count, r.reconciled_sample_count, r.latest_confidence_tier, "
         "r.created_at_utc, r.updated_at_utc, "
-        "(pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB 'openai_subscription_codex_local:*') "
+        "(pl.plan_key = 'openai_subscription_codex_local' OR pl.plan_key GLOB 'openai_subscription_codex_local:*'), "
+        "r.observed_billing_windows "
         "FROM quota_snapshot_rollups_daily r "
         "LEFT JOIN plans pl ON pl.id = r.plan_bucket_id AND pl.account_id = r.account_id "
         "WHERE r.provider_id = ? AND r.account_id = ? AND r.rollup_period_start_utc >= ? "
@@ -2544,6 +2699,9 @@ std::vector<PersistedQuotaSnapshotRollup> StorageService::getQuotaSnapshotRollup
         rollup.latestConfidenceTier = result.getString(row, 17);
         rollup.createdAtUtc = result.getString(row, 18);
         rollup.updatedAtUtc = result.getString(row, 19);
+        if (!result.isNull(row, 21)) {
+            rollup.observedBillingWindows = parseObservedBillingWindows(result.getString(row, 21));
+        }
         rollups.push_back(std::move(rollup));
     }
 

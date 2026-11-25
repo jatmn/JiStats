@@ -1,9 +1,29 @@
 #include "providers/claude/ClaudeCodeAdapter.hpp"
+#include "core/RuntimeStatus.hpp"
 #include "providers/claude/ClaudeCodeLocalParser.hpp"
 #include <algorithm>
 #include <filesystem>
+#include <limits>
 
 namespace JiStats {
+
+namespace {
+
+std::optional<long long> sumModelTokens(const std::vector<ClaudeCodeModelAggregate>& models) {
+    long long total = 0;
+    for (const auto& model : models) {
+        for (const auto tokens :
+             {model.inputTokens, model.outputTokens, model.cacheReadInputTokens, model.cacheCreationInputTokens}) {
+            if (tokens > std::numeric_limits<long long>::max() - total) {
+                return std::nullopt;
+            }
+            total += tokens;
+        }
+    }
+    return total;
+}
+
+} // namespace
 
 struct ClaudeCodeAdapter::Impl {
 public:
@@ -65,6 +85,36 @@ UsageResponse ClaudeCodeAdapter::fetchUsage(std::time_t from, std::time_t to) {
     return response;
 }
 
+namespace {
+
+std::time_t cacheSnapshotTime(const ClaudeCodeLocalParseResult& result) {
+    const auto& date = result.lastComputedDate;
+    if (date.size() != 10) {
+        return 0;
+    }
+
+    const auto snapshotTime = parseRuntimeTimestamp(date + "T00:00:00Z");
+    if (snapshotTime <= 0 || snapshotTime > result.parsedAt) {
+        return 0;
+    }
+
+    std::tm utcDate{};
+#ifdef _WIN32
+    if (gmtime_s(&utcDate, &snapshotTime) != 0) {
+#else
+    if (gmtime_r(&snapshotTime, &utcDate) == nullptr) {
+#endif
+        return 0;
+    }
+
+    // Reject calendar dates that the timestamp parser normalized into a different day.
+    char canonicalDate[11]{};
+    std::strftime(canonicalDate, sizeof(canonicalDate), "%Y-%m-%d", &utcDate);
+    return date == canonicalDate ? snapshotTime : 0;
+}
+
+} // namespace
+
 QuotaResponse ClaudeCodeAdapter::fetchQuota() {
     QuotaResponse response;
 
@@ -85,17 +135,21 @@ QuotaResponse ClaudeCodeAdapter::fetchQuota() {
         return response;
     }
 
+    const auto totalTokens = result.hasModelTokenCounts ? sumModelTokens(result.modelUsage) : std::nullopt;
+    if (!totalTokens && !result.totalMessages) {
+        pImpl->lastError = "Claude stats-cache has no usable aggregate activity counters";
+        response.error = pImpl->lastError;
+        response.unavailable = true;
+        return response;
+    }
+
     response.success = true;
-    response.snapshotTime = result.parsedAt;
+    response.snapshotTime = cacheSnapshotTime(result);
     response.providerSurface = ClaudeCodeLocalParser::kProviderSurface;
     response.windowType = "local_aggregate";
 
-    // Use total tokens as the "used" metric when available; fall back to total messages.
-    long long totalTokens = 0;
-    for (const auto& model : result.modelUsage) {
-        totalTokens += model.inputTokens + model.outputTokens + model.cacheReadInputTokens + model.cacheCreationInputTokens;
-    }
-    response.used = totalTokens > 0 ? totalTokens : result.totalMessages;
+    // Prefer a positive token total, then the message count. A measured token total can also be zero.
+    response.used = totalTokens && *totalTokens > 0 ? *totalTokens : result.totalMessages.value_or(0);
 
     // Local files do not contain limit/remaining; keep them at 0 to signal unknown.
     response.limit = 0;

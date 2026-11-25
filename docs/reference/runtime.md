@@ -27,7 +27,9 @@ A dismissible offline notice offers retry and dismiss actions. JiStats shows the
 
 A dismissal follows the offline episode when the failing provider changes. When no provider reports Offline, a fresh usable provider quota API response clears the saved dismissal for every provider, including omitted providers. A provider that returns fresh recovery evidence from a local read clears only its own dismissal when no provider reports Offline. An omitted provider retains its dismissal in that case. Cached quota, empty refreshes, sample-only results, and local reads by other providers can preserve the dismissal.
 
-Recovery uses connectivity, sync, and checkpoint records and annotates periods of missing coverage. Use local evidence or provider backfill where supported. Preserve unknown gaps when evidence is absent and avoid double counting when sources overlap. [Storage and schema](storage.md) describes the persisted history.
+Recovery uses connectivity, sync, and checkpoint records and annotates periods of missing coverage. Use local evidence or provider backfill where supported. Preserve unknown gaps when evidence is absent and avoid double counting when sources overlap. Recovery commits its gap markers and completion time together. If either write fails, the original catch-up marker stays saved for retry. [Storage and schema](storage.md) describes the persisted history.
+
+Catch-up rebuilds usage rollups only for UTC hourly and daily buckets that start at or after the raw-event retention cutoff. If the cutoff falls within a bucket, its saved total is preserved. Catch-up accounts for the previous completed retention pass if the system clock moves backward.
 
 ## Monitoring cost
 

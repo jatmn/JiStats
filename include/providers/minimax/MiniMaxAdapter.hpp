@@ -2,11 +2,16 @@
 
 #include "providers/IProviderAdapter.hpp"
 #include "platform/WindowsCredentialStore.hpp"
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 
 namespace JiStats {
+
+#ifdef JISTATS_ENABLE_TEST_HOOKS
+class HttpResponse;
+#endif
 
 struct MiniMaxSubscriptionCredentialProfile {
     std::string providerKey = "minimax";
@@ -30,6 +35,8 @@ struct MiniMaxSubscriptionPollingConfig {
     std::string endpointPath;
     std::string bearerToken;
 };
+
+struct PreparedMiniMaxSubscriptionValidation;
 
 class MiniMaxAdapter : public IProviderAdapter {
 public:
@@ -59,9 +66,10 @@ public:
 
     void setSubscriptionCredentialProfile(const MiniMaxSubscriptionCredentialProfile& profile);
     MiniMaxSubscriptionCredentialProfile getSubscriptionCredentialProfile() const;
-    bool storeSubscriptionCredential(
-        const MiniMaxSubscriptionCredentialProfile& profile,
-        const std::string& secret);
+    bool storeSubscriptionCredential(const MiniMaxSubscriptionCredentialProfile& profile, const std::string& secret,
+                                     bool* previousSecretPreserved = nullptr);
+    PreparedMiniMaxSubscriptionValidation
+    prepareSubscriptionCredentialValidation(const MiniMaxSubscriptionCredentialProfile& profile);
     std::optional<MiniMaxSubscriptionPollingConfig> resolveSubscriptionPollingConfig(
         std::string& error);
     void setCredentialStore(std::shared_ptr<WindowsCredentialStore> credentialStore);
@@ -76,6 +84,8 @@ public:
     void setMockUsageResponse(const std::string& jsonResponse);
 
 #ifdef JISTATS_ENABLE_TEST_HOOKS
+    using ValidationTransport = std::function<HttpResponse(const std::string&, const std::string&)>;
+    void setMockValidationTransport(ValidationTransport transport);
     void setMockValidationResponse(bool success, int statusCode,
         const std::string& body = "", const std::string& error = "");
     std::string getLastResolvedEndpointForTesting() const;
@@ -84,6 +94,11 @@ public:
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl;
+};
+
+struct PreparedMiniMaxSubscriptionValidation {
+    std::function<MiniMaxSubscriptionCredentialProfile()> validate;
+    std::function<bool(MiniMaxAdapter&)> matchesCredential;
 };
 
 } // namespace JiStats

@@ -96,6 +96,13 @@ bool indexExists(StorageService& storage, const std::string& indexName) {
     return result.success() && result.rowCount() == 1;
 }
 
+void removeCredentialValidationColumns(StorageService& storage) {
+    REQUIRE(storage
+                .execute("ALTER TABLE credential_profiles DROP COLUMN last_validation_error;"
+                         "ALTER TABLE credential_profiles DROP COLUMN validation_state;")
+                .success());
+}
+
 void removeHistoricalAnalysisSchema(StorageService& storage) {
     REQUIRE(storage.execute("DROP TABLE recovery_checkpoints; DROP TABLE export_runs;").success());
     for (const std::string table : {"usage_rollups_hourly", "usage_rollups_daily"}) {
@@ -242,12 +249,12 @@ int installCompactionFailure(sqlite3* db, char**, const sqlite3_api_routines*) {
 
 } // namespace
 
-TEST_CASE("SchemaManager::getLatestVersion includes the bundled quota precision migration", "[schema]") {
+TEST_CASE("SchemaManager::getLatestVersion includes the bundled Cursor quota history migration", "[schema]") {
     StorageService storage;
     SchemaManager manager(storage);
 
     int latest = manager.getLatestVersion();
-    REQUIRE(latest == 15);
+    REQUIRE(latest == 20);
 }
 
 TEST_CASE("SchemaManager::getStatus reports version info", "[schema]") {
@@ -257,6 +264,36 @@ TEST_CASE("SchemaManager::getStatus reports version info", "[schema]") {
     std::string status = manager.getStatus();
     // Should contain version numbers
     REQUIRE(status.find("Schema version") != std::string::npos);
+}
+
+TEST_CASE("StorageService preserves MiniMax credential metadata from schema 18", "[schema][migration][minimax]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
+    REQUIRE(storage
+                .execute(R"sql(
+        DELETE FROM schema_version WHERE version >= 19;
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
+        SELECT 88, id, 'coding_plan.default', 'Fixture', 'subscription', 'coding_plan.default'
+        FROM providers WHERE provider_key = 'minimax';
+        INSERT INTO credential_profiles (provider_id, account_id, profile_name, secret_ref, credential_type,
+                                         last_validated_at_utc)
+        SELECT id, 88, 'MiniMax Coding Plan', 'fixture-reference', 'subscription_key', '2024-04-23T22:00:00Z'
+        FROM providers WHERE provider_key = 'minimax';
+    )sql")
+                .success());
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    const auto profile = storage.getCredentialProfile(88, "MiniMax Coding Plan");
+    REQUIRE(profile.has_value());
+    CHECK(profile->credentialType == "subscription_key");
+    CHECK(profile->secretRef == "fixture-reference");
+    CHECK(profile->lastValidatedAt == 1713909600);
+    CHECK(profile->validationState == "unknown");
+    CHECK(profile->lastValidationError.empty());
 }
 
 TEST_CASE("SchemaManager::needsMigration without DB", "[schema]") {
@@ -277,7 +314,7 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(storage.init(tempDb.path()));
 
     SchemaManager manager(storage);
-    REQUIRE(manager.getCurrentVersion() == 15);
+    REQUIRE(manager.getCurrentVersion() == 20);
     REQUIRE_FALSE(manager.needsMigration());
 
     REQUIRE(tableExists(storage, "activity_events"));
@@ -314,6 +351,7 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
     REQUIRE(columnExists(storage, "export_runs", "provider_filter_csv"));
     REQUIRE(columnExists(storage, "export_runs", "account_filter_csv"));
     REQUIRE(columnExists(storage, "quota_snapshot_rollups_daily", "sample_count"));
+    REQUIRE(columnExists(storage, "quota_snapshot_rollups_daily", "observed_billing_windows"));
     REQUIRE(columnExists(storage, "quota_snapshot_rollups_daily", "latest_remaining_value"));
     REQUIRE(columnExists(storage, "quota_snapshot_rollups_daily", "low_water_remaining_value"));
     REQUIRE(indexExists(storage, "idx_recovery_checkpoints_provider_account_kind_attempt"));
@@ -327,11 +365,16 @@ TEST_CASE("SchemaManager migrates storage baseline tables and quota metadata whe
 
     auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 4);
+    REQUIRE(versions.rowCount() == 9);
     CHECK(versions.getInt(0, 0) == 12);
     CHECK(versions.getInt(1, 0) == 13);
     CHECK(versions.getInt(2, 0) == 14);
     CHECK(versions.getInt(3, 0) == 15);
+    CHECK(versions.getInt(4, 0) == 16);
+    CHECK(versions.getInt(5, 0) == 17);
+    CHECK(versions.getInt(6, 0) == 18);
+    CHECK(versions.getInt(7, 0) == 19);
+    CHECK(versions.getInt(8, 0) == 20);
 
     auto providers = storage.execute("SELECT provider_key FROM providers ORDER BY id;");
     REQUIRE(providers.success());
@@ -370,15 +413,20 @@ TEST_CASE("StorageService preserves database settings on reopen without rewritin
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    CHECK(manager.getCurrentVersion() == 15);
+    CHECK(manager.getCurrentVersion() == 20);
     CHECK_FALSE(manager.needsMigration());
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
     REQUIRE(versions.success());
-    REQUIRE(versions.rowCount() == 4);
+    REQUIRE(versions.rowCount() == 9);
     CHECK(versions.getInt(0, 0) == 12);
     CHECK(versions.getInt(1, 0) == 13);
     CHECK(versions.getInt(2, 0) == 14);
     CHECK(versions.getInt(3, 0) == 15);
+    CHECK(versions.getInt(4, 0) == 16);
+    CHECK(versions.getInt(5, 0) == 17);
+    CHECK(versions.getInt(6, 0) == 18);
+    CHECK(versions.getInt(7, 0) == 19);
+    CHECK(versions.getInt(8, 0) == 20);
     CHECK(settings.getBool("ui.taskbar_overlay_enabled") == false);
     CHECK(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     storage.close();
@@ -392,8 +440,10 @@ TEST_CASE(
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
-                .execute("DELETE FROM schema_version WHERE version >= 13;"
+                .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
+                         "DELETE FROM schema_version WHERE version >= 13;"
                          "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
                 .success());
     REQUIRE(storage.execute("DELETE FROM providers WHERE provider_key = 'grok';").success());
@@ -420,8 +470,10 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
-                .execute("DELETE FROM schema_version WHERE version >= 13;"
+                .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
+                         "DELETE FROM schema_version WHERE version >= 13;"
                          "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
                 .success());
 
@@ -454,12 +506,17 @@ TEST_CASE("StorageService reconciles either historical version 12 schema in plac
     REQUIRE(storage.init(tempDb.path()));
     REQUIRE(settings.getString("ui.last_selected_provider_id") == std::optional<std::string>("minimax"));
     const auto versions = storage.execute("SELECT version FROM schema_version ORDER BY version;");
-    REQUIRE(versions.rowCount() == 5);
+    REQUIRE(versions.rowCount() == 10);
     CHECK(versions.getInt(0, 0) == 10);
     CHECK(versions.getInt(1, 0) == 12);
     CHECK(versions.getInt(2, 0) == 13);
     CHECK(versions.getInt(3, 0) == 14);
     CHECK(versions.getInt(4, 0) == 15);
+    CHECK(versions.getInt(5, 0) == 16);
+    CHECK(versions.getInt(6, 0) == 17);
+    CHECK(versions.getInt(7, 0) == 18);
+    CHECK(versions.getInt(8, 0) == 19);
+    CHECK(versions.getInt(9, 0) == 20);
     const auto kimi = storage.execute("SELECT enabled FROM providers WHERE provider_key = 'kimi';");
     REQUIRE(kimi.rowCount() == 1);
     CHECK(kimi.getBool(0, 0) == hadAnalysisMigration);
@@ -509,8 +566,10 @@ TEST_CASE("StorageService upgrades legacy Claude references without reading the 
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute(R"sql(
+        ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;
         DELETE FROM schema_version WHERE version >= 13;
         ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;
         INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier) VALUES
@@ -587,7 +646,7 @@ TEST_CASE("StorageService upgrades legacy Claude references without reading the 
 
     REQUIRE(storage.init(tempDb.path()));
     SchemaManager manager(storage);
-    CHECK(manager.getCurrentVersion() == 15);
+    CHECK(manager.getCurrentVersion() == 20);
     constexpr auto hashedPath = "scope:fnv1a64:1370ad0dcd1472bd";
     const auto activity =
         storage.execute("SELECT id, raw_reference, duration_seconds FROM activity_events ORDER BY id;");
@@ -626,8 +685,10 @@ TEST_CASE("StorageService supports overlapping opens during historical baseline 
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
-                .execute("DELETE FROM schema_version WHERE version >= 13;"
+                .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
+                         "DELETE FROM schema_version WHERE version >= 13;"
                          "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
                 .success());
     SettingsService settings(storage);
@@ -678,8 +739,10 @@ TEST_CASE("StorageService supports overlapping WAL opens during the Claude upgra
     const auto journalMode = storage.execute("PRAGMA main.journal_mode = WAL;");
     REQUIRE(journalMode.success());
     REQUIRE(journalMode.getString(0, 0) == "wal");
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
-                .execute("DELETE FROM schema_version WHERE version >= 13;"
+                .execute("ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;"
+                         "DELETE FROM schema_version WHERE version >= 13;"
                          "ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;")
                 .success());
     storage.close();
@@ -698,7 +761,7 @@ TEST_CASE("StorageService supports overlapping WAL opens during the Claude upgra
         if (!timeout.success() || timeout.rowCount() != 1 || timeout.getInt(0, 0) != 5000) {
             return std::string("The upgrade did not restore the connection busy timeout");
         }
-        return SchemaManager(connection).getCurrentVersion() == 15 ? std::string{}
+        return SchemaManager(connection).getCurrentVersion() == 20 ? std::string{}
                                                                    : "The schema upgrade did not finish";
     };
 
@@ -810,8 +873,10 @@ TEST_CASE("StorageService repairs duplicate ChatGPT messages when opening a vers
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute(R"sql(
+        ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;
         DELETE FROM schema_version WHERE version > 13;
         ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;
         INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
@@ -859,7 +924,7 @@ TEST_CASE("StorageService repairs duplicate ChatGPT messages when opening a vers
     CHECK(stored.getString(0, 1) == "first-export");
     CHECK(stored.getString(1, 1) == "renamed-copy");
     CHECK(stored.getString(4, 1) == "separate-export");
-    CHECK(SchemaManager(storage).getCurrentVersion() == 15);
+    CHECK(SchemaManager(storage).getCurrentVersion() == 20);
 }
 
 TEST_CASE("StorageService preserves legacy quota rows during the version 15 precision upgrade",
@@ -868,8 +933,10 @@ TEST_CASE("StorageService preserves legacy quota rows during the version 15 prec
     TempTestDatabase tempDb;
     StorageService storage;
     REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
     REQUIRE(storage
                 .execute(R"sql(
+        ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;
         DELETE FROM schema_version WHERE version > 14;
         ALTER TABLE quota_snapshots DROP COLUMN snapshot_subsecond_ns;
         INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
@@ -884,7 +951,7 @@ TEST_CASE("StorageService preserves legacy quota rows during the version 15 prec
     storage.close();
 
     REQUIRE(storage.init(tempDb.path()));
-    CHECK(SchemaManager(storage).getCurrentVersion() == 15);
+    CHECK(SchemaManager(storage).getCurrentVersion() == 20);
     const auto rows = storage.execute(
         "SELECT id, snapshot_time_utc, remaining_value, snapshot_subsecond_ns IS NULL FROM quota_snapshots;");
     REQUIRE(rows.success());
@@ -893,4 +960,207 @@ TEST_CASE("StorageService preserves legacy quota rows during the version 15 prec
     CHECK(rows.getString(0, 1) == "2026-01-01T00:00:00Z");
     CHECK(rows.getInt(0, 2) == 75);
     CHECK(rows.getBool(0, 3));
+}
+
+TEST_CASE("StorageService repairs duplicate Claude daily activity from a version 15 database",
+          "[schema][migration][claude]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
+    REQUIRE(storage
+                .execute(R"sql(
+        DROP INDEX idx_activity_events_claude_cache_day;
+        ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;
+        DELETE FROM schema_version WHERE version > 15;
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
+        SELECT 81, id, 'fixture-claude', 'Claude', 'user', 'fixture' FROM providers WHERE provider_key = 'claude_code';
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
+        SELECT 82, id, 'fixture-other', 'Other', 'user', 'fixture' FROM providers WHERE provider_key = 'claude_code';
+        WITH fixture(id, account_id, started_at, revision, source_type, reference) AS (VALUES
+            (1, 81, '2025-01-02', '2025-01-02', 'local',    'scope:fnv1a64:1370ad0dcd1472bd'),
+            (2, 81, '2025-01-02', '2025-01-03', 'local',    'scope:fnv1a64:1370ad0dcd1472bd'),
+            (3, 81, '2025-01-03', '2025-01-03', 'local',    'scope:fnv1a64:1370ad0dcd1472bd'),
+            (4, 81, '2025-01-02', '2025-01-02', 'local',    'scope:fnv1a64:0000000000000000'),
+            (5, 82, '2025-01-02', '2025-01-02', 'local',    'scope:fnv1a64:1370ad0dcd1472bd'),
+            (6, 81, '2025-01-02', '2025-01-02', 'imported', 'scope:fnv1a64:1370ad0dcd1472bd')
+        )
+        INSERT INTO activity_events
+            (id, provider_id, account_id, provider_surface, activity_kind, started_at_utc,
+             duration_seconds, source_type, source_run_id, surface_key, raw_reference)
+        SELECT fixture.id, accounts.provider_id, account_id, 'claude_code_local_stats', 'session_active',
+               started_at || 'T00:00:00Z', 0, source_type, 'claude_code_local_v1|' || revision, 'stats-cache', reference
+        FROM fixture JOIN accounts ON accounts.id = fixture.account_id;
+    )sql")
+                .success());
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    const auto stored =
+        storage.execute("SELECT id, source_run_id, raw_reference, provider_id FROM activity_events ORDER BY id;");
+    REQUIRE(stored.success());
+    REQUIRE(stored.rowCount() == 5);
+    CHECK(stored.getInt64(0, 0) == 1);
+    CHECK(stored.getString(0, 1) == "claude_code_local_v1|2025-01-02");
+    CHECK(stored.getString(0, 2) == "scope:fnv1a64:1370ad0dcd1472bd");
+    CHECK(stored.getInt64(1, 0) == 3);
+    CHECK(stored.getInt64(2, 0) == 4);
+    CHECK(stored.getInt64(3, 0) == 5);
+    CHECK(stored.getInt64(4, 0) == 6);
+
+    constexpr std::time_t firstDay = 1735776000; // 2025-01-02T00:00:00Z
+    const auto events = storage.getActivityEvents(stored.getInt(0, 3), 81, firstDay, firstDay);
+    REQUIRE(events.size() == 3);
+    auto replay = events.front();
+    REQUIRE(replay.id == 1);
+    replay.activity.sourceRunId = "claude_code_local_v1|2025-01-04";
+    long long insertedId = 0;
+    REQUIRE(storage.insertActivityEvent(replay, &insertedId));
+    CHECK(insertedId == 0);
+    CHECK(storage.getActivityEvents(replay.providerId, 81, firstDay, firstDay).size() == events.size());
+}
+
+TEST_CASE("Opening a version 15 database keeps the final activity of each saved Kimi task",
+          "[schema][migration][kimi]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
+    REQUIRE(storage
+                .execute(R"sql(
+        DROP INDEX IF EXISTS idx_kimi_task_activity_identity;
+        DROP INDEX IF EXISTS idx_activity_events_claude_cache_day;
+        ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;
+        DELETE FROM schema_version WHERE version > 15;
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
+        SELECT 86, id, 'local-observation:kimi_local_runtime', 'Kimi local runtime', 'local_observation',
+               'kimi_local_runtime'
+        FROM providers WHERE provider_key = 'kimi';
+
+        WITH task_snapshots (id, surface, status, end_time, duration, reference) AS (
+            VALUES (10, 'kimi_local_runtime', 'running',   '2026-04-20T10:01:10Z', 10, 'kimi_local_runtime:one/task'),
+                   (11, 'kimi_local_runtime', 'completed', '2026-04-20T10:02:30Z', 90, 'kimi_local_runtime:one/task'),
+                   (12, 'kimi_local_runtime', 'running',   '2026-04-20T10:03:00Z', 120, 'kimi_local_runtime:one/task'),
+                   (13, 'kimi_local_runtime', 'completed', '2026-04-20T10:02:00Z', 60, 'kimi_local_runtime:two/task'),
+                   (14, 'different_surface',  'running',   '2026-04-20T10:01:10Z', 10, 'kimi_local_runtime:one/task'),
+                   (15, 'kimi_local_runtime', 'awaiting_approval', '2026-04-20T10:04:00Z', 180, 'kimi_local_runtime:one/task'),
+                   (16, 'kimi_local_runtime', 'starting', '2026-04-20T10:01:00Z', 0, 'kimi_local_runtime:three/task'),
+                   (17, 'kimi_local_runtime', 'running',  '2026-04-20T10:01:20Z', 20, 'kimi_local_runtime:three/task')
+        )
+        INSERT INTO activity_events
+            (id, provider_id, account_id, provider_surface, activity_kind, surface_key, started_at_utc,
+             ended_at_utc, duration_seconds, raw_reference)
+        SELECT snapshots.id, accounts.provider_id, accounts.id, snapshots.surface, 'session_active', snapshots.status,
+               '2026-04-20T10:01:00Z', snapshots.end_time, snapshots.duration, snapshots.reference
+        FROM task_snapshots snapshots CROSS JOIN accounts WHERE accounts.id = 86;
+    )sql")
+                .success());
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    const auto rows = storage.execute("SELECT id, surface_key, duration_seconds FROM activity_events ORDER BY id;");
+    REQUIRE(rows.success());
+    REQUIRE(rows.rowCount() == 4);
+    CHECK(rows.getInt(0, 0) == 11);
+    CHECK(rows.getString(0, 1) == "completed");
+    CHECK(rows.getInt(0, 2) == 90);
+    CHECK(rows.getInt(1, 0) == 13);
+    CHECK(rows.getInt(2, 0) == 14);
+    CHECK(rows.getInt(3, 0) == 17);
+    CHECK(rows.getString(3, 1) == "running");
+    CHECK(SchemaManager(storage).getCurrentVersion() == 20);
+}
+
+TEST_CASE("Opening a version 19 database repairs only incomplete Cursor quota history", "[schema][migration][cursor]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    REQUIRE(storage
+                .execute(R"sql(
+        DELETE FROM schema_version WHERE version > 19;
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
+        SELECT 90, id, 'cursor.runtime_status', 'Cursor', 'runtime', 'cursor.runtime_status'
+        FROM providers WHERE provider_key = 'cursor';
+        INSERT INTO plans (id, account_id, plan_key, plan_type, display_name, quota_window, limit_value)
+        VALUES (91, 90, 'cursor_subscription_api:monthly', 'quota_snapshot', 'Subscription', 'monthly', 100),
+               (92, 90, 'cursor_subscription_api:subscription', 'quota_snapshot', 'Subscription', 'subscription', 100);
+        INSERT INTO quota_snapshots (provider_id, account_id, plan_id, snapshot_time_utc, window_start_utc,
+                                     window_end_utc, used_value, limit_value, remaining_value, confidence_tier,
+                                     quota_dimension)
+        SELECT a.provider_id, a.id, sample.plan_id, sample.captured, sample.start, sample.end,
+               100 - sample.remaining, 100, sample.remaining, 'high', 'percent'
+        FROM accounts a
+        CROSS JOIN (
+            SELECT 91 AS plan_id, '2026-04-02T01:00:00Z' AS captured, '' AS start,
+                   '2026-04-20T00:00:00Z' AS end, 78 AS remaining
+            UNION ALL SELECT 91, '2026-04-02T02:00:00Z', '2026-04-10T00:00:00Z', '2026-04-08T00:00:00Z', 76
+            UNION ALL SELECT 91, '2026-04-02T03:00:00Z', '2026-04-01T00:00:00Z', '2026-05-01T00:00:00Z', 73
+            UNION ALL SELECT 92, '2026-04-02T04:00:00Z', '', '', 70
+            UNION ALL SELECT 91, '2026-04-03T04:00:00Z', '2026-04-01T00:00:00Z', '2026-05-01T00:00:00Z', 66
+        ) sample WHERE a.id = 90;
+    )sql")
+                .success());
+    const auto account = storage.execute("SELECT provider_id FROM accounts WHERE id = 90;");
+    REQUIRE(account.rowCount() == 1);
+    REQUIRE(storage.rebuildQuotaSnapshotRollups(account.getInt(0, 0), 90, 1775088000, 1775174400));
+    const auto oldRollups = storage.execute("SELECT COUNT(*) FROM quota_snapshot_rollups_daily;");
+    REQUIRE(oldRollups.getInt(0, 0) == 3);
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    const auto rows = storage.execute(
+        "SELECT plan_id, remaining_value, window_end_utc FROM quota_snapshots ORDER BY snapshot_time_utc;");
+    REQUIRE(rows.success());
+    REQUIRE(rows.rowCount() == 5);
+    CHECK(rows.getInt(0, 0) == 92);
+    CHECK(rows.getInt(0, 1) == 78);
+    CHECK(rows.getString(0, 2) == "2026-04-20T00:00:00Z");
+    CHECK(rows.getInt(1, 0) == 92);
+    CHECK(rows.getInt(2, 0) == 91);
+    CHECK(rows.getInt(3, 0) == 92);
+    CHECK(rows.getInt(4, 0) == 91);
+    const auto rollups =
+        storage.execute("SELECT plan_bucket_id, rollup_period_start_utc FROM quota_snapshot_rollups_daily;");
+    REQUIRE(rollups.success());
+    REQUIRE(rollups.rowCount() == 1);
+    CHECK(rollups.getInt(0, 0) == 91);
+    CHECK(rollups.getString(0, 1) == "2026-04-03T00:00:00Z");
+}
+
+TEST_CASE("Opening a version 17 database preserves legacy quota rollup counts",
+          "[schema][migration][quota_rollup_boundary]") {
+    requireSqlite();
+    TempTestDatabase tempDb;
+    StorageService storage;
+    REQUIRE(storage.init(tempDb.path()));
+    removeCredentialValidationColumns(storage);
+    REQUIRE(storage
+                .execute(R"sql(
+        ALTER TABLE quota_snapshot_rollups_daily DROP COLUMN observed_billing_windows;
+        DELETE FROM schema_version WHERE version > 17;
+        INSERT INTO accounts (id, provider_id, account_key, display_name, scope_type, scope_identifier)
+        SELECT 89, id, 'openai.runtime_status', 'OpenAI', 'runtime', 'legacy-rollup'
+        FROM providers WHERE provider_key = 'openai';
+        INSERT INTO quota_snapshot_rollups_daily
+            (provider_id, account_id, rollup_period_start_utc, sample_count, latest_snapshot_time_utc,
+             latest_window_start_utc, latest_window_end_utc, latest_limit_value, reset_count)
+        SELECT provider_id, id, '2026-04-01T00:00:00Z', 3, '2026-04-01T23:50:00Z',
+               '2026-04-01T12:00:00Z', '2026-04-02T12:00:00Z', 100, 1
+        FROM accounts WHERE id = 89;
+    )sql")
+                .success());
+    storage.close();
+
+    REQUIRE(storage.init(tempDb.path()));
+    CHECK(SchemaManager(storage).getCurrentVersion() == 20);
+    const auto rows = storage.execute("SELECT sample_count, reset_count, observed_billing_windows "
+                                      "FROM quota_snapshot_rollups_daily WHERE account_id = 89;");
+    REQUIRE(rows.success());
+    REQUIRE(rows.rowCount() == 1);
+    CHECK(rows.getInt(0, 0) == 3);
+    CHECK(rows.getInt(0, 1) == 1);
+    CHECK(rows.isNull(0, 2));
 }

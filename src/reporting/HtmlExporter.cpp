@@ -170,7 +170,7 @@ struct HtmlExporter::Impl {
         if (metadata.isSyncing) return "badge-catching-up";
         if (metadata.isOffline) return "badge-offline";
         if (metadata.isStale) return "badge-stale";
-        return "badge-fresh";
+        return metadata.runtimeState == RuntimeState::Unknown ? "badge-unknown" : "badge-fresh";
     }
 };
 

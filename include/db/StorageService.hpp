@@ -99,6 +99,8 @@ struct PersistedCredentialProfile {
     std::time_t lastValidatedAt = 0;
     std::string createdAtUtc;
     std::string updatedAtUtc;
+    std::string validationState = "unknown";
+    std::string lastValidationError;
 };
 
 enum class UsageRollupResolution {
@@ -241,6 +243,7 @@ struct PersistedQuotaSnapshotRollup {
     std::optional<long long> lowWaterRemainingValue;
     std::optional<long long> lowWaterLimitValue;
     int resetCount = 0;
+    std::optional<std::vector<std::pair<std::time_t, std::time_t>>> observedBillingWindows;
     int reconciledSampleCount = 0;
     std::string latestConfidenceTier;
     std::string createdAtUtc;
@@ -346,6 +349,7 @@ public:
     std::optional<PersistedRuntimeState> getRuntimeState();
 
     bool upsertGapMarker(const PersistedGapMarker& marker, long long* rowId = nullptr);
+    bool persistRecoveryCompletion(const std::vector<PersistedGapMarker>& markers, const PersistedRuntimeState& state);
     std::vector<PersistedGapMarker> getGapMarkers(
         int providerId,
         int accountId,
@@ -383,11 +387,9 @@ public:
         int accountId,
         std::time_t periodStartFrom,
         std::time_t periodStartTo);
-    std::vector<PersistedQuotaSnapshot> getQuotaSnapshots(
-        int providerId,
-        int accountId,
-        std::time_t snapshotTimeFrom,
-        std::time_t snapshotTimeTo);
+    std::vector<PersistedQuotaSnapshot>
+    getQuotaSnapshots(int providerId, int accountId, std::time_t snapshotTimeFrom, std::time_t snapshotTimeTo,
+                      std::optional<std::pair<std::time_t, std::time_t>> skipReplayableRollupDays = std::nullopt);
     bool rebuildQuotaSnapshotRollups(
         int providerId,
         int accountId,
