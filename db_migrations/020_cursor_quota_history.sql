@@ -1,4 +1,5 @@
 -- Before Cursor required complete cycle bounds, monthly was also the fallback.
+-- Use strftime for system SQLite 3.34, which does not have unixepoch.
 CREATE TEMP TABLE cursor_quota_history_repair AS
 SELECT qs.id AS snapshot_id, qs.provider_id, qs.account_id, qs.plan_id,
        substr(qs.snapshot_time_utc, 1, 10) || 'T00:00:00Z' AS rollup_day
@@ -8,8 +9,9 @@ JOIN plans pl ON pl.id = qs.plan_id AND pl.account_id = qs.account_id
 WHERE p.provider_key = 'cursor'
   AND pl.plan_key = 'cursor_subscription_api:monthly'
   AND qs.quota_dimension = 'percent'
-  AND (COALESCE(unixepoch(qs.window_start_utc), 0) <= 0
-       OR COALESCE(unixepoch(qs.window_end_utc), 0) <= unixepoch(qs.window_start_utc));
+  AND (COALESCE(CAST(strftime('%s', qs.window_start_utc) AS INTEGER), 0) <= 0
+       OR COALESCE(CAST(strftime('%s', qs.window_end_utc) AS INTEGER), 0)
+          <= CAST(strftime('%s', qs.window_start_utc) AS INTEGER));
 
 INSERT INTO plans (account_id, plan_key, plan_type, display_name, quota_window, limit_value)
 SELECT DISTINCT pl.account_id, 'cursor_subscription_api:subscription', pl.plan_type,

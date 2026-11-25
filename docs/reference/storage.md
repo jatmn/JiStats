@@ -41,4 +41,4 @@ Version 18 gives daily quota rollups a sequence of observed billing-window bound
 
 Version 19 stores the last completed MiniMax credential validation outcome and a safe diagnostic with the existing check time. Older profile rows keep their check time and have an unknown validation outcome.
 
-Use `020` for the next numbered SQL migration in [`db_migrations/`](../../db_migrations/). The loader discovers later files relative to the working directory. Advance `schema_version` in the same transaction as the schema change. When a release includes a later migration, verify its discovery during actual [packaged startup and sign-in](../validation/desktop.md#dashboard-and-background-checks).
+Use `021` for the next numbered SQL migration in [`db_migrations/`](../../db_migrations/). The loader discovers later files relative to the working directory. Advance `schema_version` in the same transaction as the schema change. When a release includes a later migration, verify its discovery during actual [packaged startup and sign-in](../validation/desktop.md#dashboard-and-background-checks).
