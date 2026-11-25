@@ -1211,7 +1211,7 @@ TEST_CASE("AppController shows the dashboard while a version 12 WAL reader holds
     CHECK(stage == std::future_status::timeout);
     CHECK_FALSE(app.getDashboardViewModelForTesting().startupPending);
     REQUIRE(storage.init(dbPath.path()));
-    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 19);
+    CHECK(storage.execute("SELECT MAX(version) FROM schema_version;").getInt(0, 0) == 20);
 #else
     requireSqlite();
 #endif
@@ -4473,6 +4473,102 @@ TEST_CASE("AppController preserves the latest same-second Codex balance across r
     CHECK(openai->quotas.front().remaining == expectedLatest);
     releasePublication.set_value();
     restarted.shutdown();
+}
+
+TEST_CASE("Cursor quota history keeps one allowance across a database upgrade",
+          "[app][runtime][quota_history][cursor]") {
+    requireSqlite();
+    TempTestDatabase dbPath;
+    const std::time_t now = std::time(nullptr);
+    const std::time_t legacyTime = now - 86400;
+    const std::time_t reset = now + 86400;
+    seedStartupPreferences(dbPath.path(), false, false);
+    seedPersistedQuotaSnapshot(dbPath.path(), "cursor", "cursor.runtime_status", "Cursor",
+                               "cursor_subscription_api:monthly", "Subscription", "monthly", legacyTime, 22, 100, 78);
+    {
+        StorageService storage;
+        REQUIRE(storage.init(dbPath.path()));
+        REQUIRE(SettingsService(storage).setBool("runtime.cursor_subscription_tracking_enabled", true));
+        REQUIRE(storage
+                    .execute("UPDATE quota_snapshots SET quota_dimension = 'percent', window_start_utc = '', "
+                             "window_end_utc = ?;",
+                             {formatTimeUtcIsoForTest(reset)})
+                    .success());
+        REQUIRE(
+            storage
+                .execute("INSERT INTO quota_snapshots (provider_id, account_id, plan_id, snapshot_time_utc, "
+                         "window_start_utc, "
+                         "window_end_utc, used_value, limit_value, remaining_value, confidence_tier, quota_dimension) "
+                         "SELECT provider_id, account_id, plan_id, ?, ?, window_end_utc, 40, 100, 60, confidence_tier, "
+                         "quota_dimension FROM quota_snapshots;",
+                         {formatTimeUtcIsoForTest(legacyTime - 1), formatTimeUtcIsoForTest(reset - 30 * 86400)})
+                .success());
+        const int providerId = requireProviderId(storage, "cursor");
+        const int accountId = requireAccountId(storage, providerId, "cursor.runtime_status");
+        REQUIRE(storage.rebuildQuotaSnapshotRollups(providerId, accountId, legacyTime - 1, legacyTime));
+        REQUIRE(storage.execute("DELETE FROM schema_version WHERE version > 19;").success());
+    }
+
+    auto fresh = SubscriptionQuotaAdapter::parseQuotaResponse(
+        SubscriptionProvider::Cursor, HttpResponse{true, 200, R"({"planUsage":{"totalPercentUsed":30}})", {}}, now);
+    REQUIRE(fresh.success);
+    std::promise<void> releaseQuota;
+    auto provider = std::make_shared<ControlledQuotaProviderAdapter>("cursor", "Cursor", std::move(fresh),
+                                                                     releaseQuota.get_future().share());
+    auto providerManager = std::make_shared<ProviderManager>();
+    providerManager->addProvider(provider);
+    AppController app;
+    app.setHeadlessForTesting(true);
+    app.setDatabasePathForTesting(dbPath.path());
+    app.setProviderManagerForTesting(providerManager);
+    REQUIRE(app.init());
+    const auto cached = app.getDashboardViewModelForTesting();
+    const int completedFetches = provider->getCompletedQuotaFetchCount();
+    releaseQuota.set_value();
+    CHECK(completedFetches == 0);
+    const auto* cursor = findProviderStatus(cached, "cursor");
+    REQUIRE(cursor != nullptr);
+    REQUIRE(cursor->quotas.size() == 1);
+    CHECK(cursor->quotas.front().windowType == "subscription");
+    CHECK(cursor->quotas.front().remaining == 78);
+    CHECK(cursor->quotas.front().windowResetAt == reset);
+    REQUIRE(waitForCondition(
+        [&app]() {
+            const auto model = app.getDashboardViewModelForTesting();
+            const auto* live = findProviderStatus(model, "cursor");
+            return live && !live->quotas.empty() && live->quotas.front().remaining == 70;
+        },
+        std::chrono::seconds(5)));
+    const auto dashboard = app.getDashboardViewModelForTesting();
+    app.shutdown();
+
+    StorageService storage;
+    REQUIRE(storage.init(dbPath.path()));
+    auto scope = dashboard.preferences;
+    scope.analysisSelectedProviderId = "cursor";
+    scope.analysisSelectedAccountId = "cursor.runtime_status";
+    AnalysisQueryEngine engine(storage);
+    scope.analysisCustomRangeStartUtc = now - 30 * 86400;
+    scope.analysisCustomRangeEndUtc = now;
+    for (const auto preset : {AnalysisDateRangePreset::Last7Days, AnalysisDateRangePreset::Custom}) {
+        CAPTURE(static_cast<int>(preset));
+        scope.analysisDateRangePreset = preset;
+        const auto history = engine.buildViewModel(dashboard, scope, now);
+        REQUIRE(history.quotaTrendSeries.size() == 2);
+        const auto neutral = std::find_if(history.quotaTrendSeries.begin(), history.quotaTrendSeries.end(),
+                                          [](const auto& series) { return series.windowLabel == "subscription"; });
+        REQUIRE(neutral != history.quotaTrendSeries.end());
+        REQUIRE(neutral->points.size() == 2);
+        CHECK(neutral->points[0].snapshotTime == legacyTime);
+        CHECK(neutral->points[0].remainingValue == 78);
+        CHECK(neutral->points[1].snapshotTime == now);
+        CHECK(neutral->points[1].remainingValue == 70);
+        const auto monthly = std::find_if(history.quotaTrendSeries.begin(), history.quotaTrendSeries.end(),
+                                          [](const auto& series) { return series.windowLabel == "30d"; });
+        REQUIRE(monthly != history.quotaTrendSeries.end());
+        REQUIRE(monthly->points.size() == 1);
+        CHECK(monthly->points.front().remainingValue == 60);
+    }
 }
 
 TEST_CASE("AppController keeps Cursor Auto ahead of API in cached quota", "[app][runtime][quota_history]") {

@@ -392,6 +392,34 @@ TEST_CASE("Subscription quota reads provider percentages and skips unsupported b
         CHECK_FALSE(outage.unavailable);
         CHECK(outage.error.find("503") != std::string::npos);
     }
+    SECTION("Cursor does not assign a cadence without a complete billing cycle") {
+        const auto withoutDates =
+            subscriptionFixture(SubscriptionProvider::Cursor, R"({"planUsage":{"totalPercentUsed":22}})", now);
+        REQUIRE(withoutDates.success);
+        CHECK(withoutDates.remaining == 78);
+        CHECK(withoutDates.windowType == "subscription");
+        CHECK(withoutDates.windowStart == 0);
+        CHECK(withoutDates.windowEnd == 0);
+
+        const auto endOnly =
+            subscriptionFixture(SubscriptionProvider::Cursor,
+                                R"({"billingCycleEnd":1779278400000,"planUsage":{"totalPercentUsed":22}})", now);
+        REQUIRE(endOnly.success);
+        CHECK(endOnly.remaining == 78);
+        CHECK(endOnly.windowType == "subscription");
+        CHECK(endOnly.windowEnd == 1779278400);
+    }
+    SECTION("Cursor recognizes a complete weekly billing cycle") {
+        const auto quota = subscriptionFixture(SubscriptionProvider::Cursor, R"json({
+            "billingCycleStart": "1776686400000", "billingCycleEnd": 1777291200000,
+            "planUsage": {"totalPercentUsed": 22}
+        })json",
+                                               now);
+        REQUIRE(quota.success);
+        CHECK(quota.remaining == 78);
+        CHECK(quota.windowType == "weekly");
+        CHECK(quota.windowEnd - quota.windowStart == 7 * 86400);
+    }
     SECTION("Cursor uses the provider's percentages rather than on-demand spend") {
         const auto quota = subscriptionFixture(SubscriptionProvider::Cursor, R"json({
             "billingCycleStart": "1776686400000", "billingCycleEnd": 1779278400000,

@@ -28,6 +28,9 @@ inline constexpr char kQuotaWindowObservationsSql[] =
 inline constexpr char kCredentialValidationSql[] =
     R"jistats_sql(@JISTATS_CREDENTIAL_VALIDATION_SQL@)jistats_sql";
 
+inline constexpr char kCursorQuotaHistorySql[] =
+    R"jistats_sql(@JISTATS_CURSOR_QUOTA_HISTORY_SQL@)jistats_sql";
+
 // Use the same DDL for fresh and historical version 12 databases.
 inline constexpr std::string_view kBaselineSchema(kBaselineSchemaSql);
 inline constexpr auto kRecoveryAndExportStart = kBaselineSchema.find("-- Recovery and export metadata");
